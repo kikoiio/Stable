@@ -1,0 +1,184 @@
+package appconfig
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+)
+
+type ModelConfig struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	BaseURL  string `json:"base_url,omitempty"`
+	APIKey   string `json:"api_key,omitempty"`
+}
+
+type AppConfig struct {
+	Model        ModelConfig `json:"model"`
+	StateDir     string      `json:"state_dir,omitempty"`
+	TemporalPort int         `json:"temporal_port,omitempty"`
+}
+
+func ConfigPath() (string, error) {
+	if p := os.Getenv("PROACTIVE_CONFIG"); p != "" {
+		return filepath.Abs(p)
+	}
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		base = filepath.Join(home, ".config")
+	}
+	return filepath.Join(base, "proactive-agent", "config.json"), nil
+}
+
+func StateDir() (string, error) {
+	if p := os.Getenv("PROACTIVE_STATE_DIR"); p != "" {
+		return filepath.Abs(p)
+	}
+	base := os.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		base = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(base, "proactive-agent"), nil
+}
+
+func Load() (AppConfig, error) {
+	var c AppConfig
+	p, err := ConfigPath()
+	if err != nil {
+		return c, err
+	}
+	if st, err := os.Stat(p); err == nil {
+		if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
+			return c, errors.New("config file must be private (chmod 600)")
+		}
+		if st.Sys() != nil && !ownedByCurrentUser(st) {
+			return c, errors.New("config file must be owned by current user")
+		}
+		dir, err := os.Stat(filepath.Dir(p))
+		if err != nil {
+			return c, err
+		}
+		if dir.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(dir) {
+			return c, errors.New("config directory must be private and owned by current user (chmod 700)")
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return c, err
+		}
+		if err := json.Unmarshal(data, &c); err != nil {
+			return c, errors.New("invalid config JSON")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return c, err
+	}
+	if v := os.Getenv("PROACTIVE_PROVIDER"); v != "" {
+		if v != c.Model.Provider {
+			c.Model.APIKey = ""
+		}
+		c.Model.Provider = v
+	}
+	if v := os.Getenv("PROACTIVE_MODEL"); v != "" {
+		c.Model.Model = v
+	}
+	if v := os.Getenv("PROACTIVE_BASE_URL"); v != "" {
+		c.Model.BaseURL = v
+	}
+	if v := os.Getenv("PROACTIVE_TEMPORAL_PORT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return c, errors.New("invalid Temporal port")
+		}
+		c.TemporalPort = n
+	}
+	if c.TemporalPort == 0 {
+		c.TemporalPort = 7233
+	}
+	if c.StateDir == "" {
+		c.StateDir, err = StateDir()
+		if err != nil {
+			return c, err
+		}
+	}
+	if v := os.Getenv("PROACTIVE_STATE_DIR"); v != "" {
+		c.StateDir, err = filepath.Abs(v)
+		if err != nil {
+			return c, err
+		}
+	}
+	keyEnv := map[string]string{"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "gemini": "GEMINI_API_KEY", "openai-compatible": "PROACTIVE_API_KEY"}
+	if v := os.Getenv(keyEnv[c.Model.Provider]); v != "" {
+		c.Model.APIKey = v
+	}
+	return c, nil
+}
+
+func (c AppConfig) Validate(requireKey bool) error {
+	switch c.Model.Provider {
+	case "openai", "anthropic", "gemini", "openai-compatible":
+	default:
+		return errors.New("provider must be openai, anthropic, gemini, or openai-compatible")
+	}
+	if strings.TrimSpace(c.Model.Model) == "" {
+		return errors.New("model ID required")
+	}
+	if c.TemporalPort < 1 || c.TemporalPort > 65535 {
+		return errors.New("Temporal port out of range")
+	}
+	if c.Model.Provider == "openai-compatible" {
+		if err := ValidateBaseURL(c.Model.BaseURL); err != nil {
+			return err
+		}
+	} else if c.Model.BaseURL != "" {
+		return errors.New("base URL is only supported for openai-compatible provider")
+	}
+	if requireKey && c.Model.APIKey == "" {
+		return fmt.Errorf("API key missing for %s", c.Model.Provider)
+	}
+	return nil
+}
+
+func ValidateBaseURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u == nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("invalid compatible base URL")
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme != "http" {
+		return errors.New("compatible endpoint must use HTTPS or loopback HTTP")
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return errors.New("compatible endpoint must use HTTPS or loopback HTTP")
+}
+
+func (c AppConfig) Summary() string {
+	host := "official"
+	if c.Model.Provider == "openai-compatible" {
+		if u, err := url.Parse(c.Model.BaseURL); err == nil {
+			host = u.Host
+		}
+	}
+	return fmt.Sprintf("provider=%s model=%s host=%s key_configured=%t", c.Model.Provider, c.Model.Model, host, c.Model.APIKey != "")
+}

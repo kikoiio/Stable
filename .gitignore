@@ -1,6 +1,8 @@
 run/
 /agentctl
 /agentworker
+/dist/
+/proactive-agent
 *.kicad_prl
 *.lck
 __pycache__/

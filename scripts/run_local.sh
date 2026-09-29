@@ -32,7 +32,9 @@ if [[ "$ready" != 1 ]]; then
   exit 1
 fi
 
-"$run_root/bin/agentworker" --db "$run_root/state.db" --run-root "$run_root" --temporal "$temporal_address" --project-root "$project_root" >"$run_root/worker.log" 2>&1 &
+worker_args=(--db "$run_root/state.db" --run-root "$run_root" --temporal "$temporal_address" --project-root "$project_root")
+if [[ "${PROACTIVE_APP_CONFIG:-}" == 1 ]]; then worker_args+=(--app-config); fi
+"$run_root/bin/agentworker" "${worker_args[@]}" >"$run_root/worker.log" 2>&1 &
 worker_pid=$!
 sleep 1
 if ! kill -0 "$worker_pid" 2>/dev/null; then cat "$run_root/worker.log" >&2; exit 1; fi

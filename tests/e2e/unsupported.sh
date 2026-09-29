@@ -23,20 +23,23 @@ PY
 initial_digest=$(sha256sum "$goal_dir/sensor.kicad_sch" | cut -d' ' -f1)
 fixture_digest=$(sha256sum "$project_root/fixtures/sensor_board/sensor.kicad_sch" | cut -d' ' -f1)
 
+mock_pid=
+if ! command -v codex >/dev/null 2>&1; then source "$project_root/tests/e2e/mock_model_env.sh"; fi
 PROACTIVE_TEMPORAL_PORT="$port" bash "$project_root/scripts/run_local.sh" "$run_root" >"$run_root/runner.log" 2>&1 &
 runner_pid=$!
 cleanup() {
   kill "$runner_pid" 2>/dev/null || true
   wait "$runner_pid" 2>/dev/null || true
+  if [[ -n "$mock_pid" ]]; then kill "$mock_pid" 2>/dev/null || true; wait "$mock_pid" 2>/dev/null || true; fi
   python3 "$project_root/tests/e2e/stop_sessions.py" "$run_root" 2>/dev/null || true
 }
 trap cleanup EXIT
 for _ in $(seq 1 120); do
-  if [[ -x "$run_root/bin/agentctl" ]] && rg -q 'agent worker ready' "$run_root/worker.log" 2>/dev/null; then break; fi
+  if [[ -x "$run_root/bin/agentctl" ]] && grep -q 'agent worker ready' "$run_root/worker.log" 2>/dev/null; then break; fi
   if ! kill -0 "$runner_pid" 2>/dev/null; then cat "$run_root/runner.log" >&2; exit 1; fi
   sleep 0.5
 done
-[[ -x "$run_root/bin/agentctl" ]] && rg -q 'agent worker ready' "$run_root/worker.log"
+[[ -x "$run_root/bin/agentctl" ]] && grep -q 'agent worker ready' "$run_root/worker.log"
 
 "$run_root/bin/agentctl" start --run-root "$run_root" --temporal "localhost:$port" \
   --project-root "$project_root" --goal "$goal_id" --interval 2 >/dev/null
@@ -57,7 +60,7 @@ assert snapshot['goal']['status'] == 'needs_human', snapshot['goal']
 assert not status['verified'] and status['unverified']
 assert snapshot['decisions'][-1]['proposal']['kind'] == 'ask_human'
 assert len(snapshot['goal']['reason']) > 20 and snapshot['goal']['reason'] == snapshot['decisions'][-1]['proposal']['reason']
-assert not any(a['status'] == 'applied' and a['desired_postcondition'] == {'sensor.connection_present': True} for a in snapshot['actions'])
+assert not any(a['status'] == 'applied' and a['desired_postcondition'] == {'sensor.connection_present': True} for a in (snapshot['actions'] or []))
 design = root/'delivery'/'sensor.kicad_sch'
 assert hashlib.sha256(design.read_bytes()).hexdigest() == initial == status['actual_artifact_id']
 assert hashlib.sha256((project/'fixtures/sensor_board/sensor.kicad_sch').read_bytes()).hexdigest() == fixture

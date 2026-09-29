@@ -220,7 +220,32 @@ func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (
 	}}
 	var proposal ProposedAction
 	var modelRunID string
-	if detailed, ok := a.Decider.(interface {
+	var modelCallID string
+	if modeled, ok := a.Decider.(AuditedDecisionMaker); ok {
+		audit, ok := a.State.(ModelCallStore)
+		if !ok {
+			return finish(false, errors.New("model call audit store unavailable"))
+		}
+		modelCallID = uniqueID("model-call")
+		d := modeled.Descriptor()
+		if err = audit.StartModelCall(ctx, ModelCall{ID: modelCallID, GoalID: goalID, ObservationID: observed.ID, Provider: d.Provider, Model: d.Model, Host: d.Host}); err != nil {
+			return finish(false, err)
+		}
+		var output ModelDecisionOutput
+		output, err = modeled.DecideModel(ctx, ctxForModel)
+		status, kind := "succeeded", ""
+		if err != nil {
+			status = "failed"
+			kind = "model_error"
+			if classified, ok := err.(interface{ ErrorKind() string }); ok {
+				kind = classified.ErrorKind()
+			}
+		}
+		if finishErr := audit.FinishModelCall(ctx, modelCallID, status, output.ProviderRequestID, kind); finishErr != nil {
+			return finish(false, finishErr)
+		}
+		proposal = output.Proposal
+	} else if detailed, ok := a.Decider.(interface {
 		DecideDetailed(context.Context, DecisionContext) (ProposedAction, string, error)
 	}); ok {
 		proposal, modelRunID, err = detailed.DecideDetailed(ctx, ctxForModel)
@@ -231,7 +256,7 @@ func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (
 		_ = a.setStatus(ctx, goalID, GoalNeedsHuman, "model unavailable: "+err.Error())
 		return finish(false, nil)
 	}
-	decision := Decision{ID: uniqueID("decision"), AgentID: snap.Agent.ID, ObservationID: observed.ID, Proposal: proposal, ModelRunID: modelRunID, CreatedAt: time.Now().UTC()}
+	decision := Decision{ID: uniqueID("decision"), AgentID: snap.Agent.ID, ObservationID: observed.ID, Proposal: proposal, ModelRunID: modelRunID, ModelCallID: modelCallID, CreatedAt: time.Now().UTC()}
 	if err = a.State.RecordDecision(ctx, decision); err != nil {
 		return finish(false, err)
 	}

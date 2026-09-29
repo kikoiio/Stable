@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"proactive-agent/internal/artifact"
@@ -135,5 +136,54 @@ func TestEvaluateRejectsUnauthorizedDecision(t *testing.T) {
 	snap, err := s.GetGoalSnapshot(ctx, "g")
 	if err != nil || snap.Goal.Status != core.GoalNeedsHuman || len(snap.Decisions) != 1 {
 		t.Fatalf("snapshot %+v %v", snap, err)
+	}
+}
+
+type kindError string
+
+func (e kindError) Error() string     { return "model request failed: " + string(e) }
+func (e kindError) ErrorKind() string { return string(e) }
+
+type failingAuditedDecider struct{ err error }
+
+func (d failingAuditedDecider) Decide(context.Context, core.DecisionContext) (core.ProposedAction, error) {
+	return core.ProposedAction{}, d.err
+}
+func (d failingAuditedDecider) Descriptor() core.ModelDescriptor {
+	return core.ModelDescriptor{Provider: "openai-compatible", Model: "mock", Host: "127.0.0.1:9"}
+}
+func (d failingAuditedDecider) DecideModel(context.Context, core.DecisionContext) (core.ModelDecisionOutput, error) {
+	return core.ModelDecisionOutput{}, d.err
+}
+
+func TestEvaluateRecordsModelFailureWithoutAction(t *testing.T) {
+	ctx := context.Background()
+	a, s, _ := fixtureActivities(t)
+	a.Decider = failingAuditedDecider{err: kindError("rate_limited")}
+	executed := false
+	a.Executor = executorFunc(func(context.Context, string) (core.ActionRecord, error) {
+		executed = true
+		return core.ActionRecord{}, nil
+	})
+	done, err := a.EvaluateGoal(ctx, "g", "timer-0")
+	if err != nil || done || executed {
+		t.Fatalf("result done=%v executed=%v err=%v", done, executed, err)
+	}
+	snap, err := s.GetGoalSnapshot(ctx, "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Goal.Status != core.GoalNeedsHuman || !strings.Contains(snap.Goal.Reason, "rate_limited") {
+		t.Fatalf("goal %+v", snap.Goal)
+	}
+	if len(snap.Actions) != 0 || len(snap.Decisions) != 0 {
+		t.Fatalf("actions %+v decisions %+v", snap.Actions, snap.Decisions)
+	}
+	if len(snap.ModelCalls) != 1 {
+		t.Fatalf("model calls %+v", snap.ModelCalls)
+	}
+	call := snap.ModelCalls[0]
+	if call.Status != "failed" || call.ErrorKind != "rate_limited" || call.Provider != "openai-compatible" || call.Model != "mock" || call.FinishedAt == nil {
+		t.Fatalf("model call %+v", call)
 	}
 }

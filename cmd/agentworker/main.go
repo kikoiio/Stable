@@ -15,6 +15,7 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
+	"proactive-agent/internal/appconfig"
 	"proactive-agent/internal/artifact"
 	"proactive-agent/internal/core"
 	"proactive-agent/internal/decision"
@@ -28,13 +29,18 @@ func main() {
 	runRoot := flag.String("run-root", "run", "authorized run root")
 	address := flag.String("temporal", "localhost:7233", "Temporal server address")
 	projectRoot := flag.String("project-root", ".", "project root containing workers and schemas")
+	appMode := flag.Bool("app-config", false, "use user model configuration instead of development Codex adapter")
 	flag.Parse()
-	if err := run(*dbPath, *runRoot, *address, *projectRoot); err != nil {
+	if err := runConfigured(*dbPath, *runRoot, *address, *projectRoot, *appMode); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func run(dbPath, runRoot, address, projectRoot string) error {
+	return runConfigured(dbPath, runRoot, address, projectRoot, false)
+}
+
+func runConfigured(dbPath, runRoot, address, projectRoot string, appMode bool) error {
 	var err error
 	runRoot, err = filepath.Abs(runRoot)
 	if err != nil {
@@ -52,6 +58,11 @@ func run(dbPath, runRoot, address, projectRoot string) error {
 		return err
 	}
 	defer state.Close()
+	if appMode {
+		if err = state.InterruptStartedModelCalls(context.Background()); err != nil {
+			return err
+		}
+	}
 	artifacts, err := artifact.New(runRoot)
 	if err != nil {
 		return err
@@ -74,7 +85,27 @@ func run(dbPath, runRoot, address, projectRoot string) error {
 			}
 		}
 	}
-	decider := &decision.Codex{SchemaPath: filepath.Join(projectRoot, "schemas/next_action.schema.json"), Workdir: projectRoot, Timeout: 90 * time.Second, Attempts: 2}
+	var decider core.DecisionMaker
+	if appMode {
+		cfg, err := appconfig.Load()
+		if err != nil {
+			return err
+		}
+		if err = cfg.Validate(true); err != nil {
+			return err
+		}
+		provider, err := decision.NewProvider(cfg.Model)
+		if err != nil {
+			return err
+		}
+		schema, err := os.ReadFile(filepath.Join(projectRoot, "schemas/next_action.schema.json"))
+		if err != nil {
+			return err
+		}
+		decider = decision.ProviderDecider{Provider: provider, Schema: schema}
+	} else {
+		decider = &decision.Codex{SchemaPath: filepath.Join(projectRoot, "schemas/next_action.schema.json"), Workdir: projectRoot, Timeout: 90 * time.Second, Attempts: 2}
+	}
 	activities := &core.Activities{State: state, Artifacts: artifacts, Kicad: kicad, Computer: computer, Decider: decider, Policy: policyEngine, Executor: coordinator}
 	connection, err := client.Dial(client.Options{HostPort: address})
 	if err != nil {

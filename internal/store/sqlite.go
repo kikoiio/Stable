@@ -26,7 +26,46 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
+	var version int
+	if err = db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if version == 0 {
+		var oldTable string
+		err = db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='decisions'`).Scan(&oldTable)
+		if err == nil {
+			var oldColumn bool
+			rows, qerr := db.Query(`PRAGMA table_info(decisions)`)
+			if qerr != nil {
+				db.Close()
+				return nil, qerr
+			}
+			for rows.Next() {
+				var n, notnull, pk int
+				var name, kind string
+				var def sql.NullString
+				if rows.Scan(&n, &name, &kind, &notnull, &def, &pk) == nil && name == "model_call_id" {
+					oldColumn = true
+				}
+			}
+			rows.Close()
+			if !oldColumn {
+				if _, err = db.Exec(`ALTER TABLE decisions ADD COLUMN model_call_id TEXT NOT NULL DEFAULT ''`); err != nil {
+					db.Close()
+					return nil, err
+				}
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			db.Close()
+			return nil, err
+		}
+	}
 	if _, err = db.Exec(schema); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err = db.Exec(`PRAGMA user_version = 1`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -180,6 +219,9 @@ func (s *Store) GetGoalSnapshot(ctx context.Context, id string) (core.GoalSnapsh
 	if out.Decisions, err = s.decisions(ctx, id); err != nil {
 		return out, err
 	}
+	if out.ModelCalls, err = s.modelCalls(ctx, id); err != nil {
+		return out, err
+	}
 	if out.Actions, err = s.actions(ctx, id); err != nil {
 		return out, err
 	}
@@ -256,8 +298,8 @@ func (s *Store) RecordDecision(ctx context.Context, d core.Decision) error {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO decisions(id,agent_id,observation_id,proposal_json,model_run_id,created_at) VALUES(?,?,?,?,?,?)`,
-		d.ID, d.AgentID, d.ObservationID, encode(d.Proposal), d.ModelRunID, d.CreatedAt.Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO decisions(id,agent_id,observation_id,proposal_json,model_run_id,model_call_id,created_at) VALUES(?,?,?,?,?,?,?)`,
+		d.ID, d.AgentID, d.ObservationID, encode(d.Proposal), d.ModelRunID, d.ModelCallID, d.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return err
 	}
@@ -265,6 +307,61 @@ func (s *Store) RecordDecision(ctx context.Context, d core.Decision) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *Store) StartModelCall(ctx context.Context, c core.ModelCall) error {
+	if c.StartedAt.IsZero() {
+		c.StartedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO model_calls(id,goal_id,observation_id,provider,model,host,status,started_at) VALUES(?,?,?,?,?,?,?,?)`, c.ID, c.GoalID, c.ObservationID, c.Provider, c.Model, c.Host, "started", c.StartedAt.Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Store) FinishModelCall(ctx context.Context, id, status, requestID, errorKind string) error {
+	if status != "succeeded" && status != "failed" && status != "interrupted" {
+		return errors.New("invalid model call status")
+	}
+	r, err := s.db.ExecContext(ctx, `UPDATE model_calls SET status=?,provider_request_id=?,error_kind=?,finished_at=? WHERE id=? AND status='started'`, status, requestID, errorKind, now(), id)
+	if err != nil {
+		return err
+	}
+	n, err := r.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("model call transition rejected")
+	}
+	return nil
+}
+
+func (s *Store) InterruptStartedModelCalls(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE model_calls SET status='interrupted',error_kind='process_interrupted',finished_at=? WHERE status='started'`, now())
+	return err
+}
+
+func (s *Store) modelCalls(ctx context.Context, id string) ([]core.ModelCall, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,observation_id,provider,model,host,provider_request_id,status,error_kind,started_at,finished_at FROM model_calls WHERE goal_id=? ORDER BY started_at,id`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []core.ModelCall
+	for rows.Next() {
+		var c core.ModelCall
+		var start string
+		var finish sql.NullString
+		if err = rows.Scan(&c.ID, &c.GoalID, &c.ObservationID, &c.Provider, &c.Model, &c.Host, &c.ProviderRequestID, &c.Status, &c.ErrorKind, &start, &finish); err != nil {
+			return nil, err
+		}
+		c.StartedAt = parseTime(start)
+		if finish.Valid {
+			t := parseTime(finish.String)
+			c.FinishedAt = &t
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ReserveAction(ctx context.Context, a core.ActionRecord) (core.ActionRecord, error) {
@@ -378,7 +475,7 @@ func (s *Store) observations(ctx context.Context, id string) ([]core.Observation
 	return out, rows.Err()
 }
 func (s *Store) decisions(ctx context.Context, id string) ([]core.Decision, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT d.id,d.agent_id,d.observation_id,d.proposal_json,d.model_run_id,d.created_at FROM decisions d JOIN agents a ON a.id=d.agent_id WHERE a.goal_id=? ORDER BY d.created_at,d.id`, id)
+	rows, err := s.db.QueryContext(ctx, `SELECT d.id,d.agent_id,d.observation_id,d.proposal_json,d.model_run_id,d.model_call_id,d.created_at FROM decisions d JOIN agents a ON a.id=d.agent_id WHERE a.goal_id=? ORDER BY d.created_at,d.id`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -387,13 +484,16 @@ func (s *Store) decisions(ctx context.Context, id string) ([]core.Decision, erro
 	for rows.Next() {
 		var d core.Decision
 		var p, t string
-		if err = rows.Scan(&d.ID, &d.AgentID, &d.ObservationID, &p, &d.ModelRunID, &t); err != nil {
+		if err = rows.Scan(&d.ID, &d.AgentID, &d.ObservationID, &p, &d.ModelRunID, &d.ModelCallID, &t); err != nil {
 			return nil, err
 		}
 		if err = json.Unmarshal([]byte(p), &d.Proposal); err != nil {
 			return nil, err
 		}
 		d.CreatedAt = parseTime(t)
+		if d.ModelCallID == "" {
+			d.ModelInfo = "unknown (legacy decision)"
+		}
 		out = append(out, d)
 	}
 	return out, rows.Err()

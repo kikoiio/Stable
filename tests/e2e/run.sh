@@ -10,22 +10,26 @@ goal_id="e2e-$(date +%s)"
 marker="$run_root/crash-after-repair.marker"
 fixture_digest=$(sha256sum "$project_root/fixtures/sensor_board/sensor.kicad_sch" | cut -d' ' -f1)
 runner_pid=
+mock_pid=
 
 cleanup() {
   if [[ -n "$runner_pid" ]]; then
     kill "$runner_pid" 2>/dev/null || true
     wait "$runner_pid" 2>/dev/null || true
   fi
+  if [[ -n "$mock_pid" ]]; then kill "$mock_pid" 2>/dev/null || true; wait "$mock_pid" 2>/dev/null || true; fi
   python3 "$project_root/tests/e2e/stop_sessions.py" "$run_root" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+if ! command -v codex >/dev/null 2>&1; then source "$project_root/tests/e2e/mock_model_env.sh"; fi
 
 start_runner() {
   PROACTIVE_CRASH_AFTER_REPAIR_MARKER="$marker" PROACTIVE_TEMPORAL_PORT="$port" \
     bash "$project_root/scripts/run_local.sh" "$run_root" >"$run_root/runner.log" 2>&1 &
   runner_pid=$!
   for _ in $(seq 1 120); do
-    if [[ -x "$run_root/bin/agentctl" ]] && rg -q 'agent worker ready' "$run_root/worker.log" 2>/dev/null; then return 0; fi
+    if [[ -x "$run_root/bin/agentctl" ]] && grep -q 'agent worker ready' "$run_root/worker.log" 2>/dev/null; then return 0; fi
     if ! kill -0 "$runner_pid" 2>/dev/null; then cat "$run_root/runner.log" >&2; return 1; fi
     sleep 0.5
   done

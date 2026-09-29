@@ -98,7 +98,29 @@ type Decision struct {
 	ObservationID string         `json:"observation_id"`
 	Proposal      ProposedAction `json:"proposal"`
 	ModelRunID    string         `json:"model_run_id"`
+	ModelCallID   string         `json:"model_call_id,omitempty"`
+	ModelInfo     string         `json:"model_info,omitempty"`
 	CreatedAt     time.Time      `json:"created_at"`
+}
+
+type ModelDescriptor struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Host     string `json:"host"`
+}
+
+type ModelCall struct {
+	ID                string     `json:"id"`
+	GoalID            string     `json:"goal_id"`
+	ObservationID     string     `json:"observation_id"`
+	Provider          string     `json:"provider"`
+	Model             string     `json:"model"`
+	Host              string     `json:"host"`
+	ProviderRequestID string     `json:"provider_request_id,omitempty"`
+	Status            string     `json:"status"`
+	ErrorKind         string     `json:"error_kind,omitempty"`
+	StartedAt         time.Time  `json:"started_at"`
+	FinishedAt        *time.Time `json:"finished_at,omitempty"`
 }
 
 type ActionRecord struct {
@@ -129,6 +151,7 @@ type GoalSnapshot struct {
 	Events       []Event         `json:"events"`
 	Observations []Observation   `json:"observations"`
 	Decisions    []Decision      `json:"decisions"`
+	ModelCalls   []ModelCall     `json:"model_calls"`
 	Actions      []ActionRecord  `json:"actions"`
 	Evidence     []Evidence      `json:"evidence"`
 }
@@ -180,6 +203,20 @@ type DecisionContext struct {
 
 type DecisionMaker interface {
 	Decide(context.Context, DecisionContext) (ProposedAction, error)
+}
+
+type ModelDecisionOutput struct {
+	Proposal          ProposedAction
+	ProviderRequestID string
+}
+type AuditedDecisionMaker interface {
+	DecisionMaker
+	Descriptor() ModelDescriptor
+	DecideModel(context.Context, DecisionContext) (ModelDecisionOutput, error)
+}
+type ModelCallStore interface {
+	StartModelCall(context.Context, ModelCall) error
+	FinishModelCall(context.Context, string, string, string, string) error
 }
 
 type ActionPolicy interface {

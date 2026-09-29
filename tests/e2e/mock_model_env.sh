@@ -1,0 +1,12 @@
+# Source from dev e2e scripts to drive decisions with the local mock model
+# instead of the Codex CLI (used when codex is unavailable). Expects
+# $project_root and $run_root to be set; leaves $mock_pid for the caller's
+# cleanup trap.
+mock_pid=
+python3 "$project_root/tests/package/mock_model.py" > "$run_root/mock.port" &
+mock_pid=$!
+for _ in $(seq 1 50); do [[ -s "$run_root/mock.port" ]] && break; sleep 0.1; done
+[[ -s "$run_root/mock.port" ]] || { echo 'mock model did not start' >&2; exit 1; }
+export PROACTIVE_APP_CONFIG=1
+export PROACTIVE_PROVIDER=openai-compatible PROACTIVE_MODEL=mock PROACTIVE_API_KEY=e2e-secret-marker
+export PROACTIVE_BASE_URL="http://127.0.0.1:$(cat "$run_root/mock.port")/v1"

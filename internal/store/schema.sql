@@ -70,9 +70,25 @@ CREATE TABLE IF NOT EXISTS decisions (
     observation_id TEXT NOT NULL REFERENCES observations(id),
     proposal_json TEXT NOT NULL,
     model_run_id TEXT NOT NULL DEFAULT '',
+	model_call_id TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS decisions_agent_time ON decisions(agent_id, created_at);
+
+CREATE TABLE IF NOT EXISTS model_calls (
+	id TEXT PRIMARY KEY,
+	goal_id TEXT NOT NULL REFERENCES goals(id),
+	observation_id TEXT NOT NULL REFERENCES observations(id),
+	provider TEXT NOT NULL,
+	model TEXT NOT NULL,
+	host TEXT NOT NULL,
+	provider_request_id TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL CHECK(status IN ('started','succeeded','failed','interrupted')),
+	error_kind TEXT NOT NULL DEFAULT '',
+	started_at TEXT NOT NULL,
+	finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS model_calls_goal_time ON model_calls(goal_id, started_at);
 
 CREATE TABLE IF NOT EXISTS actions (
     id TEXT PRIMARY KEY,
