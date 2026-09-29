@@ -1,0 +1,98 @@
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS goals (
+    id TEXT PRIMARY KEY,
+    objective TEXT NOT NULL,
+    criteria_json TEXT NOT NULL,
+    allowed_root TEXT NOT NULL,
+    artifact_path TEXT NOT NULL DEFAULT '',
+    check_interval_seconds INTEGER NOT NULL DEFAULT 30,
+    allowed_capabilities_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    current_artifact_id TEXT NOT NULL DEFAULT '',
+    revision INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS goals_status ON goals(status);
+CREATE INDEX IF NOT EXISTS goals_revision ON goals(id, revision);
+
+CREATE TABLE IF NOT EXISTS agents (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL UNIQUE REFERENCES goals(id),
+    status TEXT NOT NULL,
+    last_decision_id TEXT NOT NULL DEFAULT '',
+    next_wake_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS computer_sessions (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL UNIQUE REFERENCES goals(id),
+    status TEXT NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 0,
+    opened_artifact_id TEXT NOT NULL DEFAULT '',
+    last_observation_id TEXT NOT NULL DEFAULT '',
+    runtime_handle TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS artifact_versions (
+    id TEXT NOT NULL,
+    goal_id TEXT NOT NULL REFERENCES goals(id),
+    path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(id, goal_id)
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL REFERENCES goals(id),
+    kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    received_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','signaled','processed'))
+);
+CREATE INDEX IF NOT EXISTS events_goal_status ON events(goal_id, status, received_at);
+
+CREATE TABLE IF NOT EXISTS observations (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL REFERENCES goals(id),
+    event_id TEXT NOT NULL DEFAULT '',
+    artifact_id TEXT NOT NULL,
+    computer_session_id TEXT NOT NULL DEFAULT '',
+    facts_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS observations_goal_time ON observations(goal_id, observed_at);
+
+CREATE TABLE IF NOT EXISTS decisions (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES agents(id),
+    observation_id TEXT NOT NULL REFERENCES observations(id),
+    proposal_json TEXT NOT NULL,
+    model_run_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS decisions_agent_time ON decisions(agent_id, created_at);
+
+CREATE TABLE IF NOT EXISTS actions (
+    id TEXT PRIMARY KEY,
+    decision_id TEXT NOT NULL REFERENCES decisions(id),
+    expected_artifact_id TEXT NOT NULL,
+    desired_postcondition_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('prepared','outcome_unknown','applied','verified','blocked')),
+    result_artifact_id TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS actions_status ON actions(status);
+
+CREATE TABLE IF NOT EXISTS evidence (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL REFERENCES goals(id),
+    criterion_id TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    result TEXT NOT NULL CHECK(result IN ('pass','fail','stale')),
+    report_path TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS evidence_goal_artifact ON evidence(goal_id, artifact_id, created_at);
