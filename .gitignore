@@ -1,0 +1,7 @@
+run/
+agentctl
+agentworker
+*.kicad_prl
+*.lck
+__pycache__/
+*.pyc

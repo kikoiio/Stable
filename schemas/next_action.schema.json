@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProposedAction",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "capability", "target", "parameters", "expected_artifact_id", "reason"],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": ["observe", "execute_capability", "open_computer", "wait", "ask_human"]
+    },
+    "capability": {"type": "string"},
+    "target": {"type": "string"},
+    "parameters": {"type": "object", "additionalProperties": false, "properties": {}},
+    "expected_artifact_id": {"type": "string"},
+    "reason": {"type": "string", "minLength": 1}
+  }
+}
