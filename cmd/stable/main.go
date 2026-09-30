@@ -34,7 +34,7 @@ Usage:
   stable config init
   stable config check
   stable up | down | runtime status
-  stable goal start [--goal ID] [--interval SECONDS]
+  stable goal create --from FILE [--goal ID]
   stable goal status --goal ID
   stable goal notify --goal ID --event ID --kind design_changed|external_check_failed
   stable goal export --goal ID --out DIRECTORY
@@ -170,15 +170,15 @@ func run(args []string) error {
 
 func goal(args []string, c appconfig.AppConfig, p runtime.Paths) error {
 	if len(args) == 0 {
-		return errors.New("usage: stable goal start|status|notify|export")
+		return errors.New("usage: stable goal create|status|notify|export")
 	}
 	cmd := args[0]
 	switch cmd {
-	case "start", "status", "notify", "export":
+	case "create", "status", "notify", "export":
 	default:
-		return errors.New("unknown goal command")
+		return fmt.Errorf("unknown goal command %q; goal start was removed: use goal create --from FILE or stable chat", cmd)
 	}
-	if cmd == "start" {
+	if cmd == "create" {
 		if _, err := runtime.Control(p, "status"); err != nil {
 			return errors.New("runtime is not running; run stable up")
 		}
@@ -187,7 +187,7 @@ func goal(args []string, c appconfig.AppConfig, p runtime.Paths) error {
 		return err
 	}
 	forward := []string{cmd, "--run-root", p.Goals, "--db", p.Database, "--temporal", "127.0.0.1:" + strconv.Itoa(c.TemporalPort)}
-	if cmd == "start" {
+	if cmd == "create" {
 		forward = append(forward, "--project-root", p.Share)
 	}
 	forward = append(forward, args[1:]...)

@@ -23,7 +23,7 @@ const oneshotTimeout = 15 * time.Minute
 
 func agentctl(p runtime.Paths, c appconfig.AppConfig, cmd string, extra ...string) (string, error) {
 	args := []string{cmd, "--run-root", p.Goals, "--db", p.Database, "--temporal", "127.0.0.1:" + strconv.Itoa(c.TemporalPort)}
-	if cmd == "start" {
+	if cmd == "create" {
 		args = append(args, "--project-root", p.Share)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -71,7 +71,16 @@ func runOnce(c appconfig.AppConfig, p runtime.Paths) error {
 		return err
 	}
 	goalID := "stable-" + time.Now().Format("20060102-150405")
-	if _, err := agentctl(p, c, "start", "--goal", goalID, "--interval", "2"); err != nil {
+	defPath := filepath.Join(p.Goals, goalID+"-definition.json")
+	// Quickstart demo target: the same objective written out explicitly so no
+	// built-in goal exists anywhere in the system.
+	def := `{"objective":"Repair the sensor connector and obtain a clean KiCad ERC",` +
+		`"criteria":[{"id":"erc-clean","kind":"kicad.erc_clean","payload":{"max_violations":0}}],` +
+		`"check_interval_seconds":2}`
+	if err := os.WriteFile(defPath, []byte(def), 0644); err != nil {
+		return err
+	}
+	if _, err := agentctl(p, c, "create", "--goal", goalID, "--definition", defPath); err != nil {
 		return err
 	}
 	fmt.Println("goal started:", goalID)
