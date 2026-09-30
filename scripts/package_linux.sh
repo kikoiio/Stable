@@ -27,7 +27,7 @@ install -m 644 "$scratch/LICENSE" "$pkg/licenses/temporal-LICENSE"
 mkdir -p "$pkg/share"/{fixtures,schemas,workers}
 cp -a fixtures/sensor_board "$pkg/share/fixtures/"
 rm -f "$pkg/share/fixtures/sensor_board"/~*.lck
-cp schemas/next_action.schema.json "$pkg/share/schemas/"
+cp schemas/next_action.schema.json schemas/criteria_proposal.schema.json "$pkg/share/schemas/"
 cp -a workers/kicad workers/computer "$pkg/share/workers/"
 rm -rf "$pkg/share/workers/kicad/__pycache__"
 install -m 755 scripts/install_linux.sh "$pkg/install.sh"
