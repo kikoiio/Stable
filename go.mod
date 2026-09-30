@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/mattn/go-sqlite3 v1.14.52
-	go.temporal.io/api v1.63.5
+	go.temporal.io/api v1.63.6
 	go.temporal.io/sdk v1.49.0
 )
 
