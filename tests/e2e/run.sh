@@ -42,8 +42,11 @@ read_status() {
 }
 
 start_runner
-"$run_root/bin/agentctl" start --run-root "$run_root" --temporal "$address" \
-  --project-root "$project_root" --goal "$goal_id" --interval 2 >/dev/null
+cat > "$run_root/goal-definition.json" <<'JSON'
+{"objective":"Repair the sensor connector and obtain a clean KiCad ERC","criteria":[{"id":"erc-clean","kind":"kicad.erc_clean","payload":{"max_violations":0}}],"check_interval_seconds":2}
+JSON
+"$run_root/bin/agentctl" create --run-root "$run_root" --temporal "$address" \
+  --project-root "$project_root" --goal "$goal_id" --from "$run_root/goal-definition.json" >/dev/null
 "$run_root/bin/agentctl" notify --run-root "$run_root" --temporal "$address" \
   --goal "$goal_id" --event design-event --kind design_changed >/dev/null
 "$run_root/bin/agentctl" notify --run-root "$run_root" --temporal "$address" \

@@ -41,8 +41,11 @@ for _ in $(seq 1 120); do
 done
 [[ -x "$run_root/bin/agentctl" ]] && grep -q 'agent worker ready' "$run_root/worker.log"
 
-"$run_root/bin/agentctl" start --run-root "$run_root" --temporal "localhost:$port" \
-  --project-root "$project_root" --goal "$goal_id" --interval 2 >/dev/null
+cat > "$run_root/goal-definition.json" <<'JSON'
+{"objective":"Repair the sensor connector and obtain a clean KiCad ERC","criteria":[{"id":"erc-clean","kind":"kicad.erc_clean","payload":{"max_violations":0}}],"check_interval_seconds":2}
+JSON
+"$run_root/bin/agentctl" create --run-root "$run_root" --temporal "localhost:$port" \
+  --project-root "$project_root" --goal "$goal_id" --from "$run_root/goal-definition.json" >/dev/null
 status_file="$run_root/unsupported-status.json"
 for _ in $(seq 1 600); do
   "$run_root/bin/agentctl" status --run-root "$run_root" --goal "$goal_id" >"$status_file"

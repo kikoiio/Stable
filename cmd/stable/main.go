@@ -165,9 +165,6 @@ func run(args []string) error {
 	case "goal":
 		return goal(args[1:], c, p)
 	case "chat":
-		if _, err := runtime.Control(p, "status"); err != nil {
-			return errors.New("runtime is not running; run stable up")
-		}
 		return chat(args[1:], p)
 	default:
 		return fmt.Errorf("unknown command %q; run stable help", args[0])

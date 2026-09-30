@@ -66,12 +66,12 @@ func create(args []string) error {
 	runRoot, dbPath, address := common(fs)
 	projectRoot := fs.String("project-root", ".", "project root containing fixtures")
 	goalID := fs.String("goal", "", "stable goal ID (generated when empty)")
-	definition := fs.String("definition", "", "goal definition JSON file (objective, criteria, check_interval_seconds)")
+	definition := fs.String("from", "", "goal definition JSON file (objective, criteria, check_interval_seconds)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *definition == "" {
-		return errors.New("goal definition file required")
+		return errors.New("goal definition file required: use --from")
 	}
 	def, err := goalrun.LoadDefinition(*definition)
 	if err != nil {

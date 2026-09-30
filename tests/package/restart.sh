@@ -25,7 +25,10 @@ export STABLE_TEMPORAL_PORT=17388
 export STABLE_CRASH_AFTER_REPAIR_MARKER="$test_root/repair.marker"
 cd /tmp
 stable up > "$test_root/up1.json"
-stable goal start --goal restart-test --interval 2 > /dev/null
+cat > "$test_root/goal-definition.json" <<'JSON'
+{"objective":"Repair the sensor connector and obtain a clean KiCad ERC","criteria":[{"id":"erc-clean","kind":"kicad.erc_clean","payload":{"max_violations":0}}],"check_interval_seconds":2}
+JSON
+stable goal create --goal restart-test --from "$test_root/goal-definition.json" > /dev/null
 for _ in $(seq 1 120); do [[ -e "$test_root/repair.marker" ]] && break; sleep 1; done
 [[ -e "$test_root/repair.marker" ]] || { echo 'repair crash did not fire' >&2; exit 1; }
 for _ in $(seq 1 30); do stable runtime status >/dev/null 2>&1 || break; sleep 1; done

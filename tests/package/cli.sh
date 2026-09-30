@@ -31,6 +31,7 @@ pkg="$test_root/$pkg_name"
 for f in bin/stable libexec/agentctl libexec/agentworker libexec/temporal \
   install.sh README.md licenses/temporal-LICENSE share/fixtures/sensor_board/sensor.kicad_sch \
   share/fixtures/sensor_board/sensor.kicad_pro share/schemas/next_action.schema.json \
+  share/schemas/criteria_proposal.schema.json \
   share/workers/kicad/bridge.py share/workers/computer/bridge.py; do
   [[ -f "$pkg/$f" ]] || fail "archive missing $f"
 done
@@ -49,10 +50,11 @@ cd /tmp
 
 # --- AC5/F5 command surface: help lists all commands; bad input fails ---
 help_out=$(stable help)
-for c in doctor 'config check' up down 'runtime status' 'goal start' 'goal status' 'goal notify' 'goal export' logs version; do
+for c in doctor 'config check' up down 'runtime status' 'goal create' 'goal status' 'goal notify' 'goal export' chat logs version; do
   [[ "$help_out" == *"$c"* ]] || fail "help missing $c"
 done
 expect_fail stable frobnicate 2>/dev/null
+expect_fail stable goal start --goal removed 2>/dev/null
 expect_fail stable doctor extra 2>/dev/null
 expect_fail stable goal 2>/dev/null
 expect_fail stable config 2>/dev/null
@@ -110,7 +112,11 @@ up2=$(stable up)
 [[ $(python3 -c 'import json,sys;print(json.load(sys.stdin)["pid"])' <<<"$up1") == \
    $(python3 -c 'import json,sys;print(json.load(sys.stdin)["pid"])' <<<"$up2") ]] || fail 'second up spawned another supervisor'
 [[ $(python3 -c 'import json,sys;print(json.load(sys.stdin)["running"])' <<<"$up2") == True ]] || fail 'up2 not running'
-stable goal start --goal cli-test --interval 2 >/dev/null
+cat > "$test_root/goal-definition.json" <<'JSON'
+{"objective":"Repair the sensor connector and obtain a clean KiCad ERC","criteria":[{"id":"erc-clean","kind":"kicad.erc_clean","payload":{"max_violations":0}}],"check_interval_seconds":2}
+JSON
+[[ -S "$HOME/.local/state/stable/chat.sock" ]] || fail 'chat.sock missing after up'
+stable goal create --goal cli-test --from "$test_root/goal-definition.json" >/dev/null
 stable down >/dev/null
 for _ in $(seq 1 40); do stable runtime status >/dev/null 2>&1 || break; sleep 0.25; done
 ! stable runtime status >/dev/null 2>&1 || fail 'runtime still running after down'

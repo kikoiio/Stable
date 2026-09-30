@@ -28,7 +28,10 @@ cd /tmp
 stable doctor > "$test_root/doctor.txt"
 stable config check > "$test_root/config.txt"
 stable up > "$test_root/up.json"
-stable goal start --goal package-test --interval 2 > "$test_root/goal.txt"
+stable chat --create-goal "修复传感器连接，ERC 必须全过，J1 连接要恢复" --goal package-test > "$test_root/create.txt"
+proposal_id=$(sed -n 's/^proposal \(prop-[0-9a-f]*\) status=proposed$/\1/p' "$test_root/create.txt")
+[[ -n "$proposal_id" ]] || { echo 'no criteria proposal returned' >&2; exit 1; }
+stable chat --confirm "$proposal_id" --goal package-test >> "$test_root/create.txt"
 stable goal notify --goal package-test --event check-1 --kind external_check_failed > "$test_root/notify.txt"
 stable goal notify --goal package-test --event check-1 --kind external_check_failed >> "$test_root/notify.txt"
 for _ in $(seq 1 120); do
@@ -36,18 +39,23 @@ for _ in $(seq 1 120); do
   if python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); sys.exit(0 if x["verified"] else 1)' "$test_root/status.json"; then break; fi
   sleep 1
 done
-python3 - "$test_root" "$pkg_name" <<'PY'
+python3 - "$test_root" "$pkg_name" "$proposal_id" <<'PY'
 import hashlib,json,pathlib,sys
-root=pathlib.Path(sys.argv[1]); s=json.loads((root/'status.json').read_text())
+root=pathlib.Path(sys.argv[1]); proposal_id=sys.argv[3]; s=json.loads((root/'status.json').read_text())
 assert s['verified'],s['unverified']
 snap=s['snapshot']; assert snap['goal']['status']=='verified'
 assert len([e for e in snap['events'] if e['id']=='check-1'])==1
 assert any(c['provider']=='openai-compatible' and c['status']=='succeeded' for c in snap['model_calls'])
 assert all(d['model_call_id'] for d in snap['decisions'])
+assert snap['goal']['criteria_revision']==0
+p=[x for x in snap['criteria_proposals'] if x['id']==proposal_id][0]
+assert p['status']=='confirmed' and {c['kind'] for c in p['criteria']}=={'kicad.erc_clean','sensor.connection_present'}
+assert snap['conversation'] and any(m['kind']=='criteria_confirm' for m in snap['conversation'])
 fixture=root/sys.argv[2]/'share/fixtures/sensor_board/sensor.kicad_sch'
 assert hashlib.sha256(fixture.read_bytes()).hexdigest()!=s['actual_artifact_id']
 PY
 stable goal export --goal package-test --out "$test_root/delivery" > "$test_root/export.txt"
-if grep -rn 'package-secret-marker' "$test_root/config.txt" "$test_root/status.json" "$test_root/delivery" "$HOME/.local/state/stable"/*.log; then echo 'secret leaked' >&2; exit 1; fi
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["snapshot"]["conversation"], "delivery missing conversation"' "$test_root/delivery/delivery.json"
+if grep -rn 'package-secret-marker' "$test_root/config.txt" "$test_root/status.json" "$test_root/create.txt" "$test_root/delivery" "$HOME/.local/state/stable"/*.log; then echo 'secret leaked' >&2; exit 1; fi
 stable down > "$test_root/down.txt"
 printf 'PACKAGE E2E PASS %s\n' "$test_root"

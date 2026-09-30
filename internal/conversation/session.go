@@ -92,7 +92,7 @@ func (s *Service) createGoal(ctx context.Context, c ClientMsg) ([]ServerMsg, err
 	}
 	if res.Status == "reject" {
 		msg, err := s.deps.Store.InsertMessage(ctx, core.SessionMessage{
-			ID: goalrun.RandomID("msg"), GoalID: c.Goal, Role: core.MessageRoleAgent, Kind: core.MessageKindText,
+			ID: goalrun.RandomID("msg"), Role: core.MessageRoleAgent, Kind: core.MessageKindText,
 			Text: "无法为该描述定义可验证的验收标准：" + res.Reason,
 		})
 		if err != nil {
@@ -100,7 +100,13 @@ func (s *Service) createGoal(ctx context.Context, c ClientMsg) ([]ServerMsg, err
 		}
 		return []ServerMsg{{Type: "message", Message: &msg}}, nil
 	}
-	proposal := core.CriteriaProposal{ID: goalrun.RandomID("prop"), GoalID: c.Goal,
+	// Until the goal exists, proposal rows must stay session-level: they
+	// reference the goals table.
+	goalID := ""
+	if s.deps.Store.EnsureGoal(ctx, c.Goal) == nil {
+		goalID = c.Goal
+	}
+	proposal := core.CriteriaProposal{ID: goalrun.RandomID("prop"), GoalID: goalID,
 		Status: core.ProposalPending, Criteria: res.Criteria, RawText: c.Text}
 	saved, err := s.deps.Store.InsertProposal(ctx, proposal)
 	if err != nil {
@@ -108,7 +114,7 @@ func (s *Service) createGoal(ctx context.Context, c ClientMsg) ([]ServerMsg, err
 	}
 	payload := mustJSON(saved)
 	msg, err := s.deps.Store.InsertMessage(ctx, core.SessionMessage{
-		ID: goalrun.RandomID("msg"), GoalID: c.Goal, Role: core.MessageRoleSystem, Kind: core.MessageKindCriteriaProposal,
+		ID: goalrun.RandomID("msg"), GoalID: goalID, Role: core.MessageRoleSystem, Kind: core.MessageKindCriteriaProposal,
 		Text: "验收标准提案（回复 /confirm " + saved.ID + " 生效）：", Payload: payload,
 	})
 	if err != nil {
@@ -149,7 +155,11 @@ func (s *Service) confirm(ctx context.Context, c ClientMsg) ([]ServerMsg, error)
 	}
 	// Creation flow: the confirmed proposal becomes a new goal. The objective is
 	// the user's original description.
-	spec := goalrun.Spec{ID: c.Goal, Objective: proposal.RawText, Criteria: proposal.Criteria}
+	id := c.Goal
+	if id == "" {
+		id = goalrun.RandomID("goal")
+	}
+	spec := goalrun.Spec{ID: id, Objective: proposal.RawText, Criteria: proposal.Criteria}
 	goal, err := goalrun.Create(ctx, s.deps.Store, s.deps.RunRoot, s.deps.Temporal, s.deps.ProjectRoot, spec)
 	if err != nil {
 		return nil, err
