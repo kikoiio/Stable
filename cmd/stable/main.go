@@ -38,6 +38,7 @@ Usage:
   stable goal status --goal ID
   stable goal notify --goal ID --event ID --kind design_changed|external_check_failed
   stable goal export --goal ID --out DIRECTORY
+  stable chat [--goal ID] | --say T | --reply T | --create-goal T | --confirm ID | --reject ID
   stable logs
   stable version
 `)
@@ -159,10 +160,15 @@ func run(args []string) error {
 		if len(args) != 1 {
 			return errors.New("logs takes no arguments")
 		}
-		fmt.Printf("supervisor: %s\ntemporal: %s\nworker: %s\n", p.SupervisorLog, p.TemporalLog, p.WorkerLog)
+		fmt.Printf("supervisor: %s\ntemporal: %s\nworker: %s\nchat: %s\n", p.SupervisorLog, p.TemporalLog, p.WorkerLog, p.ChatLog)
 		return nil
 	case "goal":
 		return goal(args[1:], c, p)
+	case "chat":
+		if _, err := runtime.Control(p, "status"); err != nil {
+			return errors.New("runtime is not running; run stable up")
+		}
+		return chat(args[1:], p)
 	default:
 		return fmt.Errorf("unknown command %q; run stable help", args[0])
 	}

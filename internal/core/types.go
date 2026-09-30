@@ -148,15 +148,17 @@ type Evidence struct {
 }
 
 type GoalSnapshot struct {
-	Goal         Goal            `json:"goal"`
-	Agent        AgentInstance   `json:"agent"`
-	Session      ComputerSession `json:"session"`
-	Events       []Event         `json:"events"`
-	Observations []Observation   `json:"observations"`
-	Decisions    []Decision      `json:"decisions"`
-	ModelCalls   []ModelCall     `json:"model_calls"`
-	Actions      []ActionRecord  `json:"actions"`
-	Evidence     []Evidence      `json:"evidence"`
+	Goal         Goal               `json:"goal"`
+	Agent        AgentInstance      `json:"agent"`
+	Session      ComputerSession    `json:"session"`
+	Events       []Event            `json:"events"`
+	Observations []Observation      `json:"observations"`
+	Decisions    []Decision         `json:"decisions"`
+	ModelCalls   []ModelCall        `json:"model_calls"`
+	Actions      []ActionRecord     `json:"actions"`
+	Evidence     []Evidence         `json:"evidence"`
+	Conversation []SessionMessage   `json:"conversation,omitempty"`
+	Proposals    []CriteriaProposal `json:"criteria_proposals,omitempty"`
 }
 
 type CapabilityDescriptor struct {

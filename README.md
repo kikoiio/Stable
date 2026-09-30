@@ -18,11 +18,15 @@ stable config init
 
 ```bash
 stable up
-stable goal start --goal demo01
+stable chat --create-goal "修复传感器连接，ERC 必须全过，J1 连接要恢复" --goal demo01
+stable chat --confirm prop-XXXXXXXX --goal demo01   # 确认验收标准提案后开始运行
+stable chat --goal demo01 --say "优先检查 J1 附近的连线"
 stable goal status --goal demo01
 stable goal export --goal demo01 --out "$HOME/demo01-delivery"
 stable down
 ```
+
+`stable chat` 是常驻对话会话的瘦终端：目标创建（自然语言验收标准转译 + 显式确认）、运行中纠偏、agent 提问答复都在会话内完成；终端关闭不影响目标运行。也可以用 `stable goal create --from goal.json` 以结构化定义文件非交互创建。
 
 ## 仓库布局
 

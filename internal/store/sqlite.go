@@ -245,6 +245,12 @@ func (s *Store) GetGoalSnapshot(ctx context.Context, id string) (core.GoalSnapsh
 	if out.Evidence, err = s.evidence(ctx, id); err != nil {
 		return out, err
 	}
+	if out.Conversation, err = s.GoalMessages(ctx, id); err != nil {
+		return out, err
+	}
+	if out.Proposals, err = s.GoalProposals(ctx, id); err != nil {
+		return out, err
+	}
 	return out, nil
 }
 
