@@ -19,6 +19,24 @@ type ModelProvider interface {
 	Generate(context.Context, string, json.RawMessage) (ModelOutput, error)
 }
 
+// SchemaID selects the wire schema and parser for a structured model call.
+type SchemaID string
+
+const (
+	SchemaNextAction       SchemaID = "next_action"
+	SchemaCriteriaProposal SchemaID = "criteria_proposal"
+)
+
+type StructuredOutput struct {
+	Data              json.RawMessage
+	ProviderRequestID string
+}
+
+type StructuredProvider interface {
+	Descriptor() core.ModelDescriptor
+	GenerateStructured(ctx context.Context, prompt string, schema SchemaID) (StructuredOutput, error)
+}
+
 type APIError struct{ Kind string }
 
 func (e APIError) Error() string     { return "model request failed: " + e.Kind }

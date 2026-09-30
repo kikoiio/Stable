@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "criteria", "reason"],
+  "properties": {
+    "status": { "type": "string", "enum": ["ok", "reject"] },
+    "criteria": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "payload"],
+        "properties": {
+          "id": { "type": "string" },
+          "kind": { "type": "string" },
+          "payload": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
+    "reason": { "type": "string" }
+  }
+}

@@ -31,18 +31,46 @@ func (p *HTTPProvider) Descriptor() core.ModelDescriptor {
 	return core.ModelDescriptor{Provider: p.Config.Provider, Model: p.Config.Model, Host: host}
 }
 
-func (p *HTTPProvider) Generate(ctx context.Context, prompt string, schema json.RawMessage) (ModelOutput, error) {
+func (p *HTTPProvider) Generate(ctx context.Context, prompt string, _ json.RawMessage) (ModelOutput, error) {
+	out, err := p.GenerateStructured(ctx, prompt, SchemaNextAction)
+	if err != nil {
+		return ModelOutput{}, err
+	}
+	mo, err := extractJSON(out.Data, out.ProviderRequestID)
+	return mo, err
+}
+
+// GenerateStructured sends one prompt constrained by the named schema and
+// returns the assistant's raw JSON text without interpreting it.
+func (p *HTTPProvider) GenerateStructured(ctx context.Context, prompt string, schema SchemaID) (StructuredOutput, error) {
+	wire, name := wireSchema(schema)
 	switch p.Config.Provider {
 	case "openai":
-		return p.openai(ctx, prompt, schema)
+		text, id, err := p.openai(ctx, prompt, wire, name)
+		if err != nil {
+			return StructuredOutput{}, err
+		}
+		return StructuredOutput{Data: json.RawMessage(text), ProviderRequestID: id}, nil
 	case "anthropic":
-		return p.anthropic(ctx, prompt, schema)
+		text, id, err := p.anthropic(ctx, prompt, wire, name)
+		if err != nil {
+			return StructuredOutput{}, err
+		}
+		return StructuredOutput{Data: json.RawMessage(text), ProviderRequestID: id}, nil
 	case "gemini":
-		return p.gemini(ctx, prompt, schema)
+		text, id, err := p.gemini(ctx, prompt, wire, name)
+		if err != nil {
+			return StructuredOutput{}, err
+		}
+		return StructuredOutput{Data: json.RawMessage(text), ProviderRequestID: id}, nil
 	case "openai-compatible":
-		return p.compatible(ctx, prompt)
+		text, id, err := p.compatible(ctx, prompt, wire, name)
+		if err != nil {
+			return StructuredOutput{}, err
+		}
+		return StructuredOutput{Data: json.RawMessage(text), ProviderRequestID: id}, nil
 	default:
-		return ModelOutput{}, APIError{Kind: "invalid_provider"}
+		return StructuredOutput{}, APIError{Kind: "invalid_provider"}
 	}
 }
 
@@ -100,6 +128,15 @@ func (p *HTTPProvider) post(ctx context.Context, endpoint string, body any, head
 		return nil, id, APIError{Kind: "response_too_large"}
 	}
 	return out, id, nil
+}
+
+func wireSchema(schema SchemaID) (map[string]any, string) {
+	switch schema {
+	case SchemaCriteriaProposal:
+		return criteriaProposalSchema(), "criteria_proposal"
+	default:
+		return actionSchema(), "next_action"
+	}
 }
 
 func actionSchema() map[string]any {
