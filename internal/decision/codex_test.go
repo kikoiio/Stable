@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"proactive-agent/internal/core"
+	"stable/internal/core"
 )
 
 func TestValidateProposal(t *testing.T) {

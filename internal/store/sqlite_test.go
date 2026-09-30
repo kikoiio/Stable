@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"proactive-agent/internal/core"
+	"stable/internal/core"
 )
 
 func newGoalStore(t *testing.T) (*Store, string) {

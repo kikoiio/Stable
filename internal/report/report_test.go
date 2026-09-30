@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"proactive-agent/internal/core"
+	"stable/internal/core"
 )
 
 func TestScreenshotCannotVerifyAndExportTracksCurrentDesign(t *testing.T) {

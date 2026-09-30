@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"proactive-agent/internal/appconfig"
+	"stable/internal/appconfig"
 )
 
 type Check struct {

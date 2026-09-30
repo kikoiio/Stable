@@ -1,0 +1,6 @@
+{
+  "id": "U04_corrupt_schematic",
+  "title": "原理图文件被截断：应给出可读错误/needs_human，不得崩溃或写坏文件",
+  "expect": "needs_human",
+  "initial_erc": null
+}

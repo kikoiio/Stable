@@ -26,7 +26,7 @@ type AppConfig struct {
 }
 
 func ConfigPath() (string, error) {
-	if p := os.Getenv("PROACTIVE_CONFIG"); p != "" {
+	if p := os.Getenv("STABLE_CONFIG"); p != "" {
 		return filepath.Abs(p)
 	}
 	base := os.Getenv("XDG_CONFIG_HOME")
@@ -37,11 +37,11 @@ func ConfigPath() (string, error) {
 		}
 		base = filepath.Join(home, ".config")
 	}
-	return filepath.Join(base, "proactive-agent", "config.json"), nil
+	return filepath.Join(base, "stable", "config.json"), nil
 }
 
 func StateDir() (string, error) {
-	if p := os.Getenv("PROACTIVE_STATE_DIR"); p != "" {
+	if p := os.Getenv("STABLE_STATE_DIR"); p != "" {
 		return filepath.Abs(p)
 	}
 	base := os.Getenv("XDG_STATE_HOME")
@@ -52,7 +52,7 @@ func StateDir() (string, error) {
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(base, "proactive-agent"), nil
+	return filepath.Join(base, "stable"), nil
 }
 
 func Load() (AppConfig, error) {
@@ -85,19 +85,19 @@ func Load() (AppConfig, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return c, err
 	}
-	if v := os.Getenv("PROACTIVE_PROVIDER"); v != "" {
+	if v := os.Getenv("STABLE_PROVIDER"); v != "" {
 		if v != c.Model.Provider {
 			c.Model.APIKey = ""
 		}
 		c.Model.Provider = v
 	}
-	if v := os.Getenv("PROACTIVE_MODEL"); v != "" {
+	if v := os.Getenv("STABLE_MODEL"); v != "" {
 		c.Model.Model = v
 	}
-	if v := os.Getenv("PROACTIVE_BASE_URL"); v != "" {
+	if v := os.Getenv("STABLE_BASE_URL"); v != "" {
 		c.Model.BaseURL = v
 	}
-	if v := os.Getenv("PROACTIVE_TEMPORAL_PORT"); v != "" {
+	if v := os.Getenv("STABLE_TEMPORAL_PORT"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			return c, errors.New("invalid Temporal port")
@@ -113,13 +113,13 @@ func Load() (AppConfig, error) {
 			return c, err
 		}
 	}
-	if v := os.Getenv("PROACTIVE_STATE_DIR"); v != "" {
+	if v := os.Getenv("STABLE_STATE_DIR"); v != "" {
 		c.StateDir, err = filepath.Abs(v)
 		if err != nil {
 			return c, err
 		}
 	}
-	keyEnv := map[string]string{"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "gemini": "GEMINI_API_KEY", "openai-compatible": "PROACTIVE_API_KEY"}
+	keyEnv := map[string]string{"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "gemini": "GEMINI_API_KEY", "openai-compatible": "STABLE_API_KEY"}
 	if v := os.Getenv(keyEnv[c.Model.Provider]); v != "" {
 		c.Model.APIKey = v
 	}
@@ -181,4 +181,32 @@ func (c AppConfig) Summary() string {
 		}
 	}
 	return fmt.Sprintf("provider=%s model=%s host=%s key_configured=%t", c.Model.Provider, c.Model.Model, host, c.Model.APIKey != "")
+}
+
+// Init creates the private config directory and a template config file if none exists.
+func Init() (path string, created bool, err error) {
+	path, err = ConfigPath()
+	if err != nil {
+		return "", false, err
+	}
+	dir := filepath.Dir(path)
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		return "", false, err
+	}
+	if err = os.Chmod(dir, 0700); err != nil {
+		return "", false, err
+	}
+	template := []byte("{\n  \"model\": {\n    \"provider\": \"openai\",\n    \"model\": \"YOUR_MODEL_ID\",\n    \"api_key\": \"YOUR_PRIVATE_KEY\"\n  }\n}\n")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if errors.Is(err, os.ErrExist) {
+		return path, false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	defer f.Close()
+	if _, err = f.Write(template); err != nil {
+		return "", false, err
+	}
+	return path, true, nil
 }

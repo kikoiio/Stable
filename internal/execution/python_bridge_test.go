@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"proactive-agent/internal/core"
+	"stable/internal/core"
 )
 
 func TestBridgeProtocolAndUnknownOutcome(t *testing.T) {

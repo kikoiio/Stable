@@ -14,10 +14,10 @@ import (
 
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
-	"proactive-agent/internal/artifact"
-	"proactive-agent/internal/core"
-	"proactive-agent/internal/report"
-	"proactive-agent/internal/store"
+	"stable/internal/artifact"
+	"stable/internal/core"
+	"stable/internal/report"
+	"stable/internal/store"
 )
 
 func main() {

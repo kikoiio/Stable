@@ -12,7 +12,7 @@ func TestLoadAndValidate(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
-	dir := filepath.Join(home, "config", "proactive-agent")
+	dir := filepath.Join(home, "config", "stable")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -31,10 +31,10 @@ func TestLoadAndValidate(t *testing.T) {
 	if strings.Contains(c.Summary(), secret) {
 		t.Fatal("secret in summary")
 	}
-	if c.StateDir != filepath.Join(home, "state", "proactive-agent") {
+	if c.StateDir != filepath.Join(home, "state", "stable") {
 		t.Fatal(c.StateDir)
 	}
-	t.Setenv("PROACTIVE_MODEL", "override")
+	t.Setenv("STABLE_MODEL", "override")
 	c, err = Load()
 	if err != nil || c.Model.Model != "override" {
 		t.Fatalf("env override: %v %+v", err, c)

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"proactive-agent/internal/core"
+	"stable/internal/core"
 )
 
 var ErrUnavailable = errors.New("model decision unavailable")
@@ -71,7 +71,7 @@ func (c *Codex) once(ctx context.Context, in core.DecisionContext) (core.Propose
 	if _, err = os.Stat(schema); err != nil {
 		return empty, "", err
 	}
-	dir, err := os.MkdirTemp("", "proactive-decision-*")
+	dir, err := os.MkdirTemp("", "stable-decision-*")
 	if err != nil {
 		return empty, "", err
 	}
@@ -125,7 +125,7 @@ func makePrompt(in core.DecisionContext) (string, error) {
 		"If the connection is present, choose observe so the coordinator can run ERC. " +
 		"For unsupported faults, choose ask_human. Never claim verification from a screenshot or old ERC. " +
 		"Use the observation artifact ID as expected_artifact_id for actions that touch the design. " +
-		"The target must be within the goal's allowed_root. Include a short concrete reason. Context: " + string(data), nil
+		"For execute_capability and open_computer the target must be the exact artifact_path from the observation facts (a file path, never a directory), which lies within the goal's allowed_root. Include a short concrete reason. Context: " + string(data), nil
 }
 
 func Validate(p core.ProposedAction) error {

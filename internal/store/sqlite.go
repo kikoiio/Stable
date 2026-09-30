@@ -10,7 +10,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-	"proactive-agent/internal/core"
+	"stable/internal/core"
 )
 
 //go:embed schema.sql

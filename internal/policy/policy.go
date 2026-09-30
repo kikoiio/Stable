@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"proactive-agent/internal/core"
+	"stable/internal/core"
 )
 
 type Policy struct {

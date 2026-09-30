@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"proactive-agent/internal/core"
+	"stable/internal/core"
 )
 
 var ErrOutcomeUnknown = errors.New("capability outcome unknown")

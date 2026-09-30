@@ -6,7 +6,13 @@ import (
 )
 
 func (p *HTTPProvider) compatible(ctx context.Context, prompt string) (ModelOutput, error) {
-	body := map[string]any{"model": p.Config.Model, "messages": []map[string]string{{"role": "system", "content": "Return exactly one JSON object matching the requested action schema. No markdown."}, {"role": "user", "content": prompt}}}
+	schema, _ := json.Marshal(actionSchema())
+	system := "Return exactly one JSON object and nothing else (no markdown). It must have exactly these six keys and no others: " +
+		"kind, capability, target, parameters, expected_artifact_id, reason. All values are strings except parameters, which must be the empty object {}. " +
+		"Use an empty string for a key that does not apply. Example: " +
+		`{"kind":"observe","capability":"","target":"","parameters":{},"expected_artifact_id":"","reason":"check current state"}` +
+		". JSON schema: " + string(schema)
+	body := map[string]any{"model": p.Config.Model, "response_format": map[string]string{"type": "json_object"}, "messages": []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": prompt}}}
 	data, id, err := p.post(ctx, endpoint(p.Config.BaseURL, "/chat/completions"), body, map[string]string{"Authorization": "Bearer " + p.Config.APIKey})
 	if err != nil {
 		return ModelOutput{}, err

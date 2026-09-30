@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"proactive-agent/internal/core"
+	"stable/internal/core"
 )
 
 type Caller interface {

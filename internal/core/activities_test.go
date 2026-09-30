@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"proactive-agent/internal/artifact"
-	"proactive-agent/internal/core"
-	"proactive-agent/internal/policy"
-	"proactive-agent/internal/store"
+	"stable/internal/artifact"
+	"stable/internal/core"
+	"stable/internal/policy"
+	"stable/internal/store"
 )
 
 type callerFunc func(context.Context, core.CapabilityRequest) (core.CapabilityResult, error)

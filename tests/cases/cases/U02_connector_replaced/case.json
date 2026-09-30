@@ -1,0 +1,6 @@
+{
+  "id": "U02_connector_replaced",
+  "title": "接头引用了未定义的库符号（KiCad 无法加载，ERC 无输出）：应 needs_human",
+  "expect": "needs_human",
+  "initial_erc": null
+}

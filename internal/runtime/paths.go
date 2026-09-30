@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"proactive-agent/internal/appconfig"
+	"stable/internal/appconfig"
 )
 
 type Paths struct{ Root, Bin, Libexec, Share, State, Goals, Database, TemporalDB, Socket, Lock, SupervisorLog, TemporalLog, WorkerLog string }

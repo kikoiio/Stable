@@ -39,6 +39,12 @@ check 'Virtual display' Xvfb
 check 'Virtual wrapper' xvfb-run
 check 'Window inspector' xprop
 check 'Screenshot' import
-check 'Codex CLI' codex --version
+
+# Codex CLI 是可选的决策提供方；没有它时 e2e 与用例测试自动改用本地 mock 模型。
+if command -v codex >/dev/null 2>&1; then
+  printf '%-18s available  %s\n' 'Codex CLI (可选)' "$(codex --version 2>&1 | tail -1)"
+else
+  printf '%-18s missing    %s\n' 'Codex CLI (可选)' 'codex（测试将使用 mock 模型）'
+fi
 
 exit "$missing"

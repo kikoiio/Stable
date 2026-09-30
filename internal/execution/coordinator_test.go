@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"proactive-agent/internal/artifact"
-	"proactive-agent/internal/core"
-	"proactive-agent/internal/policy"
-	"proactive-agent/internal/store"
+	"stable/internal/artifact"
+	"stable/internal/core"
+	"stable/internal/policy"
+	"stable/internal/store"
 )
 
 type lostReceiptBridge struct {

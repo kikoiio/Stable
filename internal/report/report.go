@@ -11,7 +11,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"proactive-agent/internal/core"
+	"stable/internal/core"
 )
 
 type Status struct {

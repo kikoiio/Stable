@@ -15,13 +15,13 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
-	"proactive-agent/internal/appconfig"
-	"proactive-agent/internal/artifact"
-	"proactive-agent/internal/core"
-	"proactive-agent/internal/decision"
-	"proactive-agent/internal/execution"
-	"proactive-agent/internal/policy"
-	"proactive-agent/internal/store"
+	"stable/internal/appconfig"
+	"stable/internal/artifact"
+	"stable/internal/core"
+	"stable/internal/decision"
+	"stable/internal/execution"
+	"stable/internal/policy"
+	"stable/internal/store"
 )
 
 func main() {
@@ -76,7 +76,7 @@ func runConfigured(dbPath, runRoot, address, projectRoot string, appMode bool) e
 	coordinator := &execution.Coordinator{Store: state, Artifacts: artifacts, Policy: policyEngine,
 		Capabilities:   map[string]execution.Caller{"kicad.repair_connection": kicad},
 		Postconditions: map[string]json.RawMessage{"kicad.repair_connection": json.RawMessage(`{"sensor.connection_present":true}`)}}
-	if marker := os.Getenv("PROACTIVE_CRASH_AFTER_REPAIR_MARKER"); marker != "" {
+	if marker := os.Getenv("STABLE_CRASH_AFTER_REPAIR_MARKER"); marker != "" {
 		coordinator.AfterCapabilityEffect = func() {
 			file, err := os.OpenFile(marker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 			if err == nil {

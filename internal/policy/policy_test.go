@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"proactive-agent/internal/core"
+	"stable/internal/core"
 )
 
 func TestPolicyRejectsEscapeCapabilityAndStaleVersion(t *testing.T) {

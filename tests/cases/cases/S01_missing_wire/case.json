@@ -1,0 +1,10 @@
+{
+  "id": "S01_missing_wire",
+  "title": "原始夹具：J1.2 与 RT1.2 之间缺一根连线",
+  "expect": "repair",
+  "initial_erc": [
+    "pin_not_connected",
+    "pin_not_connected",
+    "unconnected_wire_endpoint"
+  ]
+}

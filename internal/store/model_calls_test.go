@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"proactive-agent/internal/core"
+	"stable/internal/core"
 )
 
 func TestModelCallLifecycle(t *testing.T) {

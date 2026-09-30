@@ -9,13 +9,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
-	"proactive-agent/internal/appconfig"
-	"proactive-agent/internal/runtime"
+	"stable/internal/appconfig"
+	"stable/internal/runtime"
 )
 
-const version = "0.1.0"
+// Overridden by -ldflags "-X main.version=..." in release builds (see VERSION).
+var version = "0.1.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -25,24 +27,33 @@ func main() {
 }
 
 func usage() {
-	fmt.Print(`proactive-agent ` + version + `
+	fmt.Print(`stable ` + version + `
 Usage:
-  proactive-agent doctor
-  proactive-agent config check
-  proactive-agent up | down | runtime status
-  proactive-agent goal start [--goal ID] [--interval SECONDS]
-  proactive-agent goal status --goal ID
-  proactive-agent goal notify --goal ID --event ID --kind design_changed|external_check_failed
-  proactive-agent goal export --goal ID --out DIRECTORY
-  proactive-agent logs
-  proactive-agent version
+  stable                (no arguments: start runtime, run one goal, export, stop)
+  stable doctor
+  stable config init
+  stable config check
+  stable up | down | runtime status
+  stable goal start [--goal ID] [--interval SECONDS]
+  stable goal status --goal ID
+  stable goal notify --goal ID --event ID --kind design_changed|external_check_failed
+  stable goal export --goal ID --out DIRECTORY
+  stable logs
+  stable version
 `)
 }
 
 func run(args []string) error {
 	if len(args) == 0 {
-		usage()
-		return nil
+		c, err := appconfig.Load()
+		if err != nil {
+			return err
+		}
+		p, err := runtime.Resolve(c)
+		if err != nil {
+			return err
+		}
+		return runOnce(c, p)
 	}
 	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		usage()
@@ -50,6 +61,18 @@ func run(args []string) error {
 	}
 	if args[0] == "version" {
 		fmt.Println(version)
+		return nil
+	}
+	if len(args) == 2 && args[0] == "config" && args[1] == "init" {
+		path, created, err := appconfig.Init()
+		if err != nil {
+			return err
+		}
+		if created {
+			fmt.Printf("created %s\nedit it: set provider (openai, anthropic, gemini, openai-compatible), model and api_key, then run stable config check\n", path)
+		} else {
+			fmt.Printf("%s already exists; not changed\n", path)
+		}
 		return nil
 	}
 	c, err := appconfig.Load()
@@ -79,7 +102,7 @@ func run(args []string) error {
 		return nil
 	case "config":
 		if len(args) != 2 || args[1] != "check" {
-			return errors.New("usage: proactive-agent config check")
+			return errors.New("usage: stable config check|init")
 		}
 		if err = c.Validate(true); err != nil {
 			return err
@@ -112,13 +135,20 @@ func run(args []string) error {
 		}
 		s, err := runtime.Control(p, "down")
 		if err != nil {
-			return err
+			if !strings.Contains(err.Error(), "not running") {
+				return err
+			}
+			fmt.Println("runtime is not running")
+		} else {
+			fmt.Printf("stopping runtime pid=%d; data kept at %s\n", s.PID, s.StateDir)
 		}
-		fmt.Printf("stopping runtime pid=%d; data kept at %s\n", s.PID, s.StateDir)
+		if n := runtime.StopSessionProcesses(p); n > 0 {
+			fmt.Printf("stopped %d leftover GUI session process(es)\n", n)
+		}
 		return nil
 	case "runtime":
 		if len(args) != 2 || args[1] != "status" {
-			return errors.New("usage: proactive-agent runtime status")
+			return errors.New("usage: stable runtime status")
 		}
 		s, err := runtime.Control(p, "status")
 		if err != nil {
@@ -134,13 +164,13 @@ func run(args []string) error {
 	case "goal":
 		return goal(args[1:], c, p)
 	default:
-		return fmt.Errorf("unknown command %q; run proactive-agent help", args[0])
+		return fmt.Errorf("unknown command %q; run stable help", args[0])
 	}
 }
 
 func goal(args []string, c appconfig.AppConfig, p runtime.Paths) error {
 	if len(args) == 0 {
-		return errors.New("usage: proactive-agent goal start|status|notify|export")
+		return errors.New("usage: stable goal start|status|notify|export")
 	}
 	cmd := args[0]
 	switch cmd {
@@ -150,7 +180,7 @@ func goal(args []string, c appconfig.AppConfig, p runtime.Paths) error {
 	}
 	if cmd == "start" {
 		if _, err := runtime.Control(p, "status"); err != nil {
-			return errors.New("runtime is not running; run proactive-agent up")
+			return errors.New("runtime is not running; run stable up")
 		}
 	}
 	if err := p.Prepare(); err != nil {

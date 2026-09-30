@@ -1,0 +1,6 @@
+{
+  "id": "S02_already_connected",
+  "title": "连线已存在：不应再修改设计，直接以 ERC 验证",
+  "expect": "no_change_verified",
+  "initial_erc": []
+}

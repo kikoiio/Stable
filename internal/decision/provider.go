@@ -9,8 +9,8 @@ import (
 	"io"
 	"strings"
 
-	"proactive-agent/internal/appconfig"
-	"proactive-agent/internal/core"
+	"stable/internal/appconfig"
+	"stable/internal/core"
 )
 
 type ModelOutput = core.ModelDecisionOutput

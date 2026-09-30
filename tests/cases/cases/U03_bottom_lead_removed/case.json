@@ -1,0 +1,10 @@
+{
+  "id": "U03_bottom_lead_removed",
+  "title": "下方引线被删除：缺的不是已知那一根线，应 needs_human",
+  "expect": "needs_human",
+  "initial_erc": [
+    "pin_not_connected",
+    "pin_not_connected",
+    "unconnected_wire_endpoint"
+  ]
+}

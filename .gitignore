@@ -2,10 +2,9 @@ run/
 /agentctl
 /agentworker
 /dist/
-/proactive-agent
+/stable
 *.kicad_prl
 *.lck
 __pycache__/
 *.pyc
 /docs/
-my_test/

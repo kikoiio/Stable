@@ -3,7 +3,7 @@ set -euo pipefail
 
 project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 run_root=${1:-"$project_root/run"}
-temporal_port=${PROACTIVE_TEMPORAL_PORT:-7233}
+temporal_port=${STABLE_TEMPORAL_PORT:-7233}
 temporal_address="localhost:${temporal_port}"
 mkdir -p "$run_root/bin"
 
@@ -33,7 +33,7 @@ if [[ "$ready" != 1 ]]; then
 fi
 
 worker_args=(--db "$run_root/state.db" --run-root "$run_root" --temporal "$temporal_address" --project-root "$project_root")
-if [[ "${PROACTIVE_APP_CONFIG:-}" == 1 ]]; then worker_args+=(--app-config); fi
+if [[ "${STABLE_APP_CONFIG:-}" == 1 ]]; then worker_args+=(--app-config); fi
 "$run_root/bin/agentworker" "${worker_args[@]}" >"$run_root/worker.log" 2>&1 &
 worker_pid=$!
 sleep 1

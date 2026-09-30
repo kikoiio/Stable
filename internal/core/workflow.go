@@ -9,7 +9,7 @@ import (
 )
 
 const GoalEventSignal = "GoalEvent"
-const TaskQueue = "proactive-agent"
+const TaskQueue = "stable"
 
 // GoalWorkflow stores only IDs and deterministic control flow in Temporal history.
 func GoalWorkflow(ctx workflow.Context, goalID string) error {

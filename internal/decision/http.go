@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"proactive-agent/internal/appconfig"
-	"proactive-agent/internal/core"
+	"stable/internal/appconfig"
+	"stable/internal/core"
 )
 
 type HTTPProvider struct {

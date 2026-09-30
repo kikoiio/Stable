@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"proactive-agent/internal/appconfig"
+	"stable/internal/appconfig"
 )
 
 type Status struct {
@@ -58,7 +58,7 @@ func Up(ctx context.Context, c appconfig.AppConfig, p Paths) (Status, error) {
 		return Status{}, err
 	}
 	defer f.Close()
-	cmd := exec.Command(p.Root+"/bin/proactive-agent", "supervise")
+	cmd := exec.Command(p.Root+"/bin/stable", "supervise")
 	cmd.Env = os.Environ()
 	cmd.Stdout = f
 	cmd.Stderr = f

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"proactive-agent/internal/appconfig"
+	"stable/internal/appconfig"
 )
 
 type transport func(*http.Request) (*http.Response, error)

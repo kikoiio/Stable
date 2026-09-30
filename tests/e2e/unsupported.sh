@@ -25,7 +25,7 @@ fixture_digest=$(sha256sum "$project_root/fixtures/sensor_board/sensor.kicad_sch
 
 mock_pid=
 if ! command -v codex >/dev/null 2>&1; then source "$project_root/tests/e2e/mock_model_env.sh"; fi
-PROACTIVE_TEMPORAL_PORT="$port" bash "$project_root/scripts/run_local.sh" "$run_root" >"$run_root/runner.log" 2>&1 &
+STABLE_TEMPORAL_PORT="$port" bash "$project_root/scripts/run_local.sh" "$run_root" >"$run_root/runner.log" 2>&1 &
 runner_pid=$!
 cleanup() {
   kill "$runner_pid" 2>/dev/null || true

@@ -1,4 +1,4 @@
-module proactive-agent
+module stable
 
 go 1.26.0
 

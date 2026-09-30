@@ -1,0 +1,13 @@
+{
+  "id": "U01_top_wire_shifted",
+  "title": "上方连线端点被移动：超出支持的故障类型，应 needs_human 且设计不变",
+  "expect": "needs_human",
+  "initial_erc": [
+    "pin_not_connected",
+    "pin_not_connected",
+    "pin_not_connected",
+    "pin_not_connected",
+    "unconnected_wire_endpoint",
+    "unconnected_wire_endpoint"
+  ]
+}
