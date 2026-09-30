@@ -254,6 +254,13 @@ const (
 	CriterionKindConnectionPresent = "sensor.connection_present"
 )
 
+// Conversation-driven event kinds carried by the regular event pipeline.
+const (
+	EventKindUserMessage    = "user_message"
+	EventKindHumanReply     = "human_reply"
+	EventKindCriteriaUpdate = "criteria_updated"
+)
+
 // The only connection endpoints the bundled sensor fixture can verify.
 const (
 	SensorEndpointA = "RT1.2"

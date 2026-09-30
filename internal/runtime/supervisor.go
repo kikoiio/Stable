@@ -16,6 +16,9 @@ import (
 	"time"
 
 	"stable/internal/appconfig"
+	"stable/internal/conversation"
+	"stable/internal/decision"
+	"stable/internal/store"
 )
 
 type Status struct {
@@ -128,6 +131,7 @@ func Supervise(c appconfig.AppConfig, p Paths) error {
 	}
 	defer listener.Close()
 	defer os.Remove(p.Socket)
+	defer os.Remove(p.ChatSocket)
 	if err = os.Chmod(p.Socket, 0600); err != nil {
 		return err
 	}
@@ -162,6 +166,7 @@ func Supervise(c appconfig.AppConfig, p Paths) error {
 	if err = waitReady(p.WorkerLog, worker, 15*time.Second); err != nil {
 		return fmt.Errorf("Worker startup: %w; see %s", err, p.WorkerLog)
 	}
+	chatDone := startChatService(c, p, address)
 	status := Status{Running: true, PID: os.Getpid(), TemporalPID: temporal.Process.Pid, WorkerPID: worker.Process.Pid, TemporalAddress: address, StateDir: p.State, TemporalLog: p.TemporalLog, WorkerLog: p.WorkerLog}
 	stopWatch := make(chan struct{})
 	defer close(stopWatch)
@@ -176,6 +181,14 @@ func Supervise(c appconfig.AppConfig, p Paths) error {
 				if !processAlive(temporal) || !processAlive(worker) {
 					_ = listener.Close()
 					return
+				}
+				select {
+				case <-chatDone:
+					// The session service is part of the runtime; losing it
+					// takes the whole supervise group down.
+					_ = listener.Close()
+					return
+				default:
 				}
 			}
 		}
@@ -199,7 +212,50 @@ func Supervise(c appconfig.AppConfig, p Paths) error {
 		if !processAlive(temporal) || !processAlive(worker) {
 			return errors.New("runtime child exited unexpectedly")
 		}
+		select {
+		case <-chatDone:
+			return errors.New("chat session service exited unexpectedly; see " + p.ChatLog)
+		default:
+		}
 	}
+}
+
+// startChatService runs the persistent conversation service inside the
+// supervisor process. It returns a channel that closes when the service stops.
+func startChatService(c appconfig.AppConfig, p Paths, address string) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := runChatService(c, p, address); err != nil {
+			if f, ferr := os.OpenFile(p.ChatLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); ferr == nil {
+				fmt.Fprintf(f, "%s chat session service: %v\n", time.Now().UTC().Format(time.RFC3339), err)
+				f.Close()
+			}
+		}
+	}()
+	return done
+}
+
+func runChatService(c appconfig.AppConfig, p Paths, address string) error {
+	s, err := store.Open(p.Database)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	var provider decision.StructuredProvider
+	if model, perr := decision.NewProvider(c.Model); perr == nil {
+		provider = model.(decision.StructuredProvider)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc, err := conversation.Serve(ctx, conversation.Deps{
+		Store: s, Provider: provider, Temporal: address, ProjectRoot: p.Share, RunRoot: p.Goals, SocketPath: p.ChatSocket,
+	})
+	if err != nil {
+		return err
+	}
+	defer svc.Close()
+	select {}
 }
 
 func processAlive(cmd *exec.Cmd) bool {

@@ -8,7 +8,10 @@ import (
 	"stable/internal/appconfig"
 )
 
-type Paths struct{ Root, Bin, Libexec, Share, State, Goals, Database, TemporalDB, Socket, Lock, SupervisorLog, TemporalLog, WorkerLog string }
+type Paths struct {
+	Root, Bin, Libexec, Share, State, Goals, Database, TemporalDB                                   string
+	Socket, ChatSocket, Lock, SupervisorLog, TemporalLog, WorkerLog, ChatLog                        string
+}
 
 func Resolve(c appconfig.AppConfig) (Paths, error) {
 	var p Paths
@@ -35,10 +38,12 @@ func Resolve(c appconfig.AppConfig) (Paths, error) {
 	p.Database = filepath.Join(p.State, "state.db")
 	p.TemporalDB = filepath.Join(p.State, "temporal.db")
 	p.Socket = filepath.Join(p.State, "control.sock")
+	p.ChatSocket = filepath.Join(p.State, "chat.sock")
 	p.Lock = filepath.Join(p.State, "supervisor.lock")
 	p.SupervisorLog = filepath.Join(p.State, "supervisor.log")
 	p.TemporalLog = filepath.Join(p.State, "temporal.log")
 	p.WorkerLog = filepath.Join(p.State, "worker.log")
+	p.ChatLog = filepath.Join(p.State, "chat.log")
 	return p, nil
 }
 

@@ -561,6 +561,32 @@ func (s *Store) EnsureGoal(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *Store) ListGoals(ctx context.Context) ([]core.Goal, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,objective,criteria_json,allowed_root,artifact_path,check_interval_seconds,allowed_capabilities_json,status,current_artifact_id,criteria_revision,revision,reason,created_at FROM goals ORDER BY created_at,id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []core.Goal
+	for rows.Next() {
+		var g core.Goal
+		var criteria, caps, created string
+		if err = rows.Scan(&g.ID, &g.Objective, &criteria, &g.AllowedRoot, &g.ArtifactPath, &g.CheckIntervalSeconds, &caps, &g.Status,
+			&g.CurrentArtifactID, &g.CriteriaRevision, &g.Revision, &g.Reason, &created); err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal([]byte(criteria), &g.Criteria); err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal([]byte(caps), &g.AllowedCapabilities); err != nil {
+			return nil, err
+		}
+		g.CreatedAt = parseTime(created)
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) InsertMessage(ctx context.Context, m core.SessionMessage) (core.SessionMessage, error) {
 	if m.ID == "" {
 		return m, errors.New("message ID required")
