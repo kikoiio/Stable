@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS session_messages (
     kind TEXT NOT NULL CHECK(kind IN ('text','question','reply','criteria_proposal','criteria_confirm')),
     text TEXT NOT NULL DEFAULT '',
     payload_json TEXT NOT NULL DEFAULT '',
+    ref TEXT NOT NULL DEFAULT '',
     delivered INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );

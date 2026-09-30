@@ -115,7 +115,7 @@ func (s *Service) createGoal(ctx context.Context, c ClientMsg) ([]ServerMsg, err
 	payload := mustJSON(saved)
 	msg, err := s.deps.Store.InsertMessage(ctx, core.SessionMessage{
 		ID: goalrun.RandomID("msg"), GoalID: goalID, Role: core.MessageRoleSystem, Kind: core.MessageKindCriteriaProposal,
-		Text: "验收标准提案（回复 /confirm " + saved.ID + " 生效）：", Payload: payload,
+		Text: "验收标准提案（回复 /confirm " + saved.ID + " 生效）：", Payload: payload, Ref: saved.ID,
 	})
 	if err != nil {
 		return nil, err
@@ -165,6 +165,9 @@ func (s *Service) confirm(ctx context.Context, c ClientMsg) ([]ServerMsg, error)
 		return nil, err
 	}
 	if err = s.deps.Store.AttachProposalGoal(ctx, proposal.ID, goal.ID); err != nil {
+		return nil, err
+	}
+	if err = s.deps.Store.AttachMessagesToGoal(ctx, proposal.ID, goal.ID); err != nil {
 		return nil, err
 	}
 	msg, err := s.deps.Store.InsertMessage(ctx, core.SessionMessage{

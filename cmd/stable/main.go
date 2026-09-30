@@ -166,6 +166,8 @@ func run(args []string) error {
 		return goal(args[1:], c, p)
 	case "chat":
 		return chat(args[1:], p)
+	case "chatserve":
+		return chatserve(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q; run stable help", args[0])
 	}

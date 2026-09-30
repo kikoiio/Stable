@@ -618,8 +618,8 @@ func (s *Store) InsertMessage(ctx context.Context, m core.SessionMessage) (core.
 	if len(m.Payload) > 0 {
 		payload = string(m.Payload)
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO session_messages(id,goal_id,role,kind,text,payload_json,delivered,created_at) VALUES(?,?,?,?,?,?,0,?)`,
-		m.ID, goalID, m.Role, m.Kind, m.Text, payload, m.CreatedAt.Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO session_messages(id,goal_id,role,kind,text,payload_json,ref,delivered,created_at) VALUES(?,?,?,?,?,?,?,0,?)`,
+		m.ID, goalID, m.Role, m.Kind, m.Text, payload, m.Ref, m.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return m, err
 	}
@@ -628,12 +628,13 @@ func (s *Store) InsertMessage(ctx context.Context, m core.SessionMessage) (core.
 
 func scanMessage(row interface{ Scan(...any) error }) (core.SessionMessage, error) {
 	var m core.SessionMessage
-	var goalID, payload sql.NullString
+	var goalID, payload, ref sql.NullString
 	var delivered int
 	var created string
-	if err := row.Scan(&m.ID, &goalID, &m.Role, &m.Kind, &m.Text, &payload, &delivered, &created); err != nil {
+	if err := row.Scan(&m.ID, &goalID, &m.Role, &m.Kind, &m.Text, &payload, &ref, &delivered, &created); err != nil {
 		return m, err
 	}
+	m.Ref = ref.String
 	m.GoalID = goalID.String
 	if payload.Valid && payload.String != "" {
 		m.Payload = json.RawMessage(payload.String)
@@ -643,7 +644,7 @@ func scanMessage(row interface{ Scan(...any) error }) (core.SessionMessage, erro
 	return m, nil
 }
 
-const messageSelect = `SELECT id,goal_id,role,kind,text,payload_json,delivered,created_at FROM session_messages`
+const messageSelect = `SELECT id,goal_id,role,kind,text,payload_json,ref,delivered,created_at FROM session_messages`
 
 func (s *Store) ListMessages(ctx context.Context) ([]core.SessionMessage, error) {
 	return s.queryMessages(ctx, messageSelect+` ORDER BY created_at,id`)
@@ -664,6 +665,14 @@ func (s *Store) MarkMessagesDelivered(ctx context.Context, ids []string) error {
 		}
 	}
 	return nil
+}
+
+// AttachMessagesToGoal moves session-level messages that reference the given
+// proposal (e.g. the pre-creation criteria proposal transcript entry) under
+// the goal created from its confirmation.
+func (s *Store) AttachMessagesToGoal(ctx context.Context, ref, goalID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE session_messages SET goal_id=? WHERE ref=? AND goal_id IS NULL`, goalID, ref)
+	return err
 }
 
 // UnansweredQuestion returns the latest agent question that has no later user

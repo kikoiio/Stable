@@ -228,6 +228,7 @@ type SessionMessage struct {
 	Kind      string          `json:"kind"`
 	Text      string          `json:"text"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
+	Ref       string          `json:"ref,omitempty"` // links proposal/confirmation messages to their proposal ID
 	CreatedAt time.Time       `json:"created_at"`
 	// Delivered marks whether a decision round has consumed the message.
 	Delivered bool `json:"delivered"`

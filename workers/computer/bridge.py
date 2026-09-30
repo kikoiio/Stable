@@ -157,10 +157,12 @@ def start(root: Path, path: Path, session_id: str, generation: int) -> dict:
             process = subprocess.Popen(['Xvfb', candidate, '-screen', '0', '1280x800x24', '-nolisten', 'tcp'],
                                        stdout=output, stderr=output, start_new_session=True)
         for _ in range(30):
+            if process.poll() is not None:
+                # Xvfb died (e.g. another session won the race for this
+                # display): never trust a socket that a live peer created.
+                break
             if Path(f'/tmp/.X11-unix/X{number}').exists():
                 display, xvfb = candidate, process
-                break
-            if process.poll() is not None:
                 break
             time.sleep(0.1)
         if xvfb:
