@@ -14,6 +14,7 @@ func TestWorkflowTimerAndExternalSignals(t *testing.T) {
 	env := suite.NewTestWorkflowEnvironment()
 	events := []string{}
 	env.RegisterActivityWithOptions(func(context.Context, string) (int, error) { return 1, nil }, activity.RegisterOptions{Name: "CheckInterval"})
+	env.RegisterActivityWithOptions(func(context.Context, string) (bool, error) { return false, nil }, activity.RegisterOptions{Name: "WaitingForHuman"})
 	env.RegisterActivityWithOptions(func(_ context.Context, _ string, eventID string) (bool, error) {
 		events = append(events, eventID)
 		return len(events) >= 4, nil
@@ -34,6 +35,7 @@ func TestWorkflowDrainsQueuedSignalBeforeCompletion(t *testing.T) {
 	env := suite.NewTestWorkflowEnvironment()
 	events := []string{}
 	env.RegisterActivityWithOptions(func(context.Context, string) (int, error) { return 1, nil }, activity.RegisterOptions{Name: "CheckInterval"})
+	env.RegisterActivityWithOptions(func(context.Context, string) (bool, error) { return false, nil }, activity.RegisterOptions{Name: "WaitingForHuman"})
 	env.RegisterActivityWithOptions(func(_ context.Context, _ string, eventID string) (bool, error) {
 		events = append(events, eventID)
 		if len(events) == 1 {
@@ -47,5 +49,31 @@ func TestWorkflowDrainsQueuedSignalBeforeCompletion(t *testing.T) {
 	}
 	if len(events) != 2 || events[1] != "queued-before-completion" {
 		t.Fatalf("queued signal was not evaluated: %v", events)
+	}
+}
+
+func TestWorkflowSuppressesTimerWhileWaitingForHuman(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	events := []string{}
+	waiting := true
+	env.RegisterActivityWithOptions(func(context.Context, string) (int, error) { return 1, nil }, activity.RegisterOptions{Name: "CheckInterval"})
+	env.RegisterActivityWithOptions(func(context.Context, string) (bool, error) { return waiting, nil }, activity.RegisterOptions{Name: "WaitingForHuman"})
+	env.RegisterActivityWithOptions(func(_ context.Context, _ string, eventID string) (bool, error) {
+		events = append(events, eventID)
+		if len(events) == 2 {
+			waiting = false
+		}
+		return len(events) >= 3, nil
+	}, activity.RegisterOptions{Name: "EvaluateGoal"})
+	// Well past several timer intervals: while the question is unanswered, the
+	// timer must not trigger another evaluation.
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(GoalEventSignal, "human-reply") }, 10*time.Second)
+	env.ExecuteWorkflow(GoalWorkflow, "goal-3")
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 || events[1] != "human-reply" || events[2] != "timer-goal-3-2" {
+		t.Fatalf("timer fired while waiting for human, or wrong order: %v", events)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -150,24 +151,67 @@ func (a *Activities) VerifyGoal(ctx context.Context, goalID string) (Evidence, e
 	if err = a.State.RecordEvidence(ctx, e); err != nil {
 		return empty, err
 	}
-	if e.Result == "pass" {
-		latest, err := a.State.GetGoalSnapshot(ctx, goalID)
-		if err != nil {
-			return e, err
-		}
-		actual, err := a.Artifacts.Digest(ctx, g.ArtifactPath)
-		if err != nil {
-			return e, err
-		}
-		if latest.Goal.CurrentArtifactID != after || actual != after {
-			return e, errors.New("design changed after ERC")
-		}
-		_, err = a.State.UpdateStatus(ctx, goalID, latest.Goal.Revision, GoalVerified, "current KiCad ERC passed")
-		if err != nil {
-			return e, err
+	if e.Result != "pass" {
+		return e, nil
+	}
+	// Remaining criteria must pass too before the goal can be verified.
+	for _, item := range g.Criteria {
+		switch item.Kind {
+		case "kicad.erc_clean":
+		case "sensor.connection_present":
+			check, err := a.verifyConnection(ctx, goalID, g, item, after)
+			if err != nil {
+				return e, err
+			}
+			if check.Result != "pass" {
+				return e, nil
+			}
+		default:
+			return e, fmt.Errorf("criterion %s: unsupported kind %q", item.ID, item.Kind)
 		}
 	}
-	return e, nil
+	latest, err := a.State.GetGoalSnapshot(ctx, goalID)
+	if err != nil {
+		return e, err
+	}
+	actual, err := a.Artifacts.Digest(ctx, g.ArtifactPath)
+	if err != nil {
+		return e, err
+	}
+	if latest.Goal.CurrentArtifactID != after || actual != after {
+		return e, errors.New("design changed after ERC")
+	}
+	_, err = a.State.UpdateStatus(ctx, goalID, latest.Goal.Revision, GoalVerified, "all acceptance criteria passed against the current design")
+	return e, err
+}
+
+// verifyConnection checks the requested sensor connection against fresh
+// design facts and records objective evidence bound to the artifact digest.
+func (a *Activities) verifyConnection(ctx context.Context, goalID string, g Goal, item Criterion, digest string) (Evidence, error) {
+	empty := Evidence{}
+	design, err := a.Kicad.Call(ctx, CapabilityRequest{ProtocolVersion: 1, OperationID: uniqueID("inspect"), Kind: "inspect_design", GoalID: goalID, ExpectedArtifactID: digest, Payload: requestPayload(g, nil)})
+	if err != nil {
+		return empty, err
+	}
+	if design.ActualArtifactID != digest {
+		return empty, errors.New("design changed during criteria verification")
+	}
+	var facts struct {
+		ConnectionPresent bool `json:"sensor.connection_present"`
+	}
+	if err = json.Unmarshal(design.Postcondition, &facts); err != nil {
+		return empty, err
+	}
+	result := "fail"
+	if design.Status == "observed" && facts.ConnectionPresent {
+		result = "pass"
+	}
+	e := Evidence{ID: uniqueID("evidence"), GoalID: goalID, CriterionID: item.ID, ArtifactID: digest, Kind: "sensor.connection_present", Result: result, CreatedAt: time.Now().UTC()}
+	if design.Status == "unsupported" {
+		e.Result = "fail"
+		e.ReportPath = ""
+	}
+	return e, a.State.RecordEvidence(ctx, e)
 }
 
 func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (bool, error) {
@@ -214,10 +258,14 @@ func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (
 			valid = append(valid, e)
 		}
 	}
+	conversation, err := a.State.UndeliveredMessages(ctx, goalID)
+	if err != nil {
+		return finish(false, err)
+	}
 	ctxForModel := DecisionContext{Goal: snap.Goal, Agent: snap.Agent, Observation: observed, ValidEvidence: valid, Capabilities: []CapabilityDescriptor{
 		{Name: "kicad.repair_connection", PostconditionKind: "sensor.connection_present"},
 		{Name: "computer.ensure_open", PostconditionKind: "computer.open"},
-	}}
+	}, Conversation: conversation}
 	var proposal ProposedAction
 	var modelRunID string
 	var modelCallID string
@@ -260,6 +308,15 @@ func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (
 	if err = a.State.RecordDecision(ctx, decision); err != nil {
 		return finish(false, err)
 	}
+	if len(conversation) > 0 {
+		ids := make([]string, 0, len(conversation))
+		for _, m := range conversation {
+			ids = append(ids, m.ID)
+		}
+		if err = a.State.MarkMessagesDelivered(ctx, ids); err != nil {
+			return finish(false, err)
+		}
+	}
 	switch proposal.Kind {
 	case "execute_capability":
 		if err = a.Policy.Check(snap.Goal, observed, proposal); err != nil {
@@ -283,10 +340,8 @@ func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (
 			_ = a.setStatus(ctx, goalID, GoalWaiting, "verification failed: "+err.Error())
 			return finish(false, nil)
 		}
-		if e.Result == "pass" {
-			return finish(true, nil)
-		}
-		_ = a.setStatus(ctx, goalID, GoalNeedsHuman, "ERC reports remaining violations")
+		done, err := a.finishIfVerified(ctx, goalID, e)
+		return finish(done, err)
 	case "open_computer":
 		if err = a.Policy.Check(snap.Goal, observed, proposal); err != nil {
 			_ = a.setStatus(ctx, goalID, GoalNeedsHuman, "policy rejected: "+err.Error())
@@ -328,18 +383,61 @@ func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (
 			_ = a.setStatus(ctx, goalID, GoalWaiting, "verification unavailable: "+err.Error())
 			return finish(false, nil)
 		}
-		if e.Result == "pass" {
-			return finish(true, nil)
-		}
-		_ = a.setStatus(ctx, goalID, GoalNeedsHuman, "ERC reports violations")
+		done, err := a.finishIfVerified(ctx, goalID, e)
+		return finish(done, err)
 	case "wait":
 		_ = a.setStatus(ctx, goalID, GoalWaiting, proposal.Reason)
 	case "ask_human":
+		if _, err = a.State.InsertMessage(ctx, SessionMessage{ID: uniqueID("msg"), GoalID: goalID, Role: MessageRoleAgent, Kind: MessageKindQuestion, Text: proposal.Reason}); err != nil {
+			return finish(false, err)
+		}
 		_ = a.setStatus(ctx, goalID, GoalNeedsHuman, proposal.Reason)
 	default:
 		_ = a.setStatus(ctx, goalID, GoalNeedsHuman, "unsupported model action: "+proposal.Kind)
 	}
 	return finish(false, nil)
+}
+
+// finishIfVerified reports workflow completion only when the goal status is
+// verified; otherwise it names the criteria that are still unmet.
+func (a *Activities) finishIfVerified(ctx context.Context, goalID string, e Evidence) (bool, error) {
+	latest, err := a.State.GetGoalSnapshot(ctx, goalID)
+	if err != nil {
+		return false, err
+	}
+	if latest.Goal.Status == GoalVerified && e.Result == "pass" {
+		return true, nil
+	}
+	_ = a.setStatus(ctx, goalID, GoalNeedsHuman, unmetCriteriaReason(latest.Evidence, e.ArtifactID))
+	return false, nil
+}
+
+func unmetCriteriaReason(evidence []Evidence, artifactID string) string {
+	latest := map[string]string{}
+	for _, e := range evidence {
+		if e.ArtifactID == artifactID {
+			latest[e.CriterionID] = e.Result
+		}
+	}
+	var unmet []string
+	for id, res := range latest {
+		if res != "pass" {
+			unmet = append(unmet, id)
+		}
+	}
+	if len(unmet) == 0 {
+		return "acceptance criteria not yet satisfied"
+	}
+	sort.Strings(unmet)
+	return "unmet criteria: " + strings.Join(unmet, ", ")
+}
+
+// WaitingForHuman reports whether an agent question is still unanswered; the
+// workflow uses it to stop timer-driven re-evaluation while a human reply is
+// pending.
+func (a *Activities) WaitingForHuman(ctx context.Context, goalID string) (bool, error) {
+	_, found, err := a.State.UnansweredQuestion(ctx, goalID)
+	return found, err
 }
 
 func (a *Activities) setStatus(ctx context.Context, id string, status GoalStatus, reason string) error {

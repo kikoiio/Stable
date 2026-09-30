@@ -114,13 +114,15 @@ func makePrompt(in core.DecisionContext) (string, error) {
 		Observation   core.Observation            `json:"observation"`
 		ValidEvidence []core.Evidence             `json:"valid_evidence"`
 		Capabilities  []core.CapabilityDescriptor `json:"capabilities"`
-	}{in.Goal, in.Agent, in.Observation, in.ValidEvidence, in.Capabilities}
+		Conversation  []core.SessionMessage       `json:"conversation,omitempty"`
+	}{in.Goal, in.Agent, in.Observation, in.ValidEvidence, in.Capabilities, in.Conversation}
 	data, err := json.Marshal(compact)
 	if err != nil {
 		return "", err
 	}
 	return "Choose exactly one next action for this local, single-goal agent. Return only a JSON object matching the schema. " +
 		"Use current observed facts and evidence. If the KiCad computer session is absent or stale, choose open_computer. " +
+		"Conversation entries with role user are the latest human steering: respect them at this decision round, but never propose actions outside the supported vocabulary. " +
 		"If the supported sensor connection is missing and the computer is open, choose execute_capability with capability kicad.repair_connection. " +
 		"If the connection is present, choose observe so the coordinator can run ERC. " +
 		"For unsupported faults, choose ask_human. Never claim verification from a screenshot or old ERC. " +

@@ -115,6 +115,7 @@ func runConfigured(dbPath, runRoot, address, projectRoot string, appMode bool) e
 	w := worker.New(connection, core.TaskQueue, worker.Options{})
 	w.RegisterWorkflow(core.GoalWorkflow)
 	w.RegisterActivityWithOptions(activities.CheckInterval, activity.RegisterOptions{Name: "CheckInterval"})
+	w.RegisterActivityWithOptions(activities.WaitingForHuman, activity.RegisterOptions{Name: "WaitingForHuman"})
 	w.RegisterActivityWithOptions(func(ctx context.Context, goalID, eventID string) (bool, error) {
 		activity.RecordHeartbeat(ctx)
 		stop := make(chan struct{})

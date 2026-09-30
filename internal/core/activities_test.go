@@ -187,3 +187,130 @@ func TestEvaluateRecordsModelFailureWithoutAction(t *testing.T) {
 		t.Fatalf("model call %+v", call)
 	}
 }
+
+func TestEvaluateInjectsUndeliveredConversation(t *testing.T) {
+	ctx := context.Background()
+	a, s, _ := fixtureActivities(t)
+	stale, err := s.InsertMessage(ctx, core.SessionMessage{ID: "msg-old", GoalID: "g", Role: core.MessageRoleUser, Kind: core.MessageKindText, Text: "earlier"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.MarkMessagesDelivered(ctx, []string{stale.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.InsertMessage(ctx, core.SessionMessage{ID: "msg-new", GoalID: "g", Role: core.MessageRoleUser, Kind: core.MessageKindText, Text: "focus on J1 first"}); err != nil {
+		t.Fatal(err)
+	}
+	var seen []core.SessionMessage
+	a.Decider = deciderFunc(func(_ context.Context, d core.DecisionContext) (core.ProposedAction, error) {
+		seen = d.Conversation
+		return core.ProposedAction{Kind: "wait", Reason: "steered"}, nil
+	})
+	if _, err = a.EvaluateGoal(ctx, "g", "timer-0"); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 || seen[0].ID != "msg-new" {
+		t.Fatalf("conversation: %+v", seen)
+	}
+	seen = nil
+	if _, err = a.EvaluateGoal(ctx, "g", "timer-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("messages consumed twice: %+v", seen)
+	}
+}
+
+func TestAskHumanRecordsQuestionAndReplyClearsIt(t *testing.T) {
+	ctx := context.Background()
+	a, s, _ := fixtureActivities(t)
+	a.Decider = deciderFunc(func(_ context.Context, _ core.DecisionContext) (core.ProposedAction, error) {
+		return core.ProposedAction{Kind: "ask_human", Reason: "which net should carry the sensor signal?"}, nil
+	})
+	if _, err := a.EvaluateGoal(ctx, "g", "timer-0"); err != nil {
+		t.Fatal(err)
+	}
+	q, found, err := s.UnansweredQuestion(ctx, "g")
+	if err != nil || !found || q.Role != core.MessageRoleAgent || q.Kind != core.MessageKindQuestion {
+		t.Fatalf("question: %+v found=%v err=%v", q, found, err)
+	}
+	if _, err = s.InsertMessage(ctx, core.SessionMessage{ID: "msg-reply", GoalID: "g", Role: core.MessageRoleUser, Kind: core.MessageKindReply, Text: "J1.2"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ = s.UnansweredQuestion(ctx, "g"); found {
+		t.Fatal("question still open after reply")
+	}
+}
+
+func TestVerifyRequiresAllCriteria(t *testing.T) {
+	ctx := context.Background()
+	a, s, path := fixtureActivities(t)
+	art, err := artifact.New(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := false
+	a.Kicad = callerFunc(func(_ context.Context, r core.CapabilityRequest) (core.CapabilityResult, error) {
+		current, _ := art.Digest(ctx, path)
+		result := core.CapabilityResult{ProtocolVersion: 1, OperationID: r.OperationID, ActualArtifactID: current}
+		switch r.Kind {
+		case "inspect_design":
+			result.Status = "observed"
+			result.Postcondition = json.RawMessage(`{"sensor.supported":true,"sensor.connection_present":` + boolJSON(present) + `}`)
+		case "kicad.run_erc":
+			var payload map[string]string
+			_ = json.Unmarshal(r.Payload, &payload)
+			_ = os.WriteFile(payload["report_path"], []byte(`{}`), 0644)
+			result.Status = "pass"
+			result.EvidencePaths = []string{payload["report_path"]}
+		default:
+			return result, errors.New("unknown capability")
+		}
+		return result, nil
+	})
+	snap, err := s.GetGoalSnapshot(ctx, "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goal := snap.Goal
+	goal.Criteria = []core.Criterion{
+		{ID: "erc", Kind: core.CriterionKindERCClean, Payload: json.RawMessage(`{"max_violations":0}`)},
+		{ID: "conn", Kind: core.CriterionKindConnectionPresent, Payload: json.RawMessage(`{"endpoint_a":"RT1.2","endpoint_b":"J1.2"}`)},
+	}
+	if _, err = s.UpdateGoalCriteria(ctx, "g", goal.Criteria); err != nil {
+		t.Fatal(err)
+	}
+	// ERC passes but the connection is still missing: not verified.
+	if _, err = a.VerifyGoal(ctx, "g"); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := s.GetGoalSnapshot(ctx, "g")
+	if state.Goal.Status == core.GoalVerified {
+		t.Fatal("verified despite unmet connection criterion")
+	}
+	// Connection restored: now verification completes.
+	present = true
+	if _, err = a.VerifyGoal(ctx, "g"); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = s.GetGoalSnapshot(ctx, "g")
+	if state.Goal.Status != core.GoalVerified {
+		t.Fatalf("status %q reason %q", state.Goal.Status, state.Goal.Reason)
+	}
+	kinds := map[string]string{}
+	for _, e := range state.Evidence {
+		if e.Result == "pass" {
+			kinds[e.Kind] = e.CriterionID
+		}
+	}
+	if kinds["sensor.connection_present"] != "conn" || kinds["kicad.erc"] != "erc" {
+		t.Fatalf("evidence kinds: %+v", kinds)
+	}
+}
+
+func boolJSON(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}

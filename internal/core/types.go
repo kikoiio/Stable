@@ -383,4 +383,8 @@ type StateStore interface {
 	GoalIDForDecision(context.Context, string) (string, error)
 	SetCurrentArtifact(context.Context, string, string) error
 	InvalidateEvidence(context.Context, string, string) error
+	InsertMessage(context.Context, SessionMessage) (SessionMessage, error)
+	UndeliveredMessages(context.Context, string) ([]SessionMessage, error)
+	MarkMessagesDelivered(context.Context, []string) error
+	UnansweredQuestion(context.Context, string) (SessionMessage, bool, error)
 }

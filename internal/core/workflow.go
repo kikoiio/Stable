@@ -40,15 +40,27 @@ func GoalWorkflow(ctx workflow.Context, goalID string) error {
 			}
 			return nil
 		}
+		var waiting bool
+		if err := workflow.ExecuteActivity(ctx, "WaitingForHuman", goalID).Get(ctx, &waiting); err != nil {
+			return err
+		}
+		cycle++
+		if waiting {
+			// An unanswered agent question must not re-trigger decisions on a
+			// timer; only an explicit human reply (signal) resumes the goal.
+			var next string
+			events.Receive(ctx, &next)
+			eventID = next
+			continue
+		}
 		timerCtx, cancel := workflow.WithCancel(ctx)
 		timer := workflow.NewTimer(timerCtx, time.Duration(seconds)*time.Second)
 		next := ""
 		selector := workflow.NewSelector(ctx)
 		selector.AddReceive(events, func(ch workflow.ReceiveChannel, _ bool) { ch.Receive(ctx, &next) })
-		selector.AddFuture(timer, func(workflow.Future) { next = fmt.Sprintf("timer-%s-%d", goalID, cycle+1) })
+		selector.AddFuture(timer, func(workflow.Future) { next = fmt.Sprintf("timer-%s-%d", goalID, cycle) })
 		selector.Select(ctx)
 		cancel()
-		cycle++
 		eventID = next
 	}
 }
