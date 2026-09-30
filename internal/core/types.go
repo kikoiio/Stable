@@ -1,8 +1,10 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -34,6 +36,7 @@ type Goal struct {
 	AllowedCapabilities  []string    `json:"allowed_capabilities"`
 	Status               GoalStatus  `json:"status"`
 	CurrentArtifactID    string      `json:"current_artifact_id"`
+	CriteriaRevision     int         `json:"criteria_revision"`
 	Revision             int64       `json:"revision"`
 	Reason               string      `json:"reason"`
 	CreatedAt            time.Time   `json:"created_at"`
@@ -199,6 +202,123 @@ type DecisionContext struct {
 	Observation   Observation            `json:"observation"`
 	ValidEvidence []Evidence             `json:"valid_evidence"`
 	Capabilities  []CapabilityDescriptor `json:"capabilities"`
+	Conversation  []SessionMessage       `json:"conversation,omitempty"`
+}
+
+const (
+	MessageRoleUser   = "user"
+	MessageRoleAgent  = "agent"
+	MessageRoleSystem = "system"
+)
+
+const (
+	MessageKindText             = "text"
+	MessageKindQuestion         = "question"
+	MessageKindReply            = "reply"
+	MessageKindCriteriaProposal = "criteria_proposal"
+	MessageKindCriteriaConfirm  = "criteria_confirm"
+)
+
+type SessionMessage struct {
+	ID        string          `json:"id"`
+	GoalID    string          `json:"goal_id,omitempty"`
+	Role      string          `json:"role"`
+	Kind      string          `json:"kind"`
+	Text      string          `json:"text"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
+	// Delivered marks whether a decision round has consumed the message.
+	Delivered bool `json:"delivered"`
+}
+
+const (
+	ProposalPending    = "proposed"
+	ProposalConfirmed  = "confirmed"
+	ProposalRejected   = "rejected"
+	ProposalSuperseded = "superseded"
+)
+
+type CriteriaProposal struct {
+	ID        string      `json:"id"`
+	GoalID    string      `json:"goal_id,omitempty"`
+	Status    string      `json:"status"`
+	Criteria  []Criterion `json:"criteria"`
+	RawText   string      `json:"raw_text"`
+	CreatedAt time.Time   `json:"created_at"`
+}
+
+// Acceptance-criteria vocabulary. The kernel verifies exactly these kinds;
+// anything outside must be rejected before it reaches a goal.
+const (
+	CriterionKindERCClean          = "kicad.erc_clean"
+	CriterionKindConnectionPresent = "sensor.connection_present"
+)
+
+// The only connection endpoints the bundled sensor fixture can verify.
+const (
+	SensorEndpointA = "RT1.2"
+	SensorEndpointB = "J1.2"
+)
+
+func ValidateCriterion(c Criterion) error {
+	switch c.Kind {
+	case CriterionKindERCClean:
+		var payload struct {
+			MaxViolations int `json:"max_violations"`
+		}
+		if err := strictUnmarshal(c.Payload, &payload); err != nil {
+			return fmt.Errorf("criterion %s: %w", c.ID, err)
+		}
+		if payload.MaxViolations < 0 {
+			return fmt.Errorf("criterion %s: max_violations must be >= 0", c.ID)
+		}
+	case CriterionKindConnectionPresent:
+		var payload struct {
+			EndpointA string `json:"endpoint_a"`
+			EndpointB string `json:"endpoint_b"`
+		}
+		if err := strictUnmarshal(c.Payload, &payload); err != nil {
+			return fmt.Errorf("criterion %s: %w", c.ID, err)
+		}
+		if payload.EndpointA != SensorEndpointA || payload.EndpointB != SensorEndpointB {
+			return fmt.Errorf("criterion %s: unsupported endpoints %q-%q", c.ID, payload.EndpointA, payload.EndpointB)
+		}
+	default:
+		return fmt.Errorf("criterion %s: unsupported kind %q", c.ID, c.Kind)
+	}
+	return nil
+}
+
+func ValidateCriteria(criteria []Criterion) error {
+	seen := map[string]bool{}
+	for _, c := range criteria {
+		if c.ID == "" {
+			return fmt.Errorf("criterion ID required")
+		}
+		if seen[c.ID] {
+			return fmt.Errorf("criterion %s: duplicate ID", c.ID)
+		}
+		seen[c.ID] = true
+		if err := ValidateCriterion(c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func strictUnmarshal(data []byte, v any) error {
+	if len(data) == 0 {
+		return fmt.Errorf("payload required")
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if dec.More() {
+		return fmt.Errorf("trailing data after JSON value")
+	}
+	return nil
 }
 
 type DecisionMaker interface {

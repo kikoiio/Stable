@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS goals (
     allowed_capabilities_json TEXT NOT NULL,
     status TEXT NOT NULL,
     current_artifact_id TEXT NOT NULL DEFAULT '',
+    criteria_revision INTEGER NOT NULL DEFAULT 0,
     revision INTEGER NOT NULL DEFAULT 0,
     reason TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
@@ -112,3 +113,26 @@ CREATE TABLE IF NOT EXISTS evidence (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS evidence_goal_artifact ON evidence(goal_id, artifact_id, created_at);
+
+CREATE TABLE IF NOT EXISTS session_messages (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT REFERENCES goals(id),
+    role TEXT NOT NULL CHECK(role IN ('user','agent','system')),
+    kind TEXT NOT NULL CHECK(kind IN ('text','question','reply','criteria_proposal','criteria_confirm')),
+    text TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '',
+    delivered INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS session_messages_goal_time ON session_messages(goal_id, created_at);
+CREATE INDEX IF NOT EXISTS session_messages_undelivered ON session_messages(delivered, goal_id);
+
+CREATE TABLE IF NOT EXISTS criteria_proposals (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT REFERENCES goals(id),
+    status TEXT NOT NULL CHECK(status IN ('proposed','confirmed','rejected','superseded')),
+    criteria_json TEXT NOT NULL,
+    raw_text TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS criteria_proposals_goal ON criteria_proposals(goal_id, created_at);

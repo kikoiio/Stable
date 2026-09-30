@@ -31,27 +31,27 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if version == 0 {
-		var oldTable string
-		err = db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='decisions'`).Scan(&oldTable)
-		if err == nil {
-			var oldColumn bool
-			rows, qerr := db.Query(`PRAGMA table_info(decisions)`)
-			if qerr != nil {
-				db.Close()
-				return nil, qerr
-			}
-			for rows.Next() {
-				var n, notnull, pk int
-				var name, kind string
-				var def sql.NullString
-				if rows.Scan(&n, &name, &kind, &notnull, &def, &pk) == nil && name == "model_call_id" {
-					oldColumn = true
+	if version < 2 {
+		if version == 0 {
+			var oldTable string
+			err = db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='decisions'`).Scan(&oldTable)
+			if err == nil {
+				if !hasColumn(db, "decisions", "model_call_id") {
+					if _, err = db.Exec(`ALTER TABLE decisions ADD COLUMN model_call_id TEXT NOT NULL DEFAULT ''`); err != nil {
+						db.Close()
+						return nil, err
+					}
 				}
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				db.Close()
+				return nil, err
 			}
-			rows.Close()
-			if !oldColumn {
-				if _, err = db.Exec(`ALTER TABLE decisions ADD COLUMN model_call_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		}
+		var goalsTable string
+		err = db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='goals'`).Scan(&goalsTable)
+		if err == nil {
+			if !hasColumn(db, "goals", "criteria_revision") {
+				if _, err = db.Exec(`ALTER TABLE goals ADD COLUMN criteria_revision INTEGER NOT NULL DEFAULT 0`); err != nil {
 					db.Close()
 					return nil, err
 				}
@@ -65,11 +65,28 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if _, err = db.Exec(`PRAGMA user_version = 1`); err != nil {
+	if _, err = db.Exec(`PRAGMA user_version = 2`); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+func hasColumn(db *sql.DB, table, column string) bool {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var n, notnull, pk int
+		var name, kind string
+		var def sql.NullString
+		if rows.Scan(&n, &name, &kind, &notnull, &def, &pk) == nil && name == column {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -131,7 +148,7 @@ func scanGoal(row *sql.Row) (core.Goal, error) {
 	var g core.Goal
 	var criteria, caps, created string
 	err := row.Scan(&g.ID, &g.Objective, &criteria, &g.AllowedRoot, &g.ArtifactPath, &g.CheckIntervalSeconds, &caps, &g.Status,
-		&g.CurrentArtifactID, &g.Revision, &g.Reason, &created)
+		&g.CurrentArtifactID, &g.CriteriaRevision, &g.Revision, &g.Reason, &created)
 	if err != nil {
 		return g, err
 	}
@@ -145,7 +162,7 @@ func scanGoal(row *sql.Row) (core.Goal, error) {
 	return g, nil
 }
 
-const goalSelect = `SELECT id,objective,criteria_json,allowed_root,artifact_path,check_interval_seconds,allowed_capabilities_json,status,current_artifact_id,revision,reason,created_at FROM goals WHERE id=?`
+const goalSelect = `SELECT id,objective,criteria_json,allowed_root,artifact_path,check_interval_seconds,allowed_capabilities_json,status,current_artifact_id,criteria_revision,revision,reason,created_at FROM goals WHERE id=?`
 
 func (s *Store) UpdateStatus(ctx context.Context, id string, expected int64, status core.GoalStatus, reason string) (core.Goal, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -542,6 +559,226 @@ func (s *Store) EnsureGoal(ctx context.Context, id string) error {
 		return fmt.Errorf("goal %s: %w", id, err)
 	}
 	return nil
+}
+
+func (s *Store) InsertMessage(ctx context.Context, m core.SessionMessage) (core.SessionMessage, error) {
+	if m.ID == "" {
+		return m, errors.New("message ID required")
+	}
+	switch m.Role {
+	case core.MessageRoleUser, core.MessageRoleAgent, core.MessageRoleSystem:
+	default:
+		return m, fmt.Errorf("invalid message role %q", m.Role)
+	}
+	switch m.Kind {
+	case core.MessageKindText, core.MessageKindQuestion, core.MessageKindReply, core.MessageKindCriteriaProposal, core.MessageKindCriteriaConfirm:
+	default:
+		return m, fmt.Errorf("invalid message kind %q", m.Kind)
+	}
+	if m.CreatedAt.IsZero() {
+		m.CreatedAt = time.Now().UTC()
+	}
+	var goalID any
+	if m.GoalID != "" {
+		goalID = m.GoalID
+	}
+	payload := ""
+	if len(m.Payload) > 0 {
+		payload = string(m.Payload)
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO session_messages(id,goal_id,role,kind,text,payload_json,delivered,created_at) VALUES(?,?,?,?,?,?,0,?)`,
+		m.ID, goalID, m.Role, m.Kind, m.Text, payload, m.CreatedAt.Format(time.RFC3339Nano))
+	if err != nil {
+		return m, err
+	}
+	return m, nil
+}
+
+func scanMessage(row interface{ Scan(...any) error }) (core.SessionMessage, error) {
+	var m core.SessionMessage
+	var goalID, payload sql.NullString
+	var delivered int
+	var created string
+	if err := row.Scan(&m.ID, &goalID, &m.Role, &m.Kind, &m.Text, &payload, &delivered, &created); err != nil {
+		return m, err
+	}
+	m.GoalID = goalID.String
+	if payload.Valid && payload.String != "" {
+		m.Payload = json.RawMessage(payload.String)
+	}
+	m.Delivered = delivered == 1
+	m.CreatedAt = parseTime(created)
+	return m, nil
+}
+
+const messageSelect = `SELECT id,goal_id,role,kind,text,payload_json,delivered,created_at FROM session_messages`
+
+func (s *Store) ListMessages(ctx context.Context) ([]core.SessionMessage, error) {
+	return s.queryMessages(ctx, messageSelect+` ORDER BY created_at,id`)
+}
+
+func (s *Store) GoalMessages(ctx context.Context, goalID string) ([]core.SessionMessage, error) {
+	return s.queryMessages(ctx, messageSelect+` WHERE goal_id=? ORDER BY created_at,id`, goalID)
+}
+
+func (s *Store) UndeliveredMessages(ctx context.Context, goalID string) ([]core.SessionMessage, error) {
+	return s.queryMessages(ctx, messageSelect+` WHERE goal_id=? AND delivered=0 AND role='user' ORDER BY created_at,id`, goalID)
+}
+
+func (s *Store) MarkMessagesDelivered(ctx context.Context, ids []string) error {
+	for _, id := range ids {
+		if _, err := s.db.ExecContext(ctx, `UPDATE session_messages SET delivered=1 WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// UnansweredQuestion returns the latest agent question that has no later user
+// reply; it drives the waiting-for-human workflow state.
+func (s *Store) UnansweredQuestion(ctx context.Context, goalID string) (core.SessionMessage, bool, error) {
+	m, err := scanMessage(s.db.QueryRowContext(ctx, messageSelect+` WHERE goal_id=? AND role='agent' AND kind='question'
+		AND NOT EXISTS (SELECT 1 FROM session_messages r WHERE r.goal_id=session_messages.goal_id AND r.role='user' AND r.created_at>session_messages.created_at)
+		ORDER BY created_at DESC LIMIT 1`, goalID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return core.SessionMessage{}, false, nil
+	}
+	if err != nil {
+		return core.SessionMessage{}, false, err
+	}
+	return m, true, nil
+}
+
+func (s *Store) queryMessages(ctx context.Context, q string, args ...any) ([]core.SessionMessage, error) {
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []core.SessionMessage
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) InsertProposal(ctx context.Context, p core.CriteriaProposal) (core.CriteriaProposal, error) {
+	if p.ID == "" {
+		return p, errors.New("proposal ID required")
+	}
+	if len(p.Criteria) == 0 {
+		return p, errors.New("proposal criteria required")
+	}
+	if p.Status == "" {
+		p.Status = core.ProposalPending
+	}
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = time.Now().UTC()
+	}
+	var goalID any
+	if p.GoalID != "" {
+		goalID = p.GoalID
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO criteria_proposals(id,goal_id,status,criteria_json,raw_text,created_at) VALUES(?,?,?,?,?,?)`,
+		p.ID, goalID, p.Status, encode(p.Criteria), p.RawText, p.CreatedAt.Format(time.RFC3339Nano))
+	if err != nil {
+		return p, err
+	}
+	return p, nil
+}
+
+func (s *Store) SetProposalStatus(ctx context.Context, id, status string) (core.CriteriaProposal, error) {
+	if status != core.ProposalConfirmed && status != core.ProposalRejected {
+		return core.CriteriaProposal{}, fmt.Errorf("invalid proposal status %q", status)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return core.CriteriaProposal{}, err
+	}
+	defer tx.Rollback()
+	r, err := tx.ExecContext(ctx, `UPDATE criteria_proposals SET status=? WHERE id=? AND status='proposed'`, status, id)
+	if err != nil {
+		return core.CriteriaProposal{}, err
+	}
+	if n, _ := r.RowsAffected(); n == 0 {
+		return core.CriteriaProposal{}, errors.New("proposal transition rejected")
+	}
+	if status == core.ProposalConfirmed {
+		if _, err = tx.ExecContext(ctx, `UPDATE criteria_proposals SET status='superseded'
+			WHERE status='confirmed' AND goal_id=(SELECT goal_id FROM criteria_proposals WHERE id=?) AND id<>?`, id, id); err != nil {
+			return core.CriteriaProposal{}, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return core.CriteriaProposal{}, err
+	}
+	return s.GetProposal(ctx, id)
+}
+
+// AttachProposalGoal links a session-level proposal to the goal created from
+// its confirmation.
+func (s *Store) AttachProposalGoal(ctx context.Context, id, goalID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE criteria_proposals SET goal_id=? WHERE id=? AND goal_id IS NULL`, goalID, id)
+	return err
+}
+
+func (s *Store) GetProposal(ctx context.Context, id string) (core.CriteriaProposal, error) {
+	return scanProposal(s.db.QueryRowContext(ctx, `SELECT id,goal_id,status,criteria_json,raw_text,created_at FROM criteria_proposals WHERE id=?`, id))
+}
+
+func (s *Store) GoalProposals(ctx context.Context, goalID string) ([]core.CriteriaProposal, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,status,criteria_json,raw_text,created_at FROM criteria_proposals WHERE goal_id=? ORDER BY created_at,id`, goalID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []core.CriteriaProposal
+	for rows.Next() {
+		p, err := scanProposal(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func scanProposal(row interface{ Scan(...any) error }) (core.CriteriaProposal, error) {
+	var p core.CriteriaProposal
+	var goalID sql.NullString
+	var criteria, created string
+	if err := row.Scan(&p.ID, &goalID, &p.Status, &criteria, &p.RawText, &created); err != nil {
+		return p, err
+	}
+	p.GoalID = goalID.String
+	if err := json.Unmarshal([]byte(criteria), &p.Criteria); err != nil {
+		return p, err
+	}
+	p.CreatedAt = parseTime(created)
+	return p, nil
+}
+
+// UpdateGoalCriteria replaces the goal's accepted criteria and bumps the
+// revision; callers must have validated the criteria against the vocabulary.
+func (s *Store) UpdateGoalCriteria(ctx context.Context, goalID string, criteria []core.Criterion) (int, error) {
+	if err := core.ValidateCriteria(criteria); err != nil {
+		return 0, err
+	}
+	r, err := s.db.ExecContext(ctx, `UPDATE goals SET criteria_json=?,criteria_revision=criteria_revision+1,revision=revision+1 WHERE id=?`,
+		encode(criteria), goalID)
+	if err != nil {
+		return 0, err
+	}
+	if n, _ := r.RowsAffected(); n == 0 {
+		return 0, fmt.Errorf("goal %s: not found", goalID)
+	}
+	var revision int
+	err = s.db.QueryRowContext(ctx, `SELECT criteria_revision FROM goals WHERE id=?`, goalID).Scan(&revision)
+	return revision, err
 }
 
 func (s *Store) GoalIDForDecision(ctx context.Context, decisionID string) (string, error) {
