@@ -7,5 +7,5 @@ run/
 *.lck
 __pycache__/
 *.pyc
-docs/spec_docs/
+/docs/
 my_test/
