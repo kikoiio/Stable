@@ -11,45 +11,53 @@ import (
 	"strings"
 	"time"
 
+	"stable/internal/core"
 	"stable/internal/runtime"
 )
 
 type wireMsg struct {
-	Type    string `json:"type"`
-	Error   string `json:"error"`
-	Message *struct {
-		Role string `json:"role"`
-		Kind string `json:"kind"`
-		Text string `json:"text"`
-	} `json:"message"`
-	Proposal *struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-	} `json:"proposal"`
-	Goal *struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-	} `json:"goal"`
+	Type     string                 `json:"type"`
+	Error    string                 `json:"error"`
+	Message  *core.SessionMessage   `json:"message"`
+	Proposal *core.CriteriaProposal `json:"proposal"`
+	Goal     *core.Goal             `json:"goal"`
 }
 
-func printWire(line []byte) bool {
+func printWire(line []byte) (bool, string) {
 	var m wireMsg
 	if json.Unmarshal(line, &m) != nil {
-		return false
+		return false, ""
 	}
 	switch {
 	case m.Error != "":
 		fmt.Println("error:", m.Error)
 	case m.Proposal != nil:
 		fmt.Printf("proposal %s status=%s\n", m.Proposal.ID, m.Proposal.Status)
+		if m.Proposal.Status == core.ProposalPending {
+			fmt.Printf("确认请输入 /confirm %s；拒绝请输入 /reject %s\n", m.Proposal.ID, m.Proposal.ID)
+		}
 	case m.Goal != nil:
 		fmt.Printf("goal %s status=%s\n", m.Goal.ID, m.Goal.Status)
+		if m.Goal.Reason != "" {
+			fmt.Println("reason:", m.Goal.Reason)
+		}
 	case m.Message != nil:
 		fmt.Printf("[%s/%s] %s\n", m.Message.Role, m.Message.Kind, m.Message.Text)
+		if m.Message.Kind == core.MessageKindCriteriaProposal {
+			var proposal core.CriteriaProposal
+			if json.Unmarshal(m.Message.Payload, &proposal) == nil {
+				for _, criterion := range proposal.Criteria {
+					fmt.Printf("  - %s: %s %s\n", criterion.ID, criterion.Kind, criterion.Payload)
+				}
+			}
+		}
 	default:
-		return false
+		return false, ""
 	}
-	return m.Error != ""
+	if m.Message != nil && m.Message.Kind == core.MessageKindCriteriaConfirm {
+		return m.Error != "", m.Message.GoalID
+	}
+	return m.Error != "", ""
 }
 
 // chat connects a thin terminal to the persistent session service. One-shot
@@ -96,40 +104,41 @@ func chat(args []string, p runtime.Paths) error {
 		if err = json.NewEncoder(conn).Encode(out[0]); err != nil {
 			return err
 		}
-		return readResponses(conn, 10*time.Second, time.Second)
+		return readResponses(conn, 2*time.Minute)
 	}
 	return interactive(conn, bufio.NewScanner(os.Stdin), *goal)
 }
 
-// readResponses prints server messages until an error, the overall deadline,
-// or a quiet period with no further traffic.
-func readResponses(conn net.Conn, limit, quiet time.Duration) error {
-	deadline := time.Now().Add(limit)
-	last := time.Now()
-	sawError := false
+// readResponses waits for the server's completion marker. The model may take
+// longer than a quiet interval to prepare a criteria proposal.
+func readResponses(conn net.Conn, limit time.Duration) error {
+	_ = conn.SetReadDeadline(time.Now().Add(limit))
 	reader := bufio.NewReader(conn)
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(quiet))
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
-			break
+			return fmt.Errorf("session response incomplete: %w", err)
 		}
-		last = time.Now()
-		if printWire(line) {
-			sawError = true
+		var m wireMsg
+		if json.Unmarshal(line, &m) == nil && m.Type == "done" {
+			return nil
 		}
-		if sawError || time.Now().After(deadline) || time.Since(last) >= quiet {
-			break
+		if failed, _ := printWire(line); failed {
+			return errors.New("session service reported an error")
 		}
 	}
-	if sawError {
-		return errors.New("session service reported an error")
-	}
-	return nil
 }
 
 func interactive(conn net.Conn, in *bufio.Scanner, focus string) error {
 	responses := make(chan []byte, 32)
+	inputs := make(chan string)
+	inputDone := make(chan error, 1)
+	go func() {
+		for in.Scan() {
+			inputs <- in.Text()
+		}
+		inputDone <- in.Err()
+	}()
 	go func() {
 		defer close(responses)
 		r := bufio.NewReader(conn)
@@ -141,75 +150,82 @@ func interactive(conn net.Conn, in *bufio.Scanner, focus string) error {
 			responses <- line
 		}
 	}()
-	fmt.Println("connected to the persistent session; /goal ID to focus, /confirm ID, /reject ID, /reply text, /status, /quit")
+	fmt.Println("已连接。直接输入可聊天；/goal <目标描述> 创建目标；/say <文字> 纠偏当前目标；/status 查看进度；/quit 退出。")
 	send := func(msg map[string]string) error { return json.NewEncoder(conn).Encode(msg) }
-	for fmt.Print("> "); in.Scan(); fmt.Print("> ") {
-		text := strings.TrimSpace(in.Text())
-		if text == "" {
+	fmt.Print("> ")
+	for {
+		select {
+		case line, ok := <-responses:
+			if !ok {
+				return errors.New("session closed")
+			}
+			var m wireMsg
+			if json.Unmarshal(line, &m) == nil && m.Type == "done" {
+				continue
+			}
+			_, goalID := printWire(line)
+			if goalID != "" {
+				focus = goalID
+				fmt.Println("当前目标:", focus)
+			}
+			fmt.Print("> ")
 			continue
-		}
-		drain := false
-		switch {
-		case text == "/quit":
-			return nil
-		case strings.HasPrefix(text, "/goal "):
-			focus = field(text)
-			fmt.Println("focused goal:", focus)
-		case strings.HasPrefix(text, "/confirm "):
-			if err := send(map[string]string{"op": "confirm", "id": field(text), "goal": focus}); err != nil {
-				return err
-			}
-			drain = true
-		case strings.HasPrefix(text, "/reject "):
-			if err := send(map[string]string{"op": "reject", "id": field(text)}); err != nil {
-				return err
-			}
-			drain = true
-		case strings.HasPrefix(text, "/reply "):
-			if focus == "" {
-				fmt.Println("no focused goal; use /goal ID")
+		case err := <-inputDone:
+			return err
+		case line := <-inputs:
+			text := strings.TrimSpace(line)
+			if text == "" {
+				fmt.Print("> ")
 				continue
 			}
-			if err := send(map[string]string{"op": "reply", "goal": focus, "text": strings.TrimPrefix(text, "/reply ")}); err != nil {
-				return err
-			}
-			drain = true
-		case text == "/status":
-			if err := send(map[string]string{"op": "status"}); err != nil {
-				return err
-			}
-			drain = true
-		case strings.HasPrefix(text, "/"):
-			fmt.Println("unknown command; try /goal, /confirm, /reject, /reply, /status, /quit")
-		default:
-			if focus == "" {
-				fmt.Println("no focused goal; use /goal ID")
-				continue
-			}
-			if err := send(map[string]string{"op": "say", "goal": focus, "text": text}); err != nil {
-				return err
-			}
-			drain = true
-		}
-		if drain {
-			// Print whatever arrives within a short window so the transcript
-			// stays interactive without blocking the prompt.
-			timeout := time.After(500 * time.Millisecond)
-		drainLoop:
-			for {
-				select {
-				case line, ok := <-responses:
-					if !ok {
-						return errors.New("session closed")
-					}
-					printWire(line)
-				case <-timeout:
-					break drainLoop
+			switch {
+			case text == "/quit":
+				return nil
+			case strings.HasPrefix(text, "/focus "):
+				focus = field(text)
+				fmt.Println("当前目标:", focus)
+			case strings.HasPrefix(text, "/goal ") || strings.HasPrefix(text, "/create "):
+				if err := send(map[string]string{"op": "create_goal", "text": strings.TrimSpace(strings.SplitN(text, " ", 2)[1])}); err != nil {
+					return err
+				}
+			case strings.HasPrefix(text, "/confirm "):
+				if err := send(map[string]string{"op": "confirm", "id": field(text)}); err != nil {
+					return err
+				}
+			case strings.HasPrefix(text, "/reject "):
+				if err := send(map[string]string{"op": "reject", "id": field(text)}); err != nil {
+					return err
+				}
+			case strings.HasPrefix(text, "/reply "):
+				if focus == "" {
+					fmt.Println("请先用 /goal 设置目标，或用 /focus 选择已有目标")
+					continue
+				}
+				if err := send(map[string]string{"op": "reply", "goal": focus, "text": strings.TrimPrefix(text, "/reply ")}); err != nil {
+					return err
+				}
+			case strings.HasPrefix(text, "/say "):
+				if focus == "" {
+					fmt.Println("请先用 /goal 设置目标，或用 /focus 选择已有目标")
+					continue
+				}
+				if err := send(map[string]string{"op": "say", "goal": focus, "text": strings.TrimPrefix(text, "/say ")}); err != nil {
+					return err
+				}
+			case text == "/status":
+				if err := send(map[string]string{"op": "status"}); err != nil {
+					return err
+				}
+			case strings.HasPrefix(text, "/"):
+				fmt.Println("可用命令：/goal、/focus、/confirm、/reject、/say、/reply、/status、/quit")
+			default:
+				if err := send(map[string]string{"op": "chat", "text": text}); err != nil {
+					return err
 				}
 			}
+			fmt.Print("> ")
 		}
 	}
-	return in.Err()
 }
 
 func field(text string) string {

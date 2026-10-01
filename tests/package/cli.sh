@@ -109,6 +109,7 @@ export STABLE_BASE_URL="http://127.0.0.1:$(cat "$test_root/mock.port")/v1"
 sleep 6000 & unrelated_pid=$!
 up1=$(stable up)
 up2=$(stable up)
+stable doctor >/dev/null || fail 'doctor failed while Stable runtime was running'
 [[ $(python3 -c 'import json,sys;print(json.load(sys.stdin)["pid"])' <<<"$up1") == \
    $(python3 -c 'import json,sys;print(json.load(sys.stdin)["pid"])' <<<"$up2") ]] || fail 'second up spawned another supervisor'
 [[ $(python3 -c 'import json,sys;print(json.load(sys.stdin)["running"])' <<<"$up2") == True ]] || fail 'up2 not running'
@@ -121,7 +122,7 @@ stable down >/dev/null
 for _ in $(seq 1 40); do stable runtime status >/dev/null 2>&1 || break; sleep 0.25; done
 ! stable runtime status >/dev/null 2>&1 || fail 'runtime still running after down'
 kill -0 "$unrelated_pid" || fail 'down killed unrelated process'
-stable up >/dev/null
+printf '/quit\n' | stable >/dev/null || fail 'bare stable did not start and enter chat'
 stable goal status --goal cli-test >/dev/null || fail 'goal lost after restart'
 kill "$unrelated_pid" 2>/dev/null || true
 stable down >/dev/null

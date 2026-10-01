@@ -167,6 +167,9 @@ func Supervise(c appconfig.AppConfig, p Paths) error {
 		return fmt.Errorf("Worker startup: %w; see %s", err, p.WorkerLog)
 	}
 	chatDone := startChatService(c, p, address)
+	if err := waitChatSocket(p.ChatSocket, chatDone, 10*time.Second); err != nil {
+		return fmt.Errorf("Chat startup: %w; see %s", err, p.ChatLog)
+	}
 	status := Status{Running: true, PID: os.Getpid(), TemporalPID: temporal.Process.Pid, WorkerPID: worker.Process.Pid, TemporalAddress: address, StateDir: p.State, TemporalLog: p.TemporalLog, WorkerLog: p.WorkerLog}
 	stopWatch := make(chan struct{})
 	defer close(stopWatch)
@@ -243,19 +246,42 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 	}
 	defer s.Close()
 	var provider decision.StructuredProvider
+	var chatProvider decision.ChatProvider
 	if model, perr := decision.NewProvider(c.Model); perr == nil {
 		provider = model.(decision.StructuredProvider)
+		chatProvider = model.(decision.ChatProvider)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	svc, err := conversation.Serve(ctx, conversation.Deps{
-		Store: s, Provider: provider, Temporal: address, ProjectRoot: p.Share, RunRoot: p.Goals, SocketPath: p.ChatSocket,
+		Store: s, Provider: provider, ChatProvider: chatProvider, Temporal: address, ProjectRoot: p.Share, RunRoot: p.Goals, SocketPath: p.ChatSocket,
 	})
 	if err != nil {
 		return err
 	}
 	defer svc.Close()
 	select {}
+}
+
+func waitChatSocket(path string, done <-chan struct{}, limit time.Duration) error {
+	deadline := time.NewTimer(limit)
+	defer deadline.Stop()
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-done:
+			return errors.New("session service exited")
+		case <-deadline.C:
+			return errors.New("session service readiness timed out")
+		case <-tick.C:
+			conn, err := net.DialTimeout("unix", path, 100*time.Millisecond)
+			if err == nil {
+				conn.Close()
+				return nil
+			}
+		}
+	}
 }
 
 func processAlive(cmd *exec.Cmd) bool {

@@ -31,7 +31,7 @@ type Spec struct {
 }
 
 // Definition is the non-interactive goal definition file consumed by
-// `agentctl create --definition`; all fields are explicit.
+// `agentctl create --from`; all fields are explicit.
 type Definition struct {
 	Objective            string           `json:"objective"`
 	Criteria             []core.Criterion `json:"criteria"`

@@ -29,7 +29,7 @@ test-package: package ## 安装后 CLI 验收（install / cli / e2e / restart）
 install-dev: ## 重新打包并覆盖安装到 ~/.local（会先 stable down）
 	bash scripts/dev_update.sh
 
-run: ## 本地开发运行（temporal + worker，Ctrl-C 停止）
+run: ## 构建开发版并启动 stable 对话（退出对话后运行时继续工作）
 	bash scripts/run_local.sh
 
 clean: ## 删除运行数据和打包产物（run/ 与 dist/）

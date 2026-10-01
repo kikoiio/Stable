@@ -6,7 +6,8 @@ name=stable-${version}-linux-amd64
 archive_name=temporal_cli_1.9.1_linux_amd64.tar.gz
 digest=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
 if [[ $(uname -s) != Linux || $(uname -m) != x86_64 ]]; then echo 'Linux x86_64 required' >&2; exit 1; fi
-scratch=$(mktemp -d)
+mkdir -p "$root/run"
+scratch=$(mktemp -d "$root/run/.package-XXXXXXXX")
 trap 'chmod -R u+w "$scratch" 2>/dev/null || true; rm -rf "$scratch"' EXIT
 archive=${TEMPORAL_ARCHIVE:-"$scratch/$archive_name"}
 if [[ ! -f "$archive" ]]; then
@@ -19,7 +20,7 @@ cd "$root"
 for app in stable agentctl agentworker; do
   output="$pkg/libexec/$app"
   if [[ $app == stable ]]; then output="$pkg/bin/$app"; fi
-  GOCACHE=${GOCACHE:-"$scratch/go-cache"} GOPATH=${GOPATH:-"$scratch/gopath"} go build -buildvcs=false -trimpath -ldflags "-X main.version=$version" -o "$output" "./cmd/$app"
+  go build -p 2 -buildvcs=false -trimpath -ldflags "-X main.version=$version" -o "$output" "./cmd/$app"
 done
 tar -xzf "$archive" -C "$scratch" temporal LICENSE
 install -m 755 "$scratch/temporal" "$pkg/libexec/temporal"

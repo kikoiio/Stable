@@ -36,7 +36,11 @@ func Doctor(c appconfig.AppConfig, p Paths) []Check {
 	if conn != nil {
 		conn.Close()
 	}
-	checks = append(checks, Check{Name: "Temporal port", OK: free, Detail: addr + " (must be free before up)"})
+	if s, controlErr := Control(p, "status"); controlErr == nil && s.Running && s.TemporalAddress == addr {
+		checks = append(checks, Check{Name: "Temporal port", OK: true, Detail: addr + " (used by Stable runtime)"})
+	} else {
+		checks = append(checks, Check{Name: "Temporal port", OK: free, Detail: addr + " (must be free before up)"})
+	}
 	return checks
 }
 

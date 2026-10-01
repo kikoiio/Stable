@@ -45,6 +45,8 @@ func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) 
 		return out, nil
 	case "say":
 		return s.say(ctx, c, core.MessageKindText, core.EventKindUserMessage)
+	case "chat":
+		return s.chat(ctx, c)
 	case "reply":
 		return s.say(ctx, c, core.MessageKindReply, core.EventKindHumanReply)
 	case "create_goal":
@@ -55,6 +57,51 @@ func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) 
 		return s.reject(ctx, c)
 	}
 	return nil, fmt.Errorf("unknown op %q", c.Op)
+}
+
+func (s *Service) chat(ctx context.Context, c ClientMsg) ([]ServerMsg, error) {
+	if s.deps.ChatProvider == nil {
+		return nil, errors.New("chat model provider not configured; run stable config check")
+	}
+	user, err := s.deps.Store.InsertMessage(ctx, core.SessionMessage{
+		ID: goalrun.RandomID("msg"), Role: core.MessageRoleUser, Kind: core.MessageKindText, Text: c.Text, Ref: "chat",
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := []ServerMsg{{Type: "message", Message: &user}}
+	history, err := s.deps.Store.ListMessages(ctx)
+	if err != nil {
+		return out, err
+	}
+	turns := []decision.ChatMessage{{Role: "system", Content: "你是 Stable 的聊天助手。使用用户的语言直接回答问题。目标执行只能通过 /goal、/confirm、/say、/reply 等明确命令触发；不要声称已经执行命令、读取文件或修改设计。对于状态问题，建议使用 /status。"}}
+	for _, m := range history {
+		if m.Ref != "chat" || m.GoalID != "" || m.Kind != core.MessageKindText || (m.Role != core.MessageRoleUser && m.Role != core.MessageRoleAgent) {
+			continue
+		}
+		role := "assistant"
+		if m.Role == core.MessageRoleUser {
+			role = "user"
+		}
+		turns = append(turns, decision.ChatMessage{Role: role, Content: m.Text})
+	}
+	if len(turns) > 21 {
+		turns = append(turns[:1], turns[len(turns)-20:]...)
+	}
+	if len(turns) > 1 && turns[1].Role == "assistant" {
+		turns = append(turns[:1], turns[2:]...)
+	}
+	answer, err := s.deps.ChatProvider.GenerateChat(ctx, turns)
+	if err != nil {
+		return out, fmt.Errorf("chat response failed: %w", err)
+	}
+	agent, err := s.deps.Store.InsertMessage(ctx, core.SessionMessage{
+		ID: goalrun.RandomID("msg"), Role: core.MessageRoleAgent, Kind: core.MessageKindText, Text: answer, Ref: "chat",
+	})
+	if err != nil {
+		return out, err
+	}
+	return append(out, ServerMsg{Type: "message", Message: &agent}), nil
 }
 
 // say persists a user message for the focused goal and wakes the workflow, so

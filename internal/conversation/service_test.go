@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,8 +66,12 @@ func startService(t *testing.T, provider decision.StructuredProvider) (*Service,
 		t.Fatal(err)
 	}
 	socket := filepath.Join(dir, "chat.sock")
+	var chatProvider decision.ChatProvider
+	if p, ok := provider.(decision.ChatProvider); ok {
+		chatProvider = p
+	}
 	svc, err := Serve(context.Background(), Deps{
-		Store: s, Provider: provider, Temporal: "127.0.0.1:1", ProjectRoot: dir, RunRoot: filepath.Join(dir, "goals"),
+		Store: s, Provider: provider, ChatProvider: chatProvider, Temporal: "127.0.0.1:1", ProjectRoot: dir, RunRoot: filepath.Join(dir, "goals"),
 		SocketPath: socket, PollEvery: 50 * time.Millisecond,
 	})
 	if err != nil {
@@ -74,6 +79,55 @@ func startService(t *testing.T, provider decision.StructuredProvider) (*Service,
 	}
 	t.Cleanup(func() { svc.Close() })
 	return svc, socket
+}
+
+func TestChatRepliesWithoutGoalOrWorkflowEvent(t *testing.T) {
+	var requests [][]decision.ChatMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []decision.ChatMessage `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		requests = append(requests, body.Messages)
+		content, _ := json.Marshal("你好，我可以帮你查看目标进度。")
+		_, _ = w.Write([]byte(`{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":` + string(content) + `}}]}`))
+	}))
+	defer server.Close()
+	model, err := decision.NewProvider(newTestConfig(server.URL).Model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, socket := startService(t, model.(decision.StructuredProvider))
+	conn, reader := dial(t, socket)
+	send(t, conn, ClientMsg{Op: "chat", Text: "你好"})
+	user := readMsg(t, reader)
+	agent := readMsg(t, reader)
+	done := readMsg(t, reader)
+	if user.Message == nil || user.Message.Role != core.MessageRoleUser || user.Message.GoalID != "" || agent.Message == nil || agent.Message.Role != core.MessageRoleAgent || !strings.Contains(agent.Message.Text, "你好") || done.Type != "done" {
+		t.Fatalf("chat exchange: %+v %+v %+v", user, agent, done)
+	}
+	if len(requests) != 1 || len(requests[0]) < 2 || requests[0][len(requests[0])-1].Content != "你好" {
+		t.Fatalf("model request: %+v", requests)
+	}
+	send(t, conn, ClientMsg{Op: "chat", Text: "还记得刚才说什么吗？"})
+	readMsg(t, reader)
+	readMsg(t, reader)
+	if done := readMsg(t, reader); done.Type != "done" {
+		t.Fatalf("second chat completion: %+v", done)
+	}
+	if len(requests) != 2 || len(requests[1]) != 4 || requests[1][1].Content != "你好" || requests[1][2].Content != agent.Message.Text {
+		t.Fatalf("conversation context: %+v", requests)
+	}
+	events, err := svc.deps.Store.PendingEvents(context.Background())
+	if err != nil || len(events) != 0 {
+		t.Fatalf("chat queued goal events: %+v %v", events, err)
+	}
+	history, err := svc.deps.Store.ListMessages(context.Background())
+	if err != nil || len(history) != 4 {
+		t.Fatalf("chat history: %+v %v", history, err)
+	}
 }
 
 func dial(t *testing.T, socket string) (net.Conn, *bufio.Reader) {
@@ -179,6 +233,9 @@ func TestProposalAndConfirmUpdatesRunningGoal(t *testing.T) {
 	if proposal.Type != "proposal" || proposal.Proposal == nil || proposal.Proposal.Status != core.ProposalPending {
 		t.Fatalf("proposal: %+v", proposal)
 	}
+	if done := readMsg(t, r); done.Type != "done" {
+		t.Fatalf("missing completion marker: %+v", done)
+	}
 
 	// The proposal is session-level (goal existed but was not tied); confirm
 	// with the running goal updates its criteria in place.
@@ -197,6 +254,9 @@ func TestProposalAndConfirmUpdatesRunningGoal(t *testing.T) {
 	events, _ := svc.deps.Store.PendingEvents(context.Background())
 	if len(events) != 1 || events[0].Kind != core.EventKindCriteriaUpdate {
 		t.Fatalf("criteria update event: %+v", events)
+	}
+	if done := readMsg(t, r); done.Type != "done" {
+		t.Fatalf("missing completion marker: %+v", done)
 	}
 	// Confirming twice must be rejected by the proposal state machine.
 	send(t, conn, ClientMsg{Op: "confirm", ID: proposal.Proposal.ID, Goal: "goal-1"})

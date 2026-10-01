@@ -17,16 +17,16 @@ stable config init
 编辑 `~/.config/stable/config.json`，填写模型提供商、模型名和 API 密钥，然后运行 `stable config check`。也可通过 `STABLE_PROVIDER`、`STABLE_MODEL` 和对应提供商的密钥环境变量配置。运行 `stable help` 可查看命令。
 
 ```bash
-stable up
-stable chat --create-goal "修复传感器连接，ERC 必须全过，J1 连接要恢复" --goal demo01
-stable chat --confirm prop-XXXXXXXX --goal demo01   # 确认验收标准提案后开始运行
-stable chat --goal demo01 --say "优先检查 J1 附近的连线"
-stable goal status --goal demo01
-stable goal export --goal demo01 --out "$HOME/demo01-delivery"
-stable down
+stable
+> /goal 修复传感器连接，ERC 必须全过，J1 连接要恢复
+> /confirm prop-XXXXXXXX
+> /say 优先检查 J1 附近的连线
+> 你好
+> /status
+> /quit
 ```
 
-`stable chat` 是常驻对话会话的瘦终端：目标创建（自然语言验收标准转译 + 显式确认）、运行中纠偏、agent 提问答复都在会话内完成；终端关闭不影响目标运行。也可以用 `stable goal create --from goal.json` 以结构化定义文件非交互创建。
+`stable` 会在需要时启动运行时并进入常驻对话。直接输入文字会得到模型回复。`/goal <目标描述>` 生成验收标准提案，终端显示完整标准，`/confirm <提案ID>` 后开始运行并自动聚焦新目标。`/say <文字>` 可纠偏当前目标，`/reply <文字>` 可答复 agent 提问；`/focus <目标ID>` 切换已有目标。退出终端不影响目标运行，再次运行 `stable` 可接回会话。也可以用 `stable goal create --from goal.json` 以结构化定义文件非交互创建。
 
 ## 仓库布局
 
@@ -48,7 +48,7 @@ make cases         # 场景用例（慢，需要 kicad-cli）
 make package       # 构建 dist/ 发布包
 make test-package  # 发布包验收（会先重新打包）
 make install-dev   # 重新打包并覆盖安装到 ~/.local（自动先 stable down）
-make run           # 本地开发运行（Ctrl-C 停止）
+make run           # 构建开发版并进入 stable 对话
 make clean         # 删除 run/ 与 dist/
 ```
 
@@ -56,3 +56,4 @@ make clean         # 删除 run/ 与 dist/
 
 运行数据默认在 `~/.local/state/stable`；`stable down` 会停止运行时并清理遗留的
 KiCad GUI 会话进程。
+`make run` 使用 `run/dev-state` 保存开发数据；退出对话后需用相同的 `STABLE_STATE_DIR` 运行开发版 `stable down` 才会停止后台运行时。

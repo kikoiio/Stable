@@ -29,7 +29,8 @@ func main() {
 func usage() {
 	fmt.Print(`stable ` + version + `
 Usage:
-  stable                (no arguments: start runtime, run one goal, export, stop)
+  stable                (start runtime if needed, enter chat; /goal TEXT sets a goal)
+  stable demo           (quickstart: run one built-in goal, export, stop)
   stable doctor
   stable config init
   stable config check
@@ -54,7 +55,19 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		return runOnce(c, p)
+		if err := c.Validate(true); err != nil {
+			return fmt.Errorf("%w\nrun `stable config init` to create the config file, fill in your model and key, then run stable again", err)
+		}
+		fmt.Println(c.Summary())
+		if s, err := runtime.Control(p, "status"); err != nil || !s.Running {
+			fmt.Println("starting local runtime...")
+			if _, err := runtime.Up(context.Background(), c, p); err != nil {
+				return err
+			}
+		}
+		// The chat session outlives the terminal on purpose: goals keep
+		// running after the user quits, so the runtime is left up.
+		return chat(nil, p)
 	}
 	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		usage()
@@ -166,6 +179,8 @@ func run(args []string) error {
 		return goal(args[1:], c, p)
 	case "chat":
 		return chat(args[1:], p)
+	case "demo":
+		return runOnce(c, p)
 	case "chatserve":
 		return chatserve(args[1:])
 	default:

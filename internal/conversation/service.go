@@ -14,13 +14,14 @@ import (
 )
 
 type Deps struct {
-	Store       *store.Store
-	Provider    decision.StructuredProvider
-	Temporal    string
-	ProjectRoot string
-	RunRoot     string
-	SocketPath  string
-	PollEvery   time.Duration // goal status poll interval; 0 defaults to 2s
+	Store        *store.Store
+	Provider     decision.StructuredProvider
+	ChatProvider decision.ChatProvider
+	Temporal     string
+	ProjectRoot  string
+	RunRoot      string
+	SocketPath   string
+	PollEvery    time.Duration // goal status poll interval; 0 defaults to 2s
 }
 
 // Service is the persistent chat session: it owns the unix socket, fans out
@@ -104,7 +105,7 @@ func (s *Service) serveConn(ctx context.Context, conn net.Conn) {
 		}
 	}()
 
-	s.readLoop(ctx, conn)
+	s.readLoop(ctx, conn, updates)
 	s.mu.Lock()
 	delete(s.clients, updates)
 	s.mu.Unlock()
@@ -112,7 +113,7 @@ func (s *Service) serveConn(ctx context.Context, conn net.Conn) {
 	<-writerDone
 }
 
-func (s *Service) readLoop(ctx context.Context, conn net.Conn) error {
+func (s *Service) readLoop(ctx context.Context, conn net.Conn, updates chan ServerMsg) error {
 	dec := jsonDecoder(conn)
 	for {
 		var c ClientMsg
@@ -120,15 +121,15 @@ func (s *Service) readLoop(ctx context.Context, conn net.Conn) error {
 			return err
 		}
 		msgs, err := s.handle(ctx, c)
-		if err != nil {
-			if err := encodeServer(conn, ServerMsg{Type: "error", Error: err.Error()}); err != nil {
-				return err
-			}
-			continue
-		}
 		for i := range msgs {
 			s.broadcast(msgs[i])
 		}
+		if err != nil {
+			updates <- ServerMsg{Type: "error", Error: err.Error()}
+		}
+		// Queue completion after this client's broadcast messages so one-shot
+		// clients can distinguish a finished request from a slow model response.
+		updates <- ServerMsg{Type: "done"}
 	}
 }
 

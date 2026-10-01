@@ -51,7 +51,7 @@ func chatserve(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	svc, err := conversation.Serve(ctx, conversation.Deps{
-		Store: s, Provider: provider, Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket,
+		Store: s, Provider: provider, ChatProvider: model.(decision.ChatProvider), Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket,
 	})
 	if err != nil {
 		return err

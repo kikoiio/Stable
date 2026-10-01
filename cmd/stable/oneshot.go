@@ -80,7 +80,7 @@ func runOnce(c appconfig.AppConfig, p runtime.Paths) error {
 	if err := os.WriteFile(defPath, []byte(def), 0644); err != nil {
 		return err
 	}
-	if _, err := agentctl(p, c, "create", "--goal", goalID, "--definition", defPath); err != nil {
+	if _, err := agentctl(p, c, "create", "--goal", goalID, "--from", defPath); err != nil {
 		return err
 	}
 	fmt.Println("goal started:", goalID)
