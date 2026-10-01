@@ -356,9 +356,10 @@ const (
 
 // Conversation-driven event kinds carried by the regular event pipeline.
 const (
-	EventKindUserMessage    = "user_message"
-	EventKindHumanReply     = "human_reply"
-	EventKindCriteriaUpdate = "criteria_updated"
+	EventKindUserMessage      = "user_message"
+	EventKindHumanReply       = "human_reply"
+	EventKindCriteriaUpdate   = "criteria_updated"
+	EventKindDependencyChange = "dependency_changed"
 )
 
 // The only connection endpoints the bundled sensor fixture can verify.
@@ -470,6 +471,7 @@ type ArtifactStore interface {
 type StateStore interface {
 	CreateGoal(context.Context, Goal) (GoalSnapshot, error)
 	GetGoalSnapshot(context.Context, string) (GoalSnapshot, error)
+	ReconcileDependencies(context.Context, string, []DependencySnapshot) (DependencyRefresh, error)
 	UpdateStatus(context.Context, string, int64, GoalStatus, string) (Goal, error)
 	InsertEventIfAbsent(context.Context, Event) (Event, bool, error)
 	PendingEvents(context.Context) ([]Event, error)

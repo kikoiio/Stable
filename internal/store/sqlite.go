@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -72,11 +74,89 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	if _, err = db.Exec(`PRAGMA user_version = 3`); err != nil {
+	if version < 4 {
+		if err = migrateV4(db); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if _, err = db.Exec(`PRAGMA user_version = 4`); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+// migrateV4 adds dependency tracking storage to existing databases.
+func migrateV4(db *sql.DB) error {
+	addGoalRevision := !hasColumn(db, "goals", "dependency_revision")
+	addDecisionRevision := !hasColumn(db, "decisions", "dependency_revision")
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if addGoalRevision {
+		if _, err = tx.Exec(`ALTER TABLE goals ADD COLUMN dependency_revision INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	if addDecisionRevision {
+		if _, err = tx.Exec(`ALTER TABLE decisions ADD COLUMN dependency_revision INTEGER`); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(`CREATE TABLE IF NOT EXISTS goal_dependencies (
+		goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+		family TEXT NOT NULL CHECK(family IN ('kicad.erc','sensor.connection')),
+		snapshot_json TEXT NOT NULL,
+		PRIMARY KEY (goal_id, family)
+	)`); err != nil {
+		return err
+	}
+	if err = migrateV4Goals(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateV4Goals(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT g.id,g.status FROM goals g
+		WHERE g.status IN ('verified','pending_reverification')
+		AND NOT EXISTS (SELECT 1 FROM goal_dependencies d WHERE d.goal_id=g.id)
+		ORDER BY g.id`)
+	if err != nil {
+		return err
+	}
+	type legacyGoal struct{ id, status string }
+	var goals []legacyGoal
+	for rows.Next() {
+		var g legacyGoal
+		if err = rows.Scan(&g.id, &g.status); err != nil {
+			rows.Close()
+			return err
+		}
+		goals = append(goals, g)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, g := range goals {
+		reason := "旧版数据缺少工程依赖快照，待复核后才能确认当前结论"
+		if _, err = tx.Exec(`UPDATE goals SET status='pending_reverification',reason=?,revision=revision+CASE WHEN status='verified' THEN 1 ELSE 0 END WHERE id=?`, reason, g.id); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`UPDATE agents SET status=? WHERE goal_id=?`, agentStatusFor(core.GoalPendingReverification), g.id); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`INSERT OR IGNORE INTO events(id,goal_id,kind,payload_json,received_at,status) VALUES(?,?,?,?,?,'pending')`,
+			"migrate-v4-"+g.id, g.id, core.EventKindDependencyChange, `{"source":"migration-v4"}`, now()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // migrateV3 adds the V01 versioning columns to evidence and decisions inside a
@@ -290,7 +370,7 @@ func scanGoal(row *sql.Row) (core.Goal, error) {
 	var g core.Goal
 	var criteria, caps, created string
 	err := row.Scan(&g.ID, &g.Objective, &criteria, &g.AllowedRoot, &g.ArtifactPath, &g.CheckIntervalSeconds, &caps, &g.Status,
-		&g.CurrentArtifactID, &g.CriteriaRevision, &g.Revision, &g.Reason, &created)
+		&g.CurrentArtifactID, &g.CriteriaRevision, &g.DependencyRevision, &g.Revision, &g.Reason, &created)
 	if err != nil {
 		return g, err
 	}
@@ -304,7 +384,7 @@ func scanGoal(row *sql.Row) (core.Goal, error) {
 	return g, nil
 }
 
-const goalSelect = `SELECT id,objective,criteria_json,allowed_root,artifact_path,check_interval_seconds,allowed_capabilities_json,status,current_artifact_id,criteria_revision,revision,reason,created_at FROM goals WHERE id=?`
+const goalSelect = `SELECT id,objective,criteria_json,allowed_root,artifact_path,check_interval_seconds,allowed_capabilities_json,status,current_artifact_id,criteria_revision,dependency_revision,revision,reason,created_at FROM goals WHERE id=?`
 
 func (s *Store) UpdateStatus(ctx context.Context, id string, expected int64, status core.GoalStatus, reason string) (core.Goal, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -398,7 +478,202 @@ func (s *Store) GetGoalSnapshot(ctx context.Context, id string) (core.GoalSnapsh
 	if out.Proposals, err = s.GoalProposals(ctx, id); err != nil {
 		return out, err
 	}
+	if out.Dependencies, err = s.dependencies(ctx, id); err != nil {
+		return out, err
+	}
 	return out, nil
+}
+
+func (s *Store) ReconcileDependencies(ctx context.Context, goalID string, snapshots []core.DependencySnapshot) (core.DependencyRefresh, error) {
+	ordered := append([]core.DependencySnapshot(nil), snapshots...)
+	if len(ordered) != 2 {
+		return core.DependencyRefresh{}, fmt.Errorf("expected exactly two dependency snapshots, got %d", len(ordered))
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Family < ordered[j].Family })
+	if ordered[0].Family != core.CheckFamilyERC || ordered[1].Family != core.CheckFamilyConnection {
+		return core.DependencyRefresh{}, fmt.Errorf("dependency snapshots must contain one ERC and one connection family")
+	}
+	for i := range ordered {
+		if ordered[i].SchemaVersion != 1 || ordered[i].Fingerprint == "" {
+			return core.DependencyRefresh{}, fmt.Errorf("dependency snapshot %s requires schema version 1 and a fingerprint", ordered[i].Family)
+		}
+		sort.Slice(ordered[i].Sources, func(a, b int) bool {
+			if ordered[i].Sources[a].Kind == ordered[i].Sources[b].Kind {
+				return ordered[i].Sources[a].Identity < ordered[i].Sources[b].Identity
+			}
+			return ordered[i].Sources[a].Kind < ordered[i].Sources[b].Kind
+		})
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return core.DependencyRefresh{}, err
+	}
+	defer tx.Rollback()
+	var revision int64
+	if err = tx.QueryRowContext(ctx, `SELECT dependency_revision FROM goals WHERE id=?`, goalID).Scan(&revision); err != nil {
+		return core.DependencyRefresh{}, fmt.Errorf("goal %s: %w", goalID, err)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT family,snapshot_json FROM goal_dependencies WHERE goal_id=?`, goalID)
+	if err != nil {
+		return core.DependencyRefresh{}, err
+	}
+	previous := map[core.CheckFamily]core.DependencySnapshot{}
+	for rows.Next() {
+		var family core.CheckFamily
+		var rawSnapshot string
+		var snapshot core.DependencySnapshot
+		if err = rows.Scan(&family, &rawSnapshot); err != nil {
+			rows.Close()
+			return core.DependencyRefresh{}, err
+		}
+		if err = json.Unmarshal([]byte(rawSnapshot), &snapshot); err != nil {
+			rows.Close()
+			return core.DependencyRefresh{}, fmt.Errorf("decode existing dependency %s for goal %s: %w", family, goalID, err)
+		}
+		previous[family] = snapshot
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return core.DependencyRefresh{}, err
+	}
+	rows.Close()
+
+	changed := make([]core.CheckFamily, 0, 2)
+	if len(previous) > 0 {
+		for _, snapshot := range ordered {
+			old, ok := previous[snapshot.Family]
+			if !ok || !sameDependencySnapshot(old, snapshot) {
+				changed = append(changed, snapshot.Family)
+			}
+		}
+	}
+	for _, snapshot := range ordered {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO goal_dependencies(goal_id,family,snapshot_json) VALUES(?,?,?)
+			ON CONFLICT(goal_id,family) DO UPDATE SET snapshot_json=excluded.snapshot_json`, goalID, snapshot.Family, encode(snapshot)); err != nil {
+			return core.DependencyRefresh{}, err
+		}
+	}
+	var event *core.Event
+	if len(changed) > 0 {
+		revision++
+		reason := dependencyChangeReason(changed, ordered)
+		if _, err = tx.ExecContext(ctx, `UPDATE goals SET dependency_revision=?,status=?,reason=?,revision=revision+1 WHERE id=?`, revision, core.GoalPendingReverification, reason, goalID); err != nil {
+			return core.DependencyRefresh{}, err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE agents SET status=? WHERE goal_id=?`, agentStatusFor(core.GoalPendingReverification), goalID); err != nil {
+			return core.DependencyRefresh{}, err
+		}
+		for _, family := range changed {
+			if err = invalidateDependencyEvidence(ctx, tx, goalID, family, reason); err != nil {
+				return core.DependencyRefresh{}, err
+			}
+		}
+		eventID := fmt.Sprintf("dependency-change-%s-%d", goalID, revision)
+		payload := encode(map[string]any{"families": changed, "dependency_revision": revision})
+		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO events(id,goal_id,kind,payload_json,received_at,status) VALUES(?,?,?,?,?,'pending')`,
+			eventID, goalID, core.EventKindDependencyChange, payload, now()); err != nil {
+			return core.DependencyRefresh{}, err
+		}
+		event = &core.Event{ID: eventID, GoalID: goalID, Kind: core.EventKindDependencyChange, Payload: json.RawMessage(payload), ReceivedAt: time.Now().UTC(), Status: "pending"}
+	}
+	if err = tx.Commit(); err != nil {
+		return core.DependencyRefresh{}, err
+	}
+	snapshot, err := s.GetGoalSnapshot(ctx, goalID)
+	if err != nil {
+		return core.DependencyRefresh{}, err
+	}
+	return core.DependencyRefresh{ChangedFamilies: changed, DependencyRevision: revision, Event: event, Snapshot: snapshot}, nil
+}
+
+func sameDependencySnapshot(a, b core.DependencySnapshot) bool {
+	return a.SchemaVersion == b.SchemaVersion && a.Family == b.Family && a.CheckerID == b.CheckerID &&
+		a.CheckerVersion == b.CheckerVersion && a.Fingerprint == b.Fingerprint && a.Available == b.Available && reflect.DeepEqual(a.Sources, b.Sources)
+}
+
+func dependencyChangeReason(changed []core.CheckFamily, snapshots []core.DependencySnapshot) string {
+	parts := make([]string, 0, len(changed))
+	for _, family := range changed {
+		for _, snapshot := range snapshots {
+			if snapshot.Family != family {
+				continue
+			}
+			detail := string(family) + " 工程依赖发生变化"
+			if !snapshot.Available && snapshot.Reason != "" {
+				detail += "，当前不可用：" + snapshot.Reason
+			}
+			parts = append(parts, detail)
+		}
+	}
+	return strings.Join(parts, "；") + "；目标待复核"
+}
+
+func invalidateDependencyEvidence(ctx context.Context, tx *sql.Tx, goalID string, family core.CheckFamily, reason string) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id,kind,provenance FROM evidence WHERE goal_id=? AND invalidated_reason=''`, goalID)
+	if err != nil {
+		return err
+	}
+	type evidenceRow struct {
+		id, kind   string
+		provenance sql.NullString
+	}
+	var matches []evidenceRow
+	for rows.Next() {
+		var row evidenceRow
+		if err = rows.Scan(&row.id, &row.kind, &row.provenance); err != nil {
+			rows.Close()
+			return err
+		}
+		var provenance core.EvidenceProvenance
+		if row.provenance.Valid && row.provenance.String != "" {
+			_ = json.Unmarshal([]byte(row.provenance.String), &provenance)
+		}
+		rowFamily := provenance.Family
+		if rowFamily == "" {
+			switch row.kind {
+			case "kicad.erc":
+				rowFamily = core.CheckFamilyERC
+			case "sensor.connection_present":
+				rowFamily = core.CheckFamilyConnection
+			}
+		}
+		if rowFamily == family {
+			matches = append(matches, row)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, row := range matches {
+		if _, err = tx.ExecContext(ctx, `UPDATE evidence SET invalidated_reason=? WHERE id=? AND invalidated_reason=''`, reason, row.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) dependencies(ctx context.Context, goalID string) ([]core.DependencySnapshot, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT snapshot_json FROM goal_dependencies WHERE goal_id=? ORDER BY family`, goalID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []core.DependencySnapshot
+	for rows.Next() {
+		var rawSnapshot string
+		var snapshot core.DependencySnapshot
+		if err = rows.Scan(&rawSnapshot); err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal([]byte(rawSnapshot), &snapshot); err != nil {
+			return nil, fmt.Errorf("decode dependency snapshot for goal %s: %w", goalID, err)
+		}
+		out = append(out, snapshot)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) InsertEventIfAbsent(ctx context.Context, e core.Event) (core.Event, bool, error) {
@@ -775,7 +1050,7 @@ func (s *Store) EnsureGoal(ctx context.Context, id string) error {
 }
 
 func (s *Store) ListGoals(ctx context.Context) ([]core.Goal, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,objective,criteria_json,allowed_root,artifact_path,check_interval_seconds,allowed_capabilities_json,status,current_artifact_id,criteria_revision,revision,reason,created_at FROM goals ORDER BY created_at,id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,objective,criteria_json,allowed_root,artifact_path,check_interval_seconds,allowed_capabilities_json,status,current_artifact_id,criteria_revision,dependency_revision,revision,reason,created_at FROM goals ORDER BY created_at,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -785,7 +1060,7 @@ func (s *Store) ListGoals(ctx context.Context) ([]core.Goal, error) {
 		var g core.Goal
 		var criteria, caps, created string
 		if err = rows.Scan(&g.ID, &g.Objective, &criteria, &g.AllowedRoot, &g.ArtifactPath, &g.CheckIntervalSeconds, &caps, &g.Status,
-			&g.CurrentArtifactID, &g.CriteriaRevision, &g.Revision, &g.Reason, &created); err != nil {
+			&g.CurrentArtifactID, &g.CriteriaRevision, &g.DependencyRevision, &g.Revision, &g.Reason, &created); err != nil {
 			return nil, err
 		}
 		if err = json.Unmarshal([]byte(criteria), &g.Criteria); err != nil {

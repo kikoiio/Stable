@@ -11,12 +11,20 @@ CREATE TABLE IF NOT EXISTS goals (
     status TEXT NOT NULL,
     current_artifact_id TEXT NOT NULL DEFAULT '',
     criteria_revision INTEGER NOT NULL DEFAULT 0,
+    dependency_revision INTEGER NOT NULL DEFAULT 0,
     revision INTEGER NOT NULL DEFAULT 0,
     reason TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS goals_status ON goals(status);
 CREATE INDEX IF NOT EXISTS goals_revision ON goals(id, revision);
+
+CREATE TABLE IF NOT EXISTS goal_dependencies (
+    goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+    family TEXT NOT NULL CHECK(family IN ('kicad.erc','sensor.connection')),
+    snapshot_json TEXT NOT NULL,
+    PRIMARY KEY (goal_id, family)
+);
 
 CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY,
@@ -73,6 +81,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     model_run_id TEXT NOT NULL DEFAULT '',
 	model_call_id TEXT NOT NULL DEFAULT '',
 	criteria_revision INTEGER,
+	dependency_revision INTEGER,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS decisions_agent_time ON decisions(agent_id, created_at);

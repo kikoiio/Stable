@@ -78,3 +78,64 @@ func TestDependencyTypes(t *testing.T) {
 		t.Fatalf("legacy provenance was not preserved as v1/unknown: %#v", legacyProvenance)
 	}
 }
+
+func TestEvidenceCurrentDependencies(t *testing.T) {
+	revision := 4
+	current := core.DependencySnapshot{
+		SchemaVersion:  1,
+		Family:         core.CheckFamilyERC,
+		Sources:        []core.DependencySource{{Kind: "project_erc", Identity: "settings", Digest: "sha256:abc", State: "present"}},
+		CheckerID:      "kicad-cli-erc",
+		CheckerVersion: "9.0.8",
+		Fingerprint:    "sha256:all-inputs",
+		Available:      true,
+	}
+	makeEvidence := func() core.Evidence {
+		frozen := current
+		frozen.Sources = append([]core.DependencySource(nil), current.Sources...)
+		return core.Evidence{
+			ID: "erc-1", ArtifactID: "artifact-1", Result: "pass", CriteriaRevision: &revision,
+			Provenance: &core.EvidenceProvenance{
+				SchemaVersion: 2, Claim: "ERC within threshold", Coverage: "all ERC criteria",
+				CheckerID: current.CheckerID, CheckerVersion: current.CheckerVersion,
+				SourceLevel: "tool_check", InvalidationRule: "artifact, criteria or dependency change",
+				Family: current.Family, Dependency: &frozen,
+			},
+		}
+	}
+	goal := core.Goal{ID: "g", CriteriaRevision: revision, CurrentArtifactID: "artifact-1"}
+	if !core.EvidenceCurrentWithDependencies(goal, "artifact-1", []core.DependencySnapshot{current}, makeEvidence()) {
+		t.Fatal("matching available v2 evidence should be current")
+	}
+
+	tests := map[string]func(*core.Evidence, *[]core.DependencySnapshot){
+		"changed fingerprint": func(_ *core.Evidence, snapshots *[]core.DependencySnapshot) {
+			(*snapshots)[0].Fingerprint = "sha256:changed"
+		},
+		"unavailable current input": func(_ *core.Evidence, snapshots *[]core.DependencySnapshot) { (*snapshots)[0].Available = false },
+		"checker version changed":   func(_ *core.Evidence, snapshots *[]core.DependencySnapshot) { (*snapshots)[0].CheckerVersion = "9.1.0" },
+		"family absent": func(_ *core.Evidence, snapshots *[]core.DependencySnapshot) {
+			*snapshots = []core.DependencySnapshot{{Family: core.CheckFamilyConnection, Available: true}}
+		},
+		"duplicate family snapshot": func(_ *core.Evidence, snapshots *[]core.DependencySnapshot) {
+			*snapshots = append(*snapshots, (*snapshots)[0])
+		},
+		"legacy v1 provenance":          func(e *core.Evidence, _ *[]core.DependencySnapshot) { e.Provenance.SchemaVersion = 1 },
+		"screenshot source":             func(e *core.Evidence, _ *[]core.DependencySnapshot) { e.Provenance.SourceLevel = "observation" },
+		"mismatched family":             func(e *core.Evidence, _ *[]core.DependencySnapshot) { e.Provenance.Family = core.CheckFamilyConnection },
+		"missing frozen dependency":     func(e *core.Evidence, _ *[]core.DependencySnapshot) { e.Provenance.Dependency = nil },
+		"frozen dependency unavailable": func(e *core.Evidence, _ *[]core.DependencySnapshot) { e.Provenance.Dependency.Available = false },
+		"criteria revision stale":       func(e *core.Evidence, _ *[]core.DependencySnapshot) { stale := 3; e.CriteriaRevision = &stale },
+		"artifact stale":                func(e *core.Evidence, _ *[]core.DependencySnapshot) { e.ArtifactID = "old-artifact" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			evidence := makeEvidence()
+			snapshots := []core.DependencySnapshot{current}
+			mutate(&evidence, &snapshots)
+			if core.EvidenceCurrentWithDependencies(goal, "artifact-1", snapshots, evidence) {
+				t.Fatal("invalid or stale evidence was accepted as current")
+			}
+		})
+	}
+}

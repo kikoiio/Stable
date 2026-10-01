@@ -26,6 +26,239 @@ func newGoalStore(t *testing.T) (*Store, string) {
 	return s, path
 }
 
+func TestOpenV4(t *testing.T) {
+	s, _ := newGoalStore(t)
+	var version int
+	if err := s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
+		t.Fatalf("database version = %d, err = %v", version, err)
+	}
+	for table, column := range map[string]string{"goals": "dependency_revision", "decisions": "dependency_revision"} {
+		if !hasColumn(s.DB(), table, column) {
+			t.Fatalf("%s.%s missing from v4 schema", table, column)
+		}
+	}
+	var table string
+	if err := s.DB().QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='goal_dependencies'`).Scan(&table); err != nil {
+		t.Fatalf("goal_dependencies missing from v4 schema: %v", err)
+	}
+}
+
+func TestMigrateV4(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v3.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.CreateGoal(ctx, core.Goal{ID: "v3-verified", Objective: "legacy verified", AllowedRoot: t.TempDir(), Criteria: []core.Criterion{{ID: "erc", Kind: "kicad.erc_clean", Payload: json.RawMessage(`{"max_violations":0}`)}}, Status: core.GoalVerified, CurrentArtifactID: "artifact-old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.DB().Exec(`UPDATE goals SET status='verified' WHERE id='v3-verified'; PRAGMA user_version=3;`); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.RecordEvidence(ctx, core.Evidence{ID: "legacy-ev", GoalID: "v3-verified", CriterionID: "erc", ArtifactID: "artifact-old", Kind: "kicad.erc", Result: "pass", ReportPath: "old-report.json"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	snapshot, err := s.GetGoalSnapshot(ctx, "v3-verified")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Goal.Status != core.GoalPendingReverification || snapshot.Goal.Reason == "" {
+		t.Fatalf("legacy verified goal was not invalidated: %+v", snapshot.Goal)
+	}
+	if len(snapshot.Evidence) != 1 || snapshot.Evidence[0].Result != "pass" || snapshot.Evidence[0].Provenance != nil || snapshot.Evidence[0].InvalidatedReason != "" {
+		t.Fatalf("legacy evidence was rewritten: %+v", snapshot.Evidence)
+	}
+	if len(snapshot.Events) != 1 || snapshot.Events[0].ID != "migrate-v4-v3-verified" || snapshot.Events[0].Status != "pending" {
+		t.Fatalf("migration wake event: %+v", snapshot.Events)
+	}
+	var version int
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
+		t.Fatalf("migrated version = %d, err = %v", version, err)
+	}
+}
+
+func TestGoalDependencySnapshot(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newGoalStore(t)
+	empty, err := s.GetGoalSnapshot(ctx, "goal-1")
+	if err != nil || len(empty.Dependencies) != 0 || empty.Goal.DependencyRevision != 0 {
+		t.Fatalf("empty dependency snapshot: dependencies=%+v revision=%d err=%v", empty.Dependencies, empty.Goal.DependencyRevision, err)
+	}
+
+	connection := core.DependencySnapshot{SchemaVersion: 1, Family: core.CheckFamilyConnection, CheckerID: "connection", CheckerVersion: "1", Fingerprint: "conn-1", Available: true}
+	erc := core.DependencySnapshot{SchemaVersion: 1, Family: core.CheckFamilyERC, CheckerID: "kicad", CheckerVersion: "9.0.8", Fingerprint: "erc-1", Available: true}
+	for _, snapshot := range []core.DependencySnapshot{connection, erc} { // deliberately insert reverse sort order
+		data, marshalErr := json.Marshal(snapshot)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if _, err = s.DB().Exec(`INSERT INTO goal_dependencies(goal_id,family,snapshot_json) VALUES(?,?,?)`, "goal-1", snapshot.Family, string(data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = s.DB().Exec(`UPDATE goals SET dependency_revision=2 WHERE id='goal-1'`); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := s.GetGoalSnapshot(ctx, "goal-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Goal.DependencyRevision != 2 || len(snapshot.Dependencies) != 2 || snapshot.Dependencies[0].Family != core.CheckFamilyERC || snapshot.Dependencies[1].Family != core.CheckFamilyConnection {
+		t.Fatalf("dependencies not loaded in stable order: goal=%+v dependencies=%+v", snapshot.Goal, snapshot.Dependencies)
+	}
+	if snapshot.Dependencies[0].Fingerprint != "erc-1" || snapshot.Dependencies[1].Fingerprint != "conn-1" {
+		t.Fatalf("snapshot JSON did not round trip: %+v", snapshot.Dependencies)
+	}
+}
+
+func TestDependencyBaseline(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newGoalStore(t)
+	input := []core.DependencySnapshot{
+		{SchemaVersion: 1, Family: core.CheckFamilyERC, CheckerID: "kicad", CheckerVersion: "9.0.8", Fingerprint: "erc-base", Available: true},
+		{SchemaVersion: 1, Family: core.CheckFamilyConnection, CheckerID: "connection", CheckerVersion: "1", Fingerprint: "connection-base", Available: true},
+	}
+	result, err := s.ReconcileDependencies(ctx, "goal-1", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DependencyRevision != 0 || len(result.ChangedFamilies) != 0 || result.Event != nil || len(result.Snapshot.Dependencies) != 2 {
+		t.Fatalf("initial baseline incorrectly treated as change: %+v", result)
+	}
+	if result.Snapshot.Goal.Status != core.GoalActive || len(result.Snapshot.Events) != 0 {
+		t.Fatalf("baseline changed goal state or created event: %+v", result.Snapshot)
+	}
+	result, err = s.ReconcileDependencies(ctx, "goal-1", input)
+	if err != nil || result.DependencyRevision != 0 || result.Event != nil || len(result.ChangedFamilies) != 0 {
+		t.Fatalf("repeated baseline was not idempotent: %+v err=%v", result, err)
+	}
+	if _, err = s.ReconcileDependencies(ctx, "goal-1", input[:1]); err == nil {
+		t.Fatal("incomplete dependency batch should be rejected")
+	}
+}
+
+func TestReconcileDependencyChange(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newGoalStore(t)
+	base := []core.DependencySnapshot{
+		{SchemaVersion: 1, Family: core.CheckFamilyERC, CheckerID: "kicad", CheckerVersion: "9.0.8", Fingerprint: "erc-v1", Available: true},
+		{SchemaVersion: 1, Family: core.CheckFamilyConnection, CheckerID: "connection", CheckerVersion: "1", Fingerprint: "connection-v1", Available: true},
+	}
+	if _, err := s.ReconcileDependencies(ctx, "goal-1", base); err != nil {
+		t.Fatal(err)
+	}
+	for _, evidence := range []core.Evidence{
+		{ID: "ev-erc", GoalID: "goal-1", CriterionID: "erc", Kind: "kicad.erc", Result: "pass", ReportPath: "erc.json"},
+		{ID: "ev-connection", GoalID: "goal-1", CriterionID: "connection", Kind: "sensor.connection_present", Result: "pass"},
+	} {
+		if err := s.RecordEvidence(ctx, evidence); err != nil {
+			t.Fatal(err)
+		}
+	}
+	changed := append([]core.DependencySnapshot(nil), base...)
+	changed[0].Fingerprint = "erc-v2"
+	result, err := s.ReconcileDependencies(ctx, "goal-1", changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DependencyRevision != 1 || len(result.ChangedFamilies) != 1 || result.ChangedFamilies[0] != core.CheckFamilyERC || result.Event == nil {
+		t.Fatalf("unexpected reconciliation result: %+v", result)
+	}
+	if result.Snapshot.Goal.Status != core.GoalPendingReverification || result.Snapshot.Agent.Status != "waiting" || len(result.Snapshot.Events) != 1 {
+		t.Fatalf("goal state and durable event diverged: %+v", result.Snapshot)
+	}
+	if result.Snapshot.Events[0].ID != "dependency-change-goal-1-1" || result.Snapshot.Events[0].Kind != core.EventKindDependencyChange || result.Snapshot.Events[0].Status != "pending" {
+		t.Fatalf("unexpected wake event: %+v", result.Snapshot.Events[0])
+	}
+	if len(result.Snapshot.Evidence) != 2 {
+		t.Fatalf("evidence rows changed: %+v", result.Snapshot.Evidence)
+	}
+	for _, evidence := range result.Snapshot.Evidence {
+		switch evidence.ID {
+		case "ev-erc":
+			if evidence.Result != "pass" || evidence.InvalidatedReason == "" {
+				t.Fatalf("affected evidence did not retain result and gain invalidation: %+v", evidence)
+			}
+		case "ev-connection":
+			if evidence.InvalidatedReason != "" || evidence.Result != "pass" {
+				t.Fatalf("unaffected connection evidence was invalidated: %+v", evidence)
+			}
+		default:
+			t.Fatalf("unexpected evidence row: %+v", evidence)
+		}
+	}
+}
+
+func TestReconcileDependencyIdempotence(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newGoalStore(t)
+	base := []core.DependencySnapshot{
+		{SchemaVersion: 1, Family: core.CheckFamilyERC, CheckerID: "kicad", CheckerVersion: "9.0.8", Fingerprint: "erc-content-a", Available: true},
+		{SchemaVersion: 1, Family: core.CheckFamilyConnection, CheckerID: "connection", CheckerVersion: "1", Fingerprint: "connection-v1", Available: true},
+	}
+	if _, err := s.ReconcileDependencies(ctx, "goal-1", base); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"erc-history", "connection-current"} {
+		kind := "kicad.erc"
+		if id == "connection-current" {
+			kind = "sensor.connection_present"
+		}
+		if err := s.RecordEvidence(ctx, core.Evidence{ID: id, GoalID: "goal-1", Kind: kind, Result: "pass", ReportPath: id + ".json"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	missing := append([]core.DependencySnapshot(nil), base...)
+	missing[0].Available = false
+	missing[0].CheckerVersion = ""
+	missing[0].Fingerprint = "erc-missing-required"
+	missing[0].Reason = "required project symbol library is missing"
+	missing[0].Sources = []core.DependencySource{{Kind: "symbol_library", Identity: "Device", State: "missing_required", Reason: missing[0].Reason}}
+	first, err := s.ReconcileDependencies(ctx, "goal-1", missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.DependencyRevision != 1 || len(first.ChangedFamilies) != 1 || first.ChangedFamilies[0] != core.CheckFamilyERC || first.Snapshot.Goal.Status != core.GoalPendingReverification || !strings.Contains(first.Snapshot.Goal.Reason, missing[0].Reason) {
+		t.Fatalf("unavailable dependency did not preserve pending state and reason: %+v", first)
+	}
+	second, err := s.ReconcileDependencies(ctx, "goal-1", missing)
+	if err != nil || second.Event != nil || len(second.ChangedFamilies) != 0 || second.DependencyRevision != 1 || len(second.Snapshot.Events) != 1 {
+		t.Fatalf("repeated unavailable snapshot was not idempotent: %+v err=%v", second, err)
+	}
+
+	recovered := append([]core.DependencySnapshot(nil), base...)
+	third, err := s.ReconcileDependencies(ctx, "goal-1", recovered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.DependencyRevision != 2 || third.Event == nil || len(third.ChangedFamilies) != 1 || third.ChangedFamilies[0] != core.CheckFamilyERC {
+		t.Fatalf("recovery was not recorded as a new dependency change: %+v", third)
+	}
+	if len(third.Snapshot.Evidence) != 2 {
+		t.Fatalf("historical evidence was removed: %+v", third.Snapshot.Evidence)
+	}
+	for _, evidence := range third.Snapshot.Evidence {
+		if evidence.ID == "erc-history" && evidence.InvalidatedReason == "" {
+			t.Fatalf("restoring old content erased prior invalidation: %+v", evidence)
+		}
+	}
+	fourth, err := s.ReconcileDependencies(ctx, "goal-1", recovered)
+	if err != nil || fourth.Event != nil || fourth.DependencyRevision != 2 || len(fourth.Snapshot.Events) != 2 {
+		t.Fatalf("identical recovered snapshot caused duplicate event: %+v err=%v", fourth, err)
+	}
+}
+
 func TestGoalRevision(t *testing.T) {
 	s, _ := newGoalStore(t)
 	ctx := context.Background()
@@ -371,7 +604,7 @@ func TestEvidenceProvenanceRoundtrip(t *testing.T) {
 	s, path := newGoalStore(t)
 	ctx := context.Background()
 	var version int
-	if err := s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 3 {
+	if err := s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
 		t.Fatalf("fresh database version %d %v", version, err)
 	}
 	rev := 2

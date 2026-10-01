@@ -36,7 +36,7 @@ func TestV1DatabaseMigrates(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 3 {
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
 		t.Fatalf("version %d %v", version, err)
 	}
 	var objective string
@@ -58,7 +58,7 @@ func TestV1DatabaseMigrates(t *testing.T) {
 	if g.Goal.Reason == "" {
 		t.Fatal("migration left the reason empty")
 	}
-	if len(g.Events) != 1 || g.Events[0].Kind != core.EventKindCriteriaUpdate || g.Events[0].Status != "pending" {
+	if len(g.Events) != 2 || g.Events[0].Kind != core.EventKindCriteriaUpdate || g.Events[1].Kind != core.EventKindDependencyChange || g.Events[1].ID != "migrate-v4-legacy" || g.Events[0].Status != "pending" || g.Events[1].Status != "pending" {
 		t.Fatalf("migration events: %+v", g.Events)
 	}
 	if err = s.Close(); err != nil {
@@ -68,14 +68,14 @@ func TestV1DatabaseMigrates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 3 {
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
 		t.Fatalf("reopen version %d %v", version, err)
 	}
 	g, err = s.GetGoalSnapshot(context.Background(), "legacy")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(g.Events) != 1 {
+	if len(g.Events) != 2 {
 		t.Fatalf("reopen generated duplicate events: %+v", g.Events)
 	}
 }
@@ -119,7 +119,7 @@ func TestV2DatabaseMigratesLegacyVerifiedGoals(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 3 {
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
 		t.Fatalf("version %d %v", version, err)
 	}
 	snap, err := s.GetGoalSnapshot(ctx, "g-old")
@@ -138,7 +138,7 @@ func TestV2DatabaseMigratesLegacyVerifiedGoals(t *testing.T) {
 	if ev.Result != "pass" || ev.CriteriaRevision != nil || ev.Provenance != nil || ev.InvalidatedReason != "" {
 		t.Fatalf("legacy evidence mutated: %+v", ev)
 	}
-	if len(snap.Events) != 1 || snap.Events[0].ID != "migrate-v3-g-old" || snap.Events[0].Status != "pending" {
+	if len(snap.Events) != 2 || snap.Events[0].ID != "migrate-v3-g-old" || snap.Events[0].Status != "pending" || snap.Events[1].ID != "migrate-v4-g-old" || snap.Events[1].Kind != core.EventKindDependencyChange {
 		t.Fatalf("wake event: %+v", snap.Events)
 	}
 	active, err := s.GetGoalSnapshot(ctx, "g-active")
@@ -158,7 +158,7 @@ func TestV2DatabaseMigratesLegacyVerifiedGoals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snap.Events) != 1 || len(snap.Evidence) != 1 || snap.Goal.Status != core.GoalPendingReverification {
+	if len(snap.Events) != 2 || len(snap.Evidence) != 1 || snap.Goal.Status != core.GoalPendingReverification {
 		t.Fatalf("reopen not idempotent: events=%d evidence=%d status=%q", len(snap.Events), len(snap.Evidence), snap.Goal.Status)
 	}
 }
@@ -237,7 +237,7 @@ func TestOldSchemaMigrates(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 3 {
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
 		t.Fatalf("version %d %v", version, err)
 	}
 	if !hasColumn(s.DB(), "decisions", "model_call_id") {
@@ -268,7 +268,7 @@ func TestOldSchemaMigrates(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 3 {
+		if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
 			t.Fatalf("reopen %d: version %d %v", i, version, err)
 		}
 		if err = s.Close(); err != nil {
