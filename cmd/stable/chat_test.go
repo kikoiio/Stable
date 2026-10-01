@@ -104,3 +104,52 @@ func TestInteractiveGoalFlow(t *testing.T) {
 		t.Fatal("interactive did not quit")
 	}
 }
+
+func TestPendingReverificationDisplay(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStdout := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() {
+		os.Stdout = oldStdout
+		r.Close()
+	})
+
+	pending, err := json.Marshal(map[string]any{"type": "goal", "goal": map[string]any{
+		"id": "goal-1", "status": "pending_reverification", "criteria_revision": 2,
+		"reason": "标准已更新，等待完整复核",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	printWire(pending)
+
+	verified, err := json.Marshal(map[string]any{"type": "goal", "goal": map[string]any{
+		"id": "goal-1", "status": "verified", "criteria_revision": 2,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	printWire(verified)
+	w.Close()
+
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(out)
+	if !strings.Contains(text, "status=pending_reverification（待复核）") {
+		t.Fatalf("pending status not annotated: %q", text)
+	}
+	if !strings.Contains(text, "criteria_revision: 2") {
+		t.Fatalf("criteria revision not shown: %q", text)
+	}
+	if !strings.Contains(text, "reason: 标准已更新，等待完整复核") {
+		t.Fatalf("reason not shown: %q", text)
+	}
+	if strings.Count(text, "（待复核）") != 1 || !strings.Contains(text, "status=verified\n") {
+		t.Fatalf("other status output changed: %q", text)
+	}
+}

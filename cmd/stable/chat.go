@@ -37,7 +37,12 @@ func printWire(line []byte) (bool, string) {
 			fmt.Printf("确认请输入 /confirm %s；拒绝请输入 /reject %s\n", m.Proposal.ID, m.Proposal.ID)
 		}
 	case m.Goal != nil:
-		fmt.Printf("goal %s status=%s\n", m.Goal.ID, m.Goal.Status)
+		if m.Goal.Status == core.GoalPendingReverification {
+			fmt.Printf("goal %s status=%s（待复核）\n", m.Goal.ID, m.Goal.Status)
+			fmt.Printf("criteria_revision: %d\n", m.Goal.CriteriaRevision)
+		} else {
+			fmt.Printf("goal %s status=%s\n", m.Goal.ID, m.Goal.Status)
+		}
 		if m.Goal.Reason != "" {
 			fmt.Println("reason:", m.Goal.Reason)
 		}

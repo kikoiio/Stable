@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# Source-level e2e for V01 criteria-change invalidation: verify a goal, confirm
+# new criteria while checks are deferred (Temporal down), observe
+# pending_reverification and a history-only export, let the wake replay finish
+# the reverification, then change criteria mid-check with a controlled pause and
+# confirm the new revision converges without stale evidence counting.
+set -euo pipefail
+
+project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "$project_root"
+mkdir -p run
+run_root=${E2E_CRITERIA_ROOT:-$(mktemp -d "$project_root/run/criteria-XXXXXXXX")}
+port=${E2E_CRITERIA_PORT:-17339}
+address="localhost:$port"
+goal_id="criteria-$(date +%s)"
+mock_pid=
+chat_pid=
+
+cleanup() {
+  if [[ -n "$chat_pid" ]]; then kill "$chat_pid" 2>/dev/null || true; wait "$chat_pid" 2>/dev/null || true; fi
+  if [[ -n "$mock_pid" ]]; then kill "$mock_pid" 2>/dev/null || true; wait "$mock_pid" 2>/dev/null || true; fi
+  # The runtime daemons (temporal/supervisor/worker) outlive the shell; stop
+  # them so the port is free for later runs.
+  if [[ -x "$run_root/dev-install/bin/stable" ]]; then
+    STABLE_STATE_DIR="$run_root" "$run_root/dev-install/bin/stable" down >/dev/null 2>&1 || true
+  fi
+  python3 "$project_root/tests/e2e/stop_sessions.py" "$run_root" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+source "$project_root/tests/e2e/mock_model_env.sh"
+export STABLE_STATE_DIR="$run_root"
+
+# Build the same dev-install layout the runtime supervisor expects: it derives
+# libexec/share from its own executable location, so stable must live in
+# dev-install/bin for the daemon stack to find workers, fixtures and schemas.
+dev_root="$run_root/dev-install"
+mkdir -p "$dev_root/bin" "$dev_root/libexec" "$dev_root/share"
+go build -buildvcs=false -o "$dev_root/bin/stable" ./cmd/stable
+go build -buildvcs=false -o "$dev_root/libexec/agentctl" ./cmd/agentctl
+go build -buildvcs=false -o "$dev_root/libexec/agentworker" ./cmd/agentworker
+temporal_bin=$(command -v temporal) || { echo 'temporal CLI required' >&2; exit 1; }
+ln -sfn "$temporal_bin" "$dev_root/libexec/temporal"
+ln -sfn "$project_root/fixtures" "$dev_root/share/fixtures"
+ln -sfn "$project_root/schemas" "$dev_root/share/schemas"
+ln -sfn "$project_root/workers" "$dev_root/share/workers"
+
+# stable up daemonizes temporal/supervisor/worker/chat and returns; readiness
+# is judged by fresh 'agent worker ready' lines (chatserve starts separately).
+start_runner() {
+  STABLE_TEMPORAL_PORT="$port" "$run_root/dev-install/bin/stable" up >"$run_root/up.log" 2>&1 || { cat "$run_root/up.log" >&2; return 1; }
+  # up returns after daemonizing; wait for the worker to connect. Logs rotate
+  # across down/up cycles, so match the ready line anywhere in the live file.
+  for _ in $(seq 1 120); do
+    if grep -q 'agent worker ready' "$run_root/worker.log" 2>/dev/null; then return 0; fi
+    sleep 0.5
+  done
+  tail -n 5 "$run_root/up.log" "$run_root/supervisor.log" >&2
+  return 1
+}
+
+# chatserve is not part of the daemon stack; start it for the session.
+ensure_chat() {
+  for _ in $(seq 1 40); do [[ -S "$run_root/chat.sock" ]] && return 0; sleep 0.25; done
+  "$dev_root/bin/stable" chatserve --db "$run_root/state.db" --socket "$run_root/chat.sock" \
+    --temporal "$address" --project-root "$project_root" --run-root "$run_root" >"$run_root/chatserve.log" 2>&1 &
+  chat_pid=$!
+  for _ in $(seq 1 40); do [[ -S "$run_root/chat.sock" ]] && return 0; sleep 0.25; done
+  cat "$run_root/chatserve.log" >&2
+  return 1
+}
+
+stop_runner() {
+  STABLE_STATE_DIR="$run_root" "$run_root/dev-install/bin/stable" down >/dev/null 2>&1 || true
+}
+
+stable_cli() { "$dev_root/bin/stable" "$@"; }
+status_file="$run_root/status.json"
+read_status() { "$dev_root/libexec/agentctl" status --run-root "$run_root" --goal "$goal_id" >"$status_file" 2>/dev/null; }
+export_delivery() { "$dev_root/libexec/agentctl" export --run-root "$run_root" --goal "$goal_id" --out "$run_root/$1" >/dev/null; }
+wait_status() { # python condition over status.json, then a hard assert
+  local probe=$1
+  for _ in $(seq 1 900); do
+    if read_status && python3 -c "$probe" "$status_file"; then return 0; fi
+    sleep 0.5
+  done
+  echo "timed out waiting for status condition" >&2
+  tail -n 5 "$run_root/worker.log" "$run_root/chatserve.log" >&2
+  exit 1
+}
+
+start_runner
+ensure_chat
+
+# --- phase 1: create, confirm and fully verify under revision 0 ---
+create_out=$(stable_cli chat --create-goal "修复传感器连接，ERC 必须全过，J1 连接要恢复" --goal "$goal_id")
+proposal_v0=$(sed -n 's/^proposal \(prop-[0-9a-f]*\) status=proposed$/\1/p' <<<"$create_out")
+[[ -n "$proposal_v0" ]] || { echo "no v0 proposal in: $create_out" >&2; exit 1; }
+confirm_out=$(stable_cli chat --confirm "$proposal_v0" --goal "$goal_id")
+[[ "$confirm_out" == *"goal $goal_id status=active"* ]] || { echo "confirm did not create goal: $confirm_out" >&2; exit 1; }
+wait_status 'import json,sys; x=json.load(open(sys.argv[1])); sys.exit(0 if x["verified"] else 1)'
+read_status
+python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); assert x["snapshot"]["goal"]["criteria_revision"]==0, x["snapshot"]["goal"]["criteria_revision"]' "$status_file"
+
+# --- phase 2: confirm relaxed criteria while checks are deferred (Temporal down) ---
+stop_runner
+create_out=$(stable_cli chat --create-goal "修复传感器连接，放宽 ERC 允许 2 个违规，J1 连接要恢复" --goal "$goal_id")
+proposal_v1=$(sed -n 's/^proposal \(prop-[0-9a-f]*\) status=proposed$/\1/p' <<<"$create_out")
+[[ -n "$proposal_v1" ]] || { echo "no v1 proposal in: $create_out" >&2; exit 1; }
+confirm_out=$(stable_cli chat --confirm "$proposal_v1" --goal "$goal_id")
+[[ "$confirm_out" == *"status=pending_reverification"* ]] || { echo "confirm did not defer to re-verification: $confirm_out" >&2; exit 1; }
+[[ "$confirm_out" == *"待复核"* ]] || { echo "pending status not annotated for terminal: $confirm_out" >&2; exit 1; }
+[[ "$confirm_out" == *"criteria_revision: 1"* ]] || { echo "pending status missing revision: $confirm_out" >&2; exit 1; }
+read_status
+python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); g=x["snapshot"]["goal"]; assert g["status"]=="pending_reverification" and g["criteria_revision"]==1, g' "$status_file"
+
+export_delivery delivery-p2
+python3 - "$run_root" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+assert not (root/'delivery-p2'/'erc.json').exists(), 'deferred export must not carry a current ERC report'
+delivery = json.loads((root/'delivery-p2'/'delivery.json').read_text())
+assert not delivery['verified'], delivery['unverified']
+current = [e for e in delivery['evidence'] if e['current']]
+assert not current, f'stale current evidence after confirm: {current}'
+history = json.loads((root/'delivery-p2'/'history'/'history.json').read_text())
+assert history, 'revision-0 evidence not archived'
+assert all(e['invalidated_reason'] for e in history), history
+erc_hist = [e for e in history if e['criterion_id'] == 'erc-clean']
+assert erc_hist and all(e['result'] == 'pass' for e in erc_hist), history
+print('phase2 PASS: pending_reverification export keeps history only')
+PY
+
+# --- phase 3: restart; the pending wake replays and auto reverification passes ---
+start_runner
+ensure_chat
+wait_status 'import json,sys; x=json.load(open(sys.argv[1])); sys.exit(0 if x["verified"] and x["snapshot"]["goal"]["criteria_revision"]==1 else 1)'
+export_delivery delivery-p3
+python3 - "$run_root" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+delivery = json.loads((root/'delivery-p3'/'delivery.json').read_text())
+assert delivery['verified'], delivery['unverified']
+current = [e for e in delivery['evidence'] if e['current']]
+assert current and all(e['criteria_revision'] == '1' for e in current), current
+erc = json.loads((root/'delivery-p3'/'erc.json').read_text())
+total = sum(len(s['violations']) for s in erc['sheets'])
+assert total <= 2, total
+print('phase3 PASS: replayed wake re-verified under revision 1')
+PY
+
+# --- phase 4: confirm tightened criteria mid-run, controlled pause, converge ---
+create_out=$(stable_cli chat --create-goal "修复传感器连接，ERC 必须全过，J1 连接要恢复" --goal "$goal_id")
+proposal_v2=$(sed -n 's/^proposal \(prop-[0-9a-f]*\) status=proposed$/\1/p' <<<"$create_out")
+[[ -n "$proposal_v2" ]] || { echo "no v2 proposal in: $create_out" >&2; exit 1; }
+confirm_out=$(stable_cli chat --confirm "$proposal_v2" --goal "$goal_id")
+[[ "$confirm_out" == *"status=pending_reverification"* ]] || { echo "v2 confirm did not defer: $confirm_out" >&2; exit 1; }
+stop_runner
+sleep 2
+read_status
+python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); g=x["snapshot"]["goal"]; assert g["status"]=="pending_reverification" and g["criteria_revision"]==2, g' "$status_file"
+start_runner
+ensure_chat
+wait_status 'import json,sys; x=json.load(open(sys.argv[1])); sys.exit(0 if x["verified"] and x["snapshot"]["goal"]["criteria_revision"]==2 else 1)'
+export_delivery delivery-p4
+python3 - "$run_root" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+delivery = json.loads((root/'delivery-p4'/'delivery.json').read_text())
+assert delivery['verified'], delivery['unverified']
+current = [e for e in delivery['evidence'] if e['current']]
+assert current and all(e['criteria_revision'] == '2' for e in current), current
+assert any(e['criteria_revision'] == '1' and not e['current'] for e in delivery['evidence']), 'revision-1 evidence missing from history view'
+history = json.loads((root/'delivery-p4'/'history'/'history.json').read_text())
+reports = ' '.join(e.get('archived_report', '') for e in history)
+assert '-v0-' in reports and '-v1-' in reports, history
+erc = json.loads((root/'delivery-p4'/'erc.json').read_text())
+total = sum(len(s['violations']) for s in erc['sheets'])
+assert total == 0, total
+print('phase4 PASS: mid-check change converged on revision 2 without stale evidence')
+PY
+
+printf 'E2E CRITERIA PASS %s\nEvidence: %s\n' "$goal_id" "$run_root/delivery"

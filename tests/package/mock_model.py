@@ -34,6 +34,12 @@ class Handler(BaseHTTPRequestHandler):
         nl = prompt.rsplit('User requirements: ', 1)[-1]
         if '美观' in nl:
             proposal = dict(status='reject', criteria=[], reason='美观无法机器验证，请改用可验证的验收条件')
+        elif '放宽' in nl:
+            proposal = dict(status='ok', reason='映射到放宽后的 ERC 与传感器连接检查', criteria=[
+                dict(id='erc-clean', kind='kicad.erc_clean', payload=dict(max_violations=2)),
+                dict(id='sensor-connection', kind='sensor.connection_present',
+                     payload=dict(endpoint_a='RT1.2', endpoint_b='J1.2')),
+            ])
         else:
             proposal = dict(status='ok', reason='映射到 ERC 与传感器连接检查', criteria=[
                 dict(id='erc-clean', kind='kicad.erc_clean', payload=dict(max_violations=0)),
