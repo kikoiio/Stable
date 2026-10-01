@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 
 from schematic import authorized, digest, inspect, repair
-from erc import run_erc
+from erc import DEFAULT_MAX_VIOLATIONS, run_erc
 
 
 def handle(request: dict) -> dict:
@@ -43,11 +43,15 @@ def handle(request: dict) -> dict:
         result.update(status=status, actual_artifact_id=actual, postcondition=facts)
     elif kind == 'kicad.run_erc':
         report = Path(payload.get('report_path', ''))
+        threshold = payload.get('max_violations', DEFAULT_MAX_VIOLATIONS)
         if not payload.get('report_path'):
             result['status'] = 'blocked'
             result['error_code'] = 'report_path_missing'
+        elif not isinstance(threshold, int) or isinstance(threshold, bool) or threshold < 0:
+            result['status'] = 'blocked'
+            result['error_code'] = 'invalid_max_violations'
         else:
-            status, actual, facts, paths = run_erc(path, root, report)
+            status, actual, facts, paths = run_erc(path, root, report, threshold)
             result.update(status=status, actual_artifact_id=actual, postcondition=facts, evidence_paths=paths)
     return result
 

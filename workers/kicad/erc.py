@@ -11,6 +11,10 @@ import subprocess
 from schematic import authorized, digest
 
 
+CHECKER_ID = 'kicad-cli-erc'
+DEFAULT_MAX_VIOLATIONS = 0
+
+
 def _environment(root: Path) -> dict[str, str]:
     env = os.environ.copy()
     env['XDG_CACHE_HOME'] = str(root / '.kicad-cache')
@@ -26,18 +30,40 @@ def _environment(root: Path) -> dict[str, str]:
     return env
 
 
-def run_erc(path: Path, root: Path, report: Path) -> tuple[str, str, dict, list[str]]:
+def kicad_cli_version(env: dict[str, str]) -> str | None:
+    """Return the real kicad-cli version, or None when it cannot be determined.
+
+    A guessed version is never returned: without the real version the check
+    result cannot serve as verifiable evidence.
+    """
+    try:
+        result = subprocess.run(
+            ['kicad-cli', 'version'], capture_output=True, text=True, env=env, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    version = result.stdout.strip()
+    return version or None
+
+
+def run_erc(path: Path, root: Path, report: Path, max_violations: int = DEFAULT_MAX_VIOLATIONS) -> tuple[str, str, dict, list[str]]:
     if not authorized(path, root):
         return 'blocked', '', {'reason': 'design outside allowed root'}, []
     if not report.resolve().is_relative_to(root.resolve()):
         return 'blocked', digest(path), {'reason': 'report outside allowed root'}, []
+    env = _environment(root)
+    version = kicad_cli_version(env)
+    if version is None:
+        return 'blocked', digest(path), {'reason': 'kicad-cli version unavailable; result not verifiable'}, []
     report.parent.mkdir(parents=True, exist_ok=True)
     before = digest(path)
     command = [
         'kicad-cli', 'sch', 'erc', '--format', 'json', '--severity-all',
         '--exit-code-violations', '--output', str(report), str(path),
     ]
-    result = subprocess.run(command, capture_output=True, text=True, env=_environment(root), timeout=60)
+    result = subprocess.run(command, capture_output=True, text=True, env=env, timeout=60)
     after = digest(path)
     if before != after:
         return 'blocked', after, {'reason': 'design changed during ERC'}, []
@@ -48,10 +74,14 @@ def run_erc(path: Path, root: Path, report: Path) -> tuple[str, str, dict, list[
         violations = [item for sheet in data['sheets'] for item in sheet['violations']]
     except (ValueError, KeyError, TypeError) as exc:
         return 'blocked', after, {'reason': 'invalid ERC report', 'detail': str(exc)}, []
-    status = 'pass' if not violations else 'fail'
+    count = len(violations)
+    status = 'pass' if count <= max_violations else 'fail'
     return status, after, {
         'artifact_id': after,
-        'violation_count': len(violations),
+        'checker_id': CHECKER_ID,
+        'checker_version': version,
+        'violation_count': count,
+        'max_violations': max_violations,
         'violation_types': [item['type'] for item in violations],
         'report_format': data.get('$schema', ''),
     }, [str(report)]

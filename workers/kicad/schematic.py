@@ -12,6 +12,11 @@ import tempfile
 TOP_WIRE = '(xy 113.03 100.33) (xy 121.92 100.33)'
 BOTTOM_LEAD = '(xy 114.3 105.41) (xy 114.3 102.87)'
 MISSING_WIRE = '(xy 114.3 102.87) (xy 121.92 102.87)'
+
+# Fixed identity of the connection check; bump the version whenever the check
+# semantics above change so old evidence cannot pass as current.
+CONNECTION_CHECKER_ID = 'sensor-connection-check'
+CONNECTION_CHECKER_VERSION = '1'
 WIRE_FORM = (
     '\t(wire (pts ' + MISSING_WIRE + ') '
     '(stroke (width 0) (type solid)) '
@@ -49,6 +54,8 @@ def inspect(path: Path) -> dict:
         'sensor.connection_present': supported and MISSING_WIRE in text,
         'sensor.endpoint_a': 'RT1.2',
         'sensor.endpoint_b': 'J1.2',
+        'connection_checker_id': CONNECTION_CHECKER_ID,
+        'connection_checker_version': CONNECTION_CHECKER_VERSION,
     }
 
 

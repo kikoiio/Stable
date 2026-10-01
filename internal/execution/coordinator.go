@@ -29,6 +29,15 @@ type Coordinator struct {
 	AfterCapabilityEffect func()
 }
 
+var ErrStaleDecision = errors.New("decision criteria revision is unknown or does not match the goal's current criteria revision")
+
+// decisionStale reports whether the decision predates the goal's current
+// criteria revision: a nil (legacy) or mismatched revision can never prove the
+// proposal applies to the current criteria.
+func decisionStale(goal core.Goal, decision core.Decision) bool {
+	return decision.CriteriaRevision == nil || *decision.CriteriaRevision != goal.CriteriaRevision
+}
+
 func (c *Coordinator) ExecuteOrReconcile(ctx context.Context, decisionID string) (core.ActionRecord, error) {
 	var empty core.ActionRecord
 	goalID, err := c.Store.GoalIDForDecision(ctx, decisionID)
@@ -82,6 +91,12 @@ func (c *Coordinator) ExecuteOrReconcile(ctx context.Context, decisionID string)
 		}
 	}
 	if !found {
+		// Guard before reservation: a stale or legacy decision must not
+		// prepare a new action (the store re-checks this in the reservation
+		// transaction), and nothing is written to the artifact.
+		if decisionStale(snap.Goal, decision) {
+			return empty, fmt.Errorf("decision %s: %w", decisionID, ErrStaleDecision)
+		}
 		if err = c.Policy.Check(snap.Goal, observed, proposal); err != nil {
 			return empty, err
 		}
@@ -110,10 +125,27 @@ func (c *Coordinator) ExecuteOrReconcile(ctx context.Context, decisionID string)
 	if action.Status != "prepared" && action.Status != "outcome_unknown" {
 		return action, fmt.Errorf("invalid action state %q", action.Status)
 	}
-	return c.reconcileThenExecute(ctx, snap.Goal, proposal, action, bridge)
+	return c.reconcileThenExecute(ctx, snap.Goal, decision, proposal, action, bridge)
 }
 
-func (c *Coordinator) reconcileThenExecute(ctx context.Context, g core.Goal, p core.ProposedAction, a core.ActionRecord, bridge Caller) (core.ActionRecord, error) {
+func (c *Coordinator) reconcileThenExecute(ctx context.Context, g core.Goal, d core.Decision, p core.ProposedAction, a core.ActionRecord, bridge Caller) (core.ActionRecord, error) {
+	// Guard before execution: the criteria may have changed after the action
+	// was prepared; a stale decision's action is blocked without touching the
+	// artifact (completed actions stay as history for the new round to
+	// re-evaluate).
+	fresh, err := c.Store.GetGoalSnapshot(ctx, g.ID)
+	if err != nil {
+		return a, err
+	}
+	if decisionStale(fresh.Goal, d) {
+		reason := "decision criteria revision is stale or unknown; action blocked without modifying the artifact"
+		if err = c.Store.SetActionResult(ctx, a.ID, "blocked", a.ResultArtifactID, reason); err != nil {
+			return a, err
+		}
+		a.Status = "blocked"
+		a.Reason = reason
+		return a, nil
+	}
 	payload := json.RawMessage(fmt.Sprintf(`{"path":%q,"allowed_root":%q}`, p.Target, g.AllowedRoot))
 	observeReq := core.CapabilityRequest{ProtocolVersion: 1, OperationID: a.ID + "-inspect", Kind: "inspect_design", GoalID: g.ID, Payload: payload}
 	observed, err := bridge.Call(ctx, observeReq)

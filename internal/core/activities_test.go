@@ -2,8 +2,11 @@ package core_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,14 +67,16 @@ func fixtureActivities(t *testing.T) (*core.Activities, *store.Store, string) {
 		switch r.Kind {
 		case "inspect_design":
 			result.Status = "observed"
-			result.Postcondition = json.RawMessage(`{"sensor.supported":true,"sensor.connection_present":false}`)
+			result.Postcondition = json.RawMessage(`{"sensor.supported":true,"sensor.connection_present":false,"connection_checker_id":"sensor-connection-check","connection_checker_version":"1"}`)
 		case "kicad.run_erc":
-			var payload map[string]string
+			var payload struct {
+				ReportPath string `json:"report_path"`
+			}
 			_ = json.Unmarshal(r.Payload, &payload)
-			_ = os.WriteFile(payload["report_path"], []byte(`{"sheets":[]}`), 0644)
+			_ = os.WriteFile(payload.ReportPath, []byte(`{"sheets":[]}`), 0644)
 			result.Status = "pass"
-			result.EvidencePaths = []string{payload["report_path"]}
-			result.Postcondition = json.RawMessage(`{"violation_count":0}`)
+			result.EvidencePaths = []string{payload.ReportPath}
+			result.Postcondition = json.RawMessage(`{"violation_count":0,"checker_id":"kicad-cli-erc","checker_version":"9.0.4"}`)
 		default:
 			return result, errors.New("unknown capability")
 		}
@@ -94,7 +99,7 @@ func TestObserveInvalidatesOldEvidenceAndVerifyCurrentDigest(t *testing.T) {
 	if err = os.WriteFile(path, []byte("changed"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = a.VerifyGoal(ctx, "g"); err == nil {
+	if _, _, err = a.VerifyGoal(ctx, "g"); err == nil {
 		t.Fatal("verified stale design")
 	}
 	second, err := a.ObserveGoal(ctx, "g", "timer-2")
@@ -108,9 +113,9 @@ func TestObserveInvalidatesOldEvidenceAndVerifyCurrentDigest(t *testing.T) {
 	if err != nil || snap.Evidence[0].Result != "stale" {
 		t.Fatalf("evidence %+v %v", snap.Evidence, err)
 	}
-	e, err := a.VerifyGoal(ctx, "g")
-	if err != nil || e.Result != "pass" {
-		t.Fatalf("verification %+v %v", e, err)
+	result, current, err := a.VerifyGoal(ctx, "g")
+	if err != nil || !current || !result.Passed {
+		t.Fatalf("verification %+v current=%v %v", result, current, err)
 	}
 	snap, err = s.GetGoalSnapshot(ctx, "g")
 	if err != nil || snap.Goal.Status != core.GoalVerified {
@@ -256,13 +261,16 @@ func TestVerifyRequiresAllCriteria(t *testing.T) {
 		switch r.Kind {
 		case "inspect_design":
 			result.Status = "observed"
-			result.Postcondition = json.RawMessage(`{"sensor.supported":true,"sensor.connection_present":` + boolJSON(present) + `}`)
+			result.Postcondition = json.RawMessage(`{"sensor.supported":true,"sensor.connection_present":` + boolJSON(present) + `,"connection_checker_id":"sensor-connection-check","connection_checker_version":"1"}`)
 		case "kicad.run_erc":
-			var payload map[string]string
+			var payload struct {
+				ReportPath string `json:"report_path"`
+			}
 			_ = json.Unmarshal(r.Payload, &payload)
-			_ = os.WriteFile(payload["report_path"], []byte(`{}`), 0644)
+			_ = os.WriteFile(payload.ReportPath, []byte(`{}`), 0644)
 			result.Status = "pass"
-			result.EvidencePaths = []string{payload["report_path"]}
+			result.EvidencePaths = []string{payload.ReportPath}
+			result.Postcondition = json.RawMessage(`{"violation_count":0,"checker_id":"kicad-cli-erc","checker_version":"9.0.4"}`)
 		default:
 			return result, errors.New("unknown capability")
 		}
@@ -281,7 +289,7 @@ func TestVerifyRequiresAllCriteria(t *testing.T) {
 		t.Fatal(err)
 	}
 	// ERC passes but the connection is still missing: not verified.
-	if _, err = a.VerifyGoal(ctx, "g"); err != nil {
+	if _, _, err = a.VerifyGoal(ctx, "g"); err != nil {
 		t.Fatal(err)
 	}
 	state, _ := s.GetGoalSnapshot(ctx, "g")
@@ -290,7 +298,7 @@ func TestVerifyRequiresAllCriteria(t *testing.T) {
 	}
 	// Connection restored: now verification completes.
 	present = true
-	if _, err = a.VerifyGoal(ctx, "g"); err != nil {
+	if _, _, err = a.VerifyGoal(ctx, "g"); err != nil {
 		t.Fatal(err)
 	}
 	state, _ = s.GetGoalSnapshot(ctx, "g")
@@ -313,4 +321,428 @@ func boolJSON(b bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+func currentEvidenceFixture() core.Evidence {
+	rev := 2
+	return core.Evidence{
+		ID:               "ev-1",
+		GoalID:           "g",
+		CriterionID:      "erc",
+		ArtifactID:       "digest-1",
+		Kind:             "kicad.erc",
+		Result:           "pass",
+		ReportPath:       "report.json",
+		CriteriaRevision: &rev,
+		Provenance: &core.EvidenceProvenance{
+			SchemaVersion:    1,
+			Claim:            "ERC violations within threshold",
+			Coverage:         "erc",
+			CheckerID:        "kicad-cli-erc",
+			CheckerVersion:   "9.0.4",
+			SourceLevel:      "tool_check",
+			InvalidationRule: "criteria or artifact change",
+		},
+	}
+}
+
+func TestCurrentEvidence(t *testing.T) {
+	goal := core.Goal{ID: "g", CriteriaRevision: 2, CurrentArtifactID: "digest-1"}
+	current := func(e core.Evidence) bool { return core.EvidenceCurrent(goal, "digest-1", e) }
+	if !current(currentEvidenceFixture()) {
+		t.Fatal("complete passing evidence not recognized as current")
+	}
+	cases := map[string]func(*core.Evidence){
+		"failed result":           func(e *core.Evidence) { e.Result = "fail" },
+		"invalidated":             func(e *core.Evidence) { e.InvalidatedReason = "criteria changed" },
+		"legacy nil revision":     func(e *core.Evidence) { e.CriteriaRevision = nil },
+		"stale revision":          func(e *core.Evidence) { rev := 1; e.CriteriaRevision = &rev },
+		"artifact mismatch":       func(e *core.Evidence) { e.ArtifactID = "digest-0" },
+		"legacy nil provenance":   func(e *core.Evidence) { e.Provenance = nil },
+		"newer schema unknown":    func(e *core.Evidence) { e.Provenance.SchemaVersion = 2 },
+		"empty claim":             func(e *core.Evidence) { e.Provenance.Claim = "" },
+		"empty coverage":          func(e *core.Evidence) { e.Provenance.Coverage = "" },
+		"empty checker id":        func(e *core.Evidence) { e.Provenance.CheckerID = "" },
+		"unknown checker version": func(e *core.Evidence) { e.Provenance.CheckerVersion = "" },
+		"empty invalidation rule": func(e *core.Evidence) { e.Provenance.InvalidationRule = "" },
+		"screenshot observation":  func(e *core.Evidence) { e.Provenance.SourceLevel = "observation" },
+		"unknown source":          func(e *core.Evidence) { e.Provenance.SourceLevel = "unknown" },
+	}
+	for name, mutate := range cases {
+		e := currentEvidenceFixture()
+		mutate(&e)
+		if current(e) {
+			t.Fatalf("%s: evidence must not be current", name)
+		}
+	}
+	if core.EvidenceCurrent(goal, "", currentEvidenceFixture()) {
+		t.Fatal("empty current artifact must not match")
+	}
+}
+
+// verifyFixtureKicad returns a controllable kicad caller: ERC reports the
+// given violation count and inspect reports the connection state; both carry
+// checker identity. onERC runs inside each ERC call (to simulate mid-check
+// criteria changes).
+type verifyKicad struct {
+	path       string
+	violations int
+	present    bool
+	onERC      func()
+	calls      int
+}
+
+func (k *verifyKicad) caller(ctx context.Context) callerFunc {
+	return func(_ context.Context, r core.CapabilityRequest) (core.CapabilityResult, error) {
+		data, _ := os.ReadFile(k.path)
+		_ = data
+		result := core.CapabilityResult{ProtocolVersion: 1, OperationID: r.OperationID}
+		switch r.Kind {
+		case "inspect_design":
+			h := sha256Of(k.path)
+			result.Status = "observed"
+			result.ActualArtifactID = h
+			result.Postcondition = json.RawMessage(`{"sensor.supported":true,"sensor.connection_present":` + boolJSON(k.present) + `,"connection_checker_id":"sensor-connection-check","connection_checker_version":"1"}`)
+		case "kicad.run_erc":
+			k.calls++
+			if k.onERC != nil {
+				k.onERC()
+			}
+			var payload struct {
+				ReportPath string `json:"report_path"`
+			}
+			_ = json.Unmarshal(r.Payload, &payload)
+			_ = os.WriteFile(payload.ReportPath, []byte(`{"sheets":[]}`), 0644)
+			result.ActualArtifactID = sha256Of(k.path)
+			if k.violations > 0 {
+				result.Status = "fail"
+			} else {
+				result.Status = "pass"
+			}
+			result.EvidencePaths = []string{payload.ReportPath}
+			post, _ := json.Marshal(map[string]any{"violation_count": k.violations, "checker_id": "kicad-cli-erc", "checker_version": "9.0.4"})
+			result.Postcondition = post
+		default:
+			return result, errors.New("unknown capability")
+		}
+		return result, nil
+	}
+}
+
+func sha256Of(path string) string {
+	h := sha256.New()
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	_, _ = io.Copy(h, f)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func ercCriteria(id string, max int) core.Criterion {
+	payload, _ := json.Marshal(map[string]int{"max_violations": max})
+	return core.Criterion{ID: id, Kind: core.CriterionKindERCClean, Payload: payload}
+}
+
+func connCriterion(id string) core.Criterion {
+	return core.Criterion{ID: id, Kind: core.CriterionKindConnectionPresent, Payload: json.RawMessage(`{"endpoint_a":"RT1.2","endpoint_b":"J1.2"}`)}
+}
+
+func confirmProposal(t *testing.T, ctx context.Context, s *store.Store, goalID, proposalID string, criteria []core.Criterion) {
+	t.Helper()
+	if _, err := s.InsertProposal(ctx, core.CriteriaProposal{ID: proposalID, GoalID: goalID, Status: core.ProposalPending, Criteria: criteria}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ConfirmGoalCriteria(ctx, proposalID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVerifyEvidenceProvenanceAndVersionedReportPaths(t *testing.T) {
+	ctx := context.Background()
+	a, s, _ := fixtureActivities(t)
+	if _, _, err := a.VerifyGoal(ctx, "g"); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := s.GetGoalSnapshot(ctx, "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Evidence) != 1 {
+		t.Fatalf("evidence %+v", snap.Evidence)
+	}
+	first := snap.Evidence[0]
+	if first.CriteriaRevision == nil || *first.CriteriaRevision != 0 {
+		t.Fatalf("revision %+v", first.CriteriaRevision)
+	}
+	p := first.Provenance
+	if p == nil || p.CheckerID != "kicad-cli-erc" || p.CheckerVersion != "9.0.4" || p.SourceLevel != "tool_check" || p.Claim == "" || p.Coverage == "" || p.InvalidationRule == "" {
+		t.Fatalf("provenance %+v", p)
+	}
+	if !strings.Contains(first.ReportPath, "erc-v0-") {
+		t.Fatalf("report path %q lacks criteria version", first.ReportPath)
+	}
+	// A new criteria version must produce a different report path and
+	// evidence bound to that version.
+	if _, err = s.UpdateGoalCriteria(ctx, "g", []core.Criterion{ercCriteria("erc", 0)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = a.VerifyGoal(ctx, "g"); err != nil {
+		t.Fatal(err)
+	}
+	snap, err = s.GetGoalSnapshot(ctx, "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var second *core.Evidence
+	for i, e := range snap.Evidence {
+		if e.ID != first.ID {
+			second = &snap.Evidence[i]
+		}
+	}
+	if second == nil || second.CriteriaRevision == nil || *second.CriteriaRevision != 1 {
+		t.Fatalf("second round evidence %+v", second)
+	}
+	if second.ReportPath == first.ReportPath || !strings.Contains(second.ReportPath, "erc-v1-") {
+		t.Fatalf("report paths %q vs %q", first.ReportPath, second.ReportPath)
+	}
+	if snap.Goal.Status != core.GoalVerified {
+		t.Fatalf("status %q", snap.Goal.Status)
+	}
+}
+
+func TestVerifyERCPerCriterionThresholds(t *testing.T) {
+	ctx := context.Background()
+	a, s, path := fixtureActivities(t)
+	kicad := &verifyKicad{path: path, violations: 1}
+	a.Kicad = kicad.caller(ctx)
+	if _, err := s.UpdateGoalCriteria(ctx, "g", []core.Criterion{ercCriteria("erc-strict", 0), ercCriteria("erc-lax", 2)}); err != nil {
+		t.Fatal(err)
+	}
+	result, current, err := a.VerifyGoal(ctx, "g")
+	if err != nil || !current {
+		t.Fatalf("verify %v current=%v", err, current)
+	}
+	if result.Passed || len(result.Unmet) != 1 || result.Unmet[0] != "erc-strict" {
+		t.Fatalf("unmet %+v passed=%v", result.Unmet, result.Passed)
+	}
+	if kicad.calls != 1 {
+		t.Fatalf("ERC ran %d times for %d criteria", kicad.calls, 2)
+	}
+	byID := map[string]core.Evidence{}
+	for _, e := range result.Evidence {
+		byID[e.CriterionID] = e
+	}
+	if byID["erc-strict"].Result != "fail" || byID["erc-lax"].Result != "pass" {
+		t.Fatalf("per-criterion results %+v", byID)
+	}
+	if byID["erc-strict"].ReportPath != byID["erc-lax"].ReportPath {
+		t.Fatal("one report should serve both ERC criteria")
+	}
+	snap, _ := s.GetGoalSnapshot(ctx, "g")
+	if snap.Goal.Status == core.GoalVerified {
+		t.Fatal("verified despite unmet strict criterion")
+	}
+}
+
+func TestVerifyCommitStaleDuringCheck(t *testing.T) {
+	ctx := context.Background()
+	a, s, path := fixtureActivities(t)
+	kicad := &verifyKicad{path: path}
+	a.Kicad = kicad.caller(ctx)
+	// Criteria change lands mid-check: the round's token is stale at commit.
+	kicad.onERC = func() {
+		if _, err := s.UpdateGoalCriteria(ctx, "g", []core.Criterion{ercCriteria("erc", 0)}); err != nil {
+			t.Error(err)
+		}
+	}
+	result, current, err := a.VerifyGoal(ctx, "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current {
+		t.Fatal("stale round reported current")
+	}
+	if !result.Passed {
+		t.Fatalf("round itself passed checks: %+v", result)
+	}
+	snap, err := s.GetGoalSnapshot(ctx, "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Goal.Status == core.GoalVerified {
+		t.Fatal("stale round verified the new criteria version")
+	}
+	if len(snap.Evidence) != 1 || snap.Evidence[0].InvalidatedReason == "" {
+		t.Fatalf("stale evidence not kept as invalidated history: %+v", snap.Evidence)
+	}
+}
+
+func TestPendingReverificationPassSkipsModel(t *testing.T) {
+	ctx := context.Background()
+	a, s, path := fixtureActivities(t)
+	kicad := &verifyKicad{path: path, present: true}
+	a.Kicad = kicad.caller(ctx)
+	confirmProposal(t, ctx, s, "g", "p1", []core.Criterion{ercCriteria("erc", 0), connCriterion("conn")})
+	called := false
+	a.Decider = deciderFunc(func(context.Context, core.DecisionContext) (core.ProposedAction, error) {
+		called = true
+		return core.ProposedAction{Kind: "wait"}, nil
+	})
+	done, err := a.EvaluateGoal(ctx, "g", "criteria-confirm-p1")
+	if err != nil || !done {
+		t.Fatalf("done=%v err=%v", done, err)
+	}
+	if called {
+		t.Fatal("model called although the new criteria already pass")
+	}
+	snap, _ := s.GetGoalSnapshot(ctx, "g")
+	if snap.Goal.Status != core.GoalVerified {
+		t.Fatalf("status %q reason %q", snap.Goal.Status, snap.Goal.Reason)
+	}
+	for _, e := range snap.Evidence {
+		if e.InvalidatedReason != "" {
+			t.Fatalf("current evidence invalidated: %+v", e)
+		}
+	}
+}
+
+func TestPendingReverificationFailEntersRepair(t *testing.T) {
+	ctx := context.Background()
+	a, s, path := fixtureActivities(t)
+	kicad := &verifyKicad{path: path, present: false}
+	a.Kicad = kicad.caller(ctx)
+	confirmProposal(t, ctx, s, "g", "p1", []core.Criterion{ercCriteria("erc", 0), connCriterion("conn")})
+	called := false
+	a.Decider = deciderFunc(func(context.Context, core.DecisionContext) (core.ProposedAction, error) {
+		called = true
+		return core.ProposedAction{Kind: "wait", Reason: "retry later"}, nil
+	})
+	done, err := a.EvaluateGoal(ctx, "g", "criteria-confirm-p1")
+	if err != nil || done {
+		t.Fatalf("done=%v err=%v", done, err)
+	}
+	if !called {
+		t.Fatal("failed reverification must enter the model decision flow")
+	}
+	snap, _ := s.GetGoalSnapshot(ctx, "g")
+	if snap.Goal.Status == core.GoalVerified || snap.Goal.Status == core.GoalPendingReverification {
+		t.Fatalf("status %q", snap.Goal.Status)
+	}
+	if len(snap.Decisions) != 1 || snap.Decisions[0].CriteriaRevision == nil || *snap.Decisions[0].CriteriaRevision != 1 {
+		t.Fatalf("decision %+v", snap.Decisions)
+	}
+}
+
+func TestCriteriaRaceDuringCheck(t *testing.T) {
+	ctx := context.Background()
+	a, s, path := fixtureActivities(t)
+	kicad := &verifyKicad{path: path}
+	a.Kicad = kicad.caller(ctx)
+	confirmProposal(t, ctx, s, "g", "p1", []core.Criterion{ercCriteria("erc", 0)})
+	// The controlled pause: a second criteria change lands mid-check, so the
+	// first round's commit is stale and reverification retries once.
+	kicad.onERC = func() {
+		if kicad.calls == 1 {
+			if _, err := s.InsertProposal(ctx, core.CriteriaProposal{ID: "p2", GoalID: "g", Status: core.ProposalPending, Criteria: []core.Criterion{ercCriteria("erc", 0)}}); err != nil {
+				t.Error(err)
+			}
+			if _, err := s.ConfirmGoalCriteria(ctx, "p2"); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	done, err := a.EvaluateGoal(ctx, "g", "criteria-confirm-p1")
+	if err != nil || !done {
+		t.Fatalf("done=%v err=%v", done, err)
+	}
+	snap, _ := s.GetGoalSnapshot(ctx, "g")
+	if snap.Goal.Status != core.GoalVerified || snap.Goal.CriteriaRevision != 2 {
+		t.Fatalf("goal %+v", snap.Goal)
+	}
+	var stale, current int
+	for _, e := range snap.Evidence {
+		if e.InvalidatedReason != "" {
+			stale++
+			if e.CriteriaRevision == nil || *e.CriteriaRevision != 1 {
+				t.Fatalf("stale evidence %+v", e)
+			}
+		} else {
+			current++
+			if e.CriteriaRevision == nil || *e.CriteriaRevision != 2 {
+				t.Fatalf("current evidence %+v", e)
+			}
+		}
+	}
+	if stale != 1 || current != 1 {
+		t.Fatalf("stale=%d current=%d", stale, current)
+	}
+}
+
+func TestStaleDecisionIgnoredAfterCriteriaChange(t *testing.T) {
+	ctx := context.Background()
+	a, s, _ := fixtureActivities(t)
+	a.Decider = deciderFunc(func(context.Context, core.DecisionContext) (core.ProposedAction, error) {
+		// Criteria change lands while the model is answering.
+		if _, err := s.InsertProposal(ctx, core.CriteriaProposal{ID: "p1", GoalID: "g", Status: core.ProposalPending, Criteria: []core.Criterion{ercCriteria("erc", 0)}}); err != nil {
+			t.Error(err)
+		}
+		if _, err := s.ConfirmGoalCriteria(ctx, "p1"); err != nil {
+			t.Error(err)
+		}
+		return core.ProposedAction{Kind: "wait", Reason: "stale answer"}, nil
+	})
+	done, err := a.EvaluateGoal(ctx, "g", "timer-0")
+	if err != nil || done {
+		t.Fatalf("done=%v err=%v", done, err)
+	}
+	snap, _ := s.GetGoalSnapshot(ctx, "g")
+	if snap.Goal.Status != core.GoalPendingReverification {
+		t.Fatalf("stale model answer changed status to %q", snap.Goal.Status)
+	}
+	if len(snap.Decisions) != 1 || snap.Decisions[0].CriteriaRevision == nil || *snap.Decisions[0].CriteriaRevision != 0 {
+		t.Fatalf("decision %+v", snap.Decisions)
+	}
+	if len(snap.Actions) != 0 {
+		t.Fatalf("stale decision drove actions %+v", snap.Actions)
+	}
+}
+
+func TestRepairThenVerifyNewToken(t *testing.T) {
+	ctx := context.Background()
+	a, s, path := fixtureActivities(t)
+	kicad := &verifyKicad{path: path, present: false}
+	a.Kicad = kicad.caller(ctx)
+	confirmProposal(t, ctx, s, "g", "p1", []core.Criterion{ercCriteria("erc", 0), connCriterion("conn")})
+	a.Decider = deciderFunc(func(_ context.Context, d core.DecisionContext) (core.ProposedAction, error) {
+		return core.ProposedAction{Kind: "execute_capability", Capability: "repair", Target: path, Parameters: json.RawMessage(`{}`), ExpectedArtifactID: d.Observation.ArtifactID, Reason: "restore connection"}, nil
+	})
+	a.Executor = executorFunc(func(context.Context, string) (core.ActionRecord, error) {
+		// The repair changes the design; verification afterwards runs against a
+		// fresh token bound to the new artifact.
+		if err := os.WriteFile(path, []byte("fixed"), 0644); err != nil {
+			t.Error(err)
+		}
+		kicad.present = true
+		digest := sha256Of(path)
+		return core.ActionRecord{ID: "action-1", Status: "applied", ResultArtifactID: digest}, nil
+	})
+	done, err := a.EvaluateGoal(ctx, "g", "criteria-confirm-p1")
+	if err != nil || !done {
+		t.Fatalf("done=%v err=%v", done, err)
+	}
+	snap, _ := s.GetGoalSnapshot(ctx, "g")
+	if snap.Goal.Status != core.GoalVerified {
+		t.Fatalf("status %q reason %q", snap.Goal.Status, snap.Goal.Reason)
+	}
+	newDigest := sha256Of(path)
+	if snap.Goal.CurrentArtifactID != newDigest {
+		t.Fatalf("current artifact %q", snap.Goal.CurrentArtifactID)
+	}
+	for _, e := range snap.Evidence {
+		if e.Result == "pass" && e.InvalidatedReason == "" && e.ArtifactID != newDigest {
+			t.Fatalf("current evidence bound to old artifact: %+v", e)
+		}
+	}
 }
