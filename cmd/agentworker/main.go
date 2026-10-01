@@ -20,6 +20,7 @@ import (
 	"stable/internal/core"
 	"stable/internal/decision"
 	"stable/internal/execution"
+	"stable/internal/goalrun"
 	"stable/internal/policy"
 	"stable/internal/store"
 )
@@ -141,22 +142,38 @@ func runConfigured(dbPath, runRoot, address, projectRoot string, appMode bool) e
 	}
 	defer w.Stop()
 	ctx := context.Background()
-	pending, err := state.PendingEvents(ctx)
+	events, err := state.UnprocessedEvents(ctx)
 	if err != nil {
 		return err
 	}
-	for _, event := range pending {
-		if err = connection.SignalWorkflow(ctx, event.GoalID, "", core.GoalEventSignal, event.ID); err != nil {
-			log.Printf("pending event %s not signaled yet: %v", event.ID, err)
-			continue
-		}
-		if err = state.SetEventStatus(ctx, event.ID, "signaled"); err != nil {
-			log.Printf("event %s status: %v", event.ID, err)
-		}
-	}
+	replayEvents(ctx, events,
+		func(ctx context.Context, goalID, eventID string) error {
+			return goalrun.WakeGoal(ctx, address, goalID, eventID)
+		},
+		func(ctx context.Context, id string) error {
+			return state.SetEventStatus(ctx, id, "signaled")
+		}, log.Printf)
 	fmt.Printf("agent worker ready: temporal=%s db=%s run=%s\n", address, dbPath, runRoot)
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	<-signals
 	return nil
+}
+
+// replayEvents re-delivers every unprocessed event through wake. Only a
+// successful delivery advances the event to signaled; a failure is logged and
+// the event keeps its state so the next restart retries it.
+func replayEvents(ctx context.Context, events []core.Event, wake func(context.Context, string, string) error, markSignaled func(context.Context, string) error, logf func(string, ...any)) (delivered, failed int) {
+	for _, event := range events {
+		if err := wake(ctx, event.GoalID, event.ID); err != nil {
+			logf("event %s (%s) not delivered: %v", event.ID, event.Status, err)
+			failed++
+			continue
+		}
+		delivered++
+		if err := markSignaled(ctx, event.ID); err != nil {
+			logf("event %s status: %v", event.ID, err)
+		}
+	}
+	return delivered, failed
 }

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
 	"stable/internal/artifact"
@@ -148,6 +149,36 @@ func startWorkflow(ctx context.Context, address, id string) error {
 	if errors.As(err, &already) {
 		return nil
 	}
+	return err
+}
+
+// signalStarter is the subset of client.Client WakeGoal needs; tests inject a
+// fake so both workflow states can be exercised without a Temporal server.
+type signalStarter interface {
+	SignalWithStartWorkflow(ctx context.Context, workflowID, signalName string, signalArg any, options client.StartWorkflowOptions, workflow interface{}, args ...interface{}) (client.WorkflowRun, error)
+}
+
+// WakeGoal delivers one persisted event to the goal's workflow: a running
+// workflow only receives the signal, while an already-finished one is started
+// as a new run under the same goal ID and signalled with it. The event ID
+// never changes, so duplicate delivery collapses onto the stored event row.
+func WakeGoal(ctx context.Context, temporalAddress, goalID, eventID string) error {
+	connection, err := client.Dial(client.Options{HostPort: temporalAddress})
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	return wake(ctx, connection, goalID, eventID)
+}
+
+func wake(ctx context.Context, conn signalStarter, goalID, eventID string) error {
+	_, err := conn.SignalWithStartWorkflow(ctx, goalID, core.GoalEventSignal, eventID,
+		client.StartWorkflowOptions{
+			ID:        goalID,
+			TaskQueue: core.TaskQueue,
+			// A completed run must not block restarting the same goal ID.
+			WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+		}, core.GoalWorkflow, goalID)
 	return err
 }
 

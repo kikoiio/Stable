@@ -171,37 +171,37 @@ func (s *Service) createGoal(ctx context.Context, c ClientMsg) ([]ServerMsg, err
 }
 
 func (s *Service) confirm(ctx context.Context, c ClientMsg) ([]ServerMsg, error) {
-	proposal, err := s.deps.Store.SetProposalStatus(ctx, c.ID, core.ProposalConfirmed)
+	proposal, err := s.deps.Store.GetProposal(ctx, c.ID)
 	if err != nil {
 		return nil, err
 	}
-	var out []ServerMsg
 	if proposal.GoalID != "" {
-		// Mid-run criteria change: new criteria take effect for the running goal.
-		rev, err := s.deps.Store.UpdateGoalCriteria(ctx, proposal.GoalID, proposal.Criteria)
+		// Mid-run criteria change: one store transaction confirms the proposal,
+		// bumps the criteria revision, marks the goal pending_reverification,
+		// invalidates old evidence, and persists the wake event.
+		conf, err := s.deps.Store.ConfirmGoalCriteria(ctx, c.ID)
 		if err != nil {
 			return nil, err
 		}
 		msg, err := s.deps.Store.InsertMessage(ctx, core.SessionMessage{
-			ID: goalrun.RandomID("msg"), GoalID: proposal.GoalID, Role: core.MessageRoleSystem, Kind: core.MessageKindCriteriaConfirm,
-			Text: fmt.Sprintf("验收标准已更新（revision %d）", rev), Payload: mustJSON(proposal),
+			ID: goalrun.RandomID("msg"), GoalID: conf.Goal.ID, Role: core.MessageRoleSystem, Kind: core.MessageKindCriteriaConfirm,
+			Text: fmt.Sprintf("验收标准已更新（revision %d），目标待复核", conf.Goal.CriteriaRevision), Payload: mustJSON(conf.Proposal),
 		})
 		if err != nil {
 			return nil, err
 		}
-		event := core.Event{ID: goalrun.RandomID("evt"), GoalID: proposal.GoalID, Kind: core.EventKindCriteriaUpdate,
-			Payload: mustJSON(map[string]any{"proposal_id": proposal.ID, "criteria_revision": rev})}
-		e, inserted, err := s.deps.Store.InsertEventIfAbsent(ctx, event)
-		if err != nil {
-			return nil, err
+		// The transaction already committed: a wake failure leaves the event
+		// persisted for the worker to replay on its next start.
+		if err = goalrun.WakeGoal(ctx, s.deps.Temporal, conf.Goal.ID, conf.Event.ID); err == nil {
+			_ = s.deps.Store.SetEventStatus(ctx, conf.Event.ID, "signaled")
 		}
-		if err = s.signal(ctx, proposal.GoalID, e.ID, inserted); err != nil {
-			return append(out, ServerMsg{Type: "message", Message: &msg}), nil
-		}
-		return append(out, ServerMsg{Type: "message", Message: &msg}), nil
+		return []ServerMsg{{Type: "message", Message: &msg}, {Type: "goal_update", Goal: &conf.Goal}}, nil
 	}
 	// Creation flow: the confirmed proposal becomes a new goal. The objective is
 	// the user's original description.
+	if proposal, err = s.deps.Store.SetProposalStatus(ctx, c.ID, core.ProposalConfirmed); err != nil {
+		return nil, err
+	}
 	id := c.Goal
 	if id == "" {
 		id = goalrun.RandomID("goal")

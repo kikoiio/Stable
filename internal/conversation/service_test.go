@@ -244,15 +244,21 @@ func TestProposalAndConfirmUpdatesRunningGoal(t *testing.T) {
 	if confirmMsg.Type != "message" || confirmMsg.Message.Kind != core.MessageKindCriteriaConfirm {
 		t.Fatalf("confirm message: %+v", confirmMsg)
 	}
+	// The confirm reply is followed by a goal update already showing the
+	// pending reverification state from the atomic confirmation transaction.
+	update := readMsg(t, r)
+	if update.Type != "goal_update" || update.Goal == nil || update.Goal.Status != core.GoalPendingReverification {
+		t.Fatalf("goal update after confirm: %+v", update)
+	}
 	snap, err := svc.deps.Store.GetGoalSnapshot(context.Background(), "goal-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snap.Goal.CriteriaRevision != 1 || len(snap.Goal.Criteria) != 1 || snap.Goal.Criteria[0].Kind != core.CriterionKindERCClean {
+	if snap.Goal.Status != core.GoalPendingReverification || snap.Goal.CriteriaRevision != 1 || len(snap.Goal.Criteria) != 1 || snap.Goal.Criteria[0].Kind != core.CriterionKindERCClean {
 		t.Fatalf("criteria after confirm: %+v", snap.Goal)
 	}
 	events, _ := svc.deps.Store.PendingEvents(context.Background())
-	if len(events) != 1 || events[0].Kind != core.EventKindCriteriaUpdate {
+	if len(events) != 1 || events[0].Kind != core.EventKindCriteriaUpdate || events[0].ID != "criteria-confirm-"+proposal.Proposal.ID {
 		t.Fatalf("criteria update event: %+v", events)
 	}
 	if done := readMsg(t, r); done.Type != "done" {
@@ -264,6 +270,14 @@ func TestProposalAndConfirmUpdatesRunningGoal(t *testing.T) {
 	if errMsg.Type != "error" {
 		t.Fatalf("double confirm: %+v", errMsg)
 	}
+	// The rejected second confirm must not bump the revision again.
+	snap, err = svc.deps.Store.GetGoalSnapshot(context.Background(), "goal-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Goal.CriteriaRevision != 1 {
+		t.Fatalf("revision after double confirm: %+v", snap.Goal)
+	}
 }
 
 func TestCreateGoalWithoutModelConfigured(t *testing.T) {
@@ -274,5 +288,79 @@ func TestCreateGoalWithoutModelConfigured(t *testing.T) {
 	msg := readMsg(t, r)
 	if msg.Type != "error" {
 		t.Fatalf("expected error, got %+v", msg)
+	}
+}
+
+// Crash right after confirm: the confirmation reply went out while the wake
+// failed (no Temporal in this test), so the persisted event must still be
+// delivered after a worker restart, exactly once and with its original ID.
+func TestConfirmInterruptThenRestartReplays(t *testing.T) {
+	svc, socket := startService(t, newMockTranspiler(t, func(nl string) string {
+		return `{"status":"ok","criteria":[{"id":"erc-clean","kind":"kicad.erc_clean","payload":{"max_violations":0}}],"reason":"ok"}`
+	}))
+	conn, _ := dial(t, socket)
+	r := bufio.NewReader(conn)
+
+	send(t, conn, ClientMsg{Op: "create_goal", Goal: "goal-1", Text: "ERC 全过"})
+	readMsg(t, r) // proposal message
+	proposal := readMsg(t, r)
+	if proposal.Type != "proposal" || proposal.Proposal == nil {
+		t.Fatalf("proposal: %+v", proposal)
+	}
+	if done := readMsg(t, r); done.Type != "done" {
+		t.Fatalf("create_goal completion: %+v", done)
+	}
+	send(t, conn, ClientMsg{Op: "confirm", ID: proposal.Proposal.ID, Goal: "goal-1"})
+	confirmMsg := readMsg(t, r)
+	if confirmMsg.Type != "message" || confirmMsg.Message.Kind != core.MessageKindCriteriaConfirm {
+		t.Fatalf("confirm message: %+v", confirmMsg)
+	}
+	update := readMsg(t, r)
+	if update.Type != "goal_update" || update.Goal == nil || update.Goal.Status != core.GoalPendingReverification {
+		t.Fatalf("goal update: %+v", update)
+	}
+	// "Crash": Temporal is unreachable, so the wake failed and the event is
+	// still unprocessed.
+	ctx := context.Background()
+	eventID := "criteria-confirm-" + proposal.Proposal.ID
+	events, err := svc.deps.Store.UnprocessedEvents(ctx)
+	if err != nil || len(events) != 1 || events[0].ID != eventID || events[0].Status != "pending" {
+		t.Fatalf("unprocessed after interrupt: %+v %v", events, err)
+	}
+
+	// "Restart": the worker reads unprocessed events and re-delivers them.
+	var woke []string
+	wake := func(_ context.Context, goalID, id string) error {
+		if goalID != "goal-1" {
+			t.Errorf("wake goal: %q", goalID)
+		}
+		woke = append(woke, id)
+		return nil
+	}
+	for _, e := range events {
+		if err = wake(ctx, e.GoalID, e.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err = svc.deps.Store.SetEventStatus(ctx, e.ID, "signaled"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(woke) != 1 || woke[0] != eventID {
+		t.Fatalf("replayed events: %v", woke)
+	}
+	// The version bumped exactly once and the replayed event keeps its ID.
+	snap, err := svc.deps.Store.GetGoalSnapshot(ctx, "goal-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Goal.CriteriaRevision != 1 || snap.Goal.Status != core.GoalPendingReverification {
+		t.Fatalf("goal after restart: %+v", snap.Goal)
+	}
+	// Once the workflow marks it processed, no further replay picks it up.
+	if err = svc.deps.Store.SetEventStatus(ctx, eventID, "processed"); err != nil {
+		t.Fatal(err)
+	}
+	if events, err = svc.deps.Store.UnprocessedEvents(ctx); err != nil || len(events) != 0 {
+		t.Fatalf("unprocessed after processing: %+v %v", events, err)
 	}
 }
