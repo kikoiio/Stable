@@ -160,6 +160,44 @@ func send(t *testing.T, conn net.Conn, c ClientMsg) {
 	}
 }
 
+// readConfirmExchange collects the messages a confirm of an existing goal
+// produces — the criteria_confirm reply, the pending_reverification
+// goal_update broadcast, and the one-shot done marker — in whichever order
+// they arrive on the wire.
+func readConfirmExchange(t *testing.T, r *bufio.Reader) (confirmMsg, update *ServerMsg, doneSeen bool) {
+	t.Helper()
+	for i := 0; i < 10 && (confirmMsg == nil || update == nil || !doneSeen); i++ {
+		m := readMsg(t, r)
+		switch {
+		case m.Type == "message" && m.Message != nil && m.Message.Kind == core.MessageKindCriteriaConfirm:
+			confirmMsg = &m
+		case m.Type == "goal_update" && m.Goal != nil && m.Goal.Status == core.GoalPendingReverification:
+			update = &m
+		case m.Type == "done":
+			doneSeen = true
+		}
+	}
+	if confirmMsg == nil {
+		t.Fatal("confirm reply missing")
+	}
+	if update == nil {
+		t.Fatal("pending_reverification goal update missing")
+	}
+	return confirmMsg, update, doneSeen
+}
+
+// readDone skips any late broadcasts until the one-shot completion marker.
+func readDone(t *testing.T, r *bufio.Reader) {
+	t.Helper()
+	for i := 0; i < 10; i++ {
+		m := readMsg(t, r)
+		if m.Type == "done" {
+			return
+		}
+	}
+	t.Fatal("completion marker missing")
+}
+
 func TestHistoryReplayAndBroadcast(t *testing.T) {
 	_, socket := startService(t, nil)
 	a, _ := dial(t, socket)
@@ -240,15 +278,11 @@ func TestProposalAndConfirmUpdatesRunningGoal(t *testing.T) {
 	// The proposal is session-level (goal existed but was not tied); confirm
 	// with the running goal updates its criteria in place.
 	send(t, conn, ClientMsg{Op: "confirm", ID: proposal.Proposal.ID, Goal: "goal-1"})
-	confirmMsg := readMsg(t, r)
-	if confirmMsg.Type != "message" || confirmMsg.Message.Kind != core.MessageKindCriteriaConfirm {
-		t.Fatalf("confirm message: %+v", confirmMsg)
-	}
-	// The confirm reply is followed by a goal update already showing the
-	// pending reverification state from the atomic confirmation transaction.
-	update := readMsg(t, r)
-	if update.Type != "goal_update" || update.Goal == nil || update.Goal.Status != core.GoalPendingReverification {
-		t.Fatalf("goal update after confirm: %+v", update)
+	// The confirm reply and the pending_reverification goal_update broadcast
+	// race each other on the wire; accept them in either order.
+	_, _, doneSeen := readConfirmExchange(t, r)
+	if !doneSeen {
+		readDone(t, r)
 	}
 	snap, err := svc.deps.Store.GetGoalSnapshot(context.Background(), "goal-1")
 	if err != nil {
@@ -260,9 +294,6 @@ func TestProposalAndConfirmUpdatesRunningGoal(t *testing.T) {
 	events, _ := svc.deps.Store.PendingEvents(context.Background())
 	if len(events) != 1 || events[0].Kind != core.EventKindCriteriaUpdate || events[0].ID != "criteria-confirm-"+proposal.Proposal.ID {
 		t.Fatalf("criteria update event: %+v", events)
-	}
-	if done := readMsg(t, r); done.Type != "done" {
-		t.Fatalf("missing completion marker: %+v", done)
 	}
 	// Confirming twice must be rejected by the proposal state machine.
 	send(t, conn, ClientMsg{Op: "confirm", ID: proposal.Proposal.ID, Goal: "goal-1"})
@@ -311,14 +342,9 @@ func TestConfirmInterruptThenRestartReplays(t *testing.T) {
 		t.Fatalf("create_goal completion: %+v", done)
 	}
 	send(t, conn, ClientMsg{Op: "confirm", ID: proposal.Proposal.ID, Goal: "goal-1"})
-	confirmMsg := readMsg(t, r)
-	if confirmMsg.Type != "message" || confirmMsg.Message.Kind != core.MessageKindCriteriaConfirm {
-		t.Fatalf("confirm message: %+v", confirmMsg)
-	}
-	update := readMsg(t, r)
-	if update.Type != "goal_update" || update.Goal == nil || update.Goal.Status != core.GoalPendingReverification {
-		t.Fatalf("goal update: %+v", update)
-	}
+	// The confirm reply and the pending_reverification goal_update broadcast
+	// race each other on the wire; accept them in either order.
+	readConfirmExchange(t, r)
 	// "Crash": Temporal is unreachable, so the wake failed and the event is
 	// still unprocessed.
 	ctx := context.Background()
