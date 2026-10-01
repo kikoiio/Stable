@@ -239,6 +239,20 @@ func readMsg(t *testing.T, r *bufio.Reader) ServerMsg {
 	return m
 }
 
+// readRequestMsg skips unsolicited status broadcasts. The service's first
+// goal poll can race a request response when a test runs past its poll interval.
+func readRequestMsg(t *testing.T, r *bufio.Reader) ServerMsg {
+	t.Helper()
+	for i := 0; i < 10; i++ {
+		m := readMsg(t, r)
+		if m.Type != "goal_update" {
+			return m
+		}
+	}
+	t.Fatal("request response missing after goal status broadcasts")
+	return ServerMsg{}
+}
+
 func send(t *testing.T, conn net.Conn, c ClientMsg) {
 	t.Helper()
 	if err := json.NewEncoder(conn).Encode(c); err != nil {
@@ -342,7 +356,7 @@ func TestCreateGoalRejectUnverifiable(t *testing.T) {
 	conn, _ := dial(t, socket)
 	r := bufio.NewReader(conn)
 	send(t, conn, ClientMsg{Op: "create_goal", Text: "让它看起来美观"})
-	msg := readMsg(t, r)
+	msg := readRequestMsg(t, r)
 	if msg.Type != "message" || msg.Message == nil || msg.Message.Kind != core.MessageKindText {
 		t.Fatalf("reject message: %+v", msg)
 	}
@@ -356,15 +370,15 @@ func TestProposalAndConfirmUpdatesRunningGoal(t *testing.T) {
 	r := bufio.NewReader(conn)
 
 	send(t, conn, ClientMsg{Op: "create_goal", Goal: "goal-1", Text: "ERC 全过"})
-	proposalMsg := readMsg(t, r)
+	proposalMsg := readRequestMsg(t, r)
 	if proposalMsg.Type != "message" || proposalMsg.Message.Kind != core.MessageKindCriteriaProposal {
 		t.Fatalf("proposal message: %+v", proposalMsg)
 	}
-	proposal := readMsg(t, r)
+	proposal := readRequestMsg(t, r)
 	if proposal.Type != "proposal" || proposal.Proposal == nil || proposal.Proposal.Status != core.ProposalPending {
 		t.Fatalf("proposal: %+v", proposal)
 	}
-	if done := readMsg(t, r); done.Type != "done" {
+	if done := readRequestMsg(t, r); done.Type != "done" {
 		t.Fatalf("missing completion marker: %+v", done)
 	}
 
@@ -390,7 +404,7 @@ func TestProposalAndConfirmUpdatesRunningGoal(t *testing.T) {
 	}
 	// Confirming twice must be rejected by the proposal state machine.
 	send(t, conn, ClientMsg{Op: "confirm", ID: proposal.Proposal.ID, Goal: "goal-1"})
-	errMsg := readMsg(t, r)
+	errMsg := readRequestMsg(t, r)
 	if errMsg.Type != "error" {
 		t.Fatalf("double confirm: %+v", errMsg)
 	}
@@ -409,7 +423,7 @@ func TestCreateGoalWithoutModelConfigured(t *testing.T) {
 	conn, _ := dial(t, socket)
 	r := bufio.NewReader(conn)
 	send(t, conn, ClientMsg{Op: "create_goal", Text: "ERC 全过"})
-	msg := readMsg(t, r)
+	msg := readRequestMsg(t, r)
 	if msg.Type != "error" {
 		t.Fatalf("expected error, got %+v", msg)
 	}
@@ -426,12 +440,15 @@ func TestConfirmInterruptThenRestartReplays(t *testing.T) {
 	r := bufio.NewReader(conn)
 
 	send(t, conn, ClientMsg{Op: "create_goal", Goal: "goal-1", Text: "ERC 全过"})
-	readMsg(t, r) // proposal message
-	proposal := readMsg(t, r)
+	readRequestMsg(t, r) // proposal message
+	proposal := readRequestMsg(t, r)
 	if proposal.Type != "proposal" || proposal.Proposal == nil {
+		if proposal.Message != nil {
+			t.Fatalf("proposal: type=%q message=%+v error=%q", proposal.Type, *proposal.Message, proposal.Error)
+		}
 		t.Fatalf("proposal: %+v", proposal)
 	}
-	if done := readMsg(t, r); done.Type != "done" {
+	if done := readRequestMsg(t, r); done.Type != "done" {
 		t.Fatalf("create_goal completion: %+v", done)
 	}
 	send(t, conn, ClientMsg{Op: "confirm", ID: proposal.Proposal.ID, Goal: "goal-1"})
