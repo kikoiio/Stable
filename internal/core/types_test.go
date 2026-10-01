@@ -1,57 +1,80 @@
-package core
+package core_test
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
+
+	"stable/internal/core"
 )
 
-func mustJSON(t *testing.T, v any) json.RawMessage {
-	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+func TestDependencyTypes(t *testing.T) {
+	revision := int64(7)
+	snapshot := core.DependencySnapshot{
+		SchemaVersion:  1,
+		Family:         core.CheckFamilyERC,
+		Sources:        []core.DependencySource{{Kind: "project_erc", Identity: "erc", Digest: "sha256:abc", State: "present"}},
+		CheckerID:      "kicad-cli",
+		CheckerVersion: "9.0.8",
+		Fingerprint:    "sha256:def",
+		Available:      true,
 	}
-	return b
-}
+	goal := core.Goal{ID: "g1", DependencyRevision: revision}
+	decision := core.Decision{ID: "d1", Proposal: core.ProposedAction{Parameters: json.RawMessage(`{}`)}, DependencyRevision: &revision}
+	provenance := core.EvidenceProvenance{SchemaVersion: 2, Family: core.CheckFamilyERC, Dependency: &snapshot}
+	token := core.VerificationToken{GoalID: "g1", DependencyRevision: revision}
+	refresh := core.DependencyRefresh{ChangedFamilies: []core.CheckFamily{core.CheckFamilyERC}, DependencyRevision: revision, Snapshot: core.GoalSnapshot{Goal: goal, Dependencies: []core.DependencySnapshot{snapshot}}}
 
-func TestValidateCriterionERCClean(t *testing.T) {
-	if err := ValidateCriterion(Criterion{ID: "erc", Kind: CriterionKindERCClean, Payload: mustJSON(t, map[string]any{"max_violations": 0})}); err != nil {
-		t.Fatalf("valid erc_clean rejected: %v", err)
+	for name, value := range map[string]any{
+		"goal": goal, "decision": decision, "provenance": provenance, "token": token, "refresh": refresh,
+	} {
+		t.Run(name, func(t *testing.T) {
+			data, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch value := value.(type) {
+			case core.Goal:
+				var got core.Goal
+				if err := json.Unmarshal(data, &got); err != nil || !reflect.DeepEqual(got, value) {
+					t.Fatalf("goal round trip: got %#v, err %v", got, err)
+				}
+			case core.Decision:
+				var got core.Decision
+				if err := json.Unmarshal(data, &got); err != nil || !reflect.DeepEqual(got, value) {
+					t.Fatalf("decision round trip: got %#v, err %v", got, err)
+				}
+			case core.EvidenceProvenance:
+				var got core.EvidenceProvenance
+				if err := json.Unmarshal(data, &got); err != nil || !reflect.DeepEqual(got, value) {
+					t.Fatalf("provenance round trip: got %#v, err %v", got, err)
+				}
+			case core.VerificationToken:
+				var got core.VerificationToken
+				if err := json.Unmarshal(data, &got); err != nil || !reflect.DeepEqual(got, value) {
+					t.Fatalf("token round trip: got %#v, err %v", got, err)
+				}
+			case core.DependencyRefresh:
+				var got core.DependencyRefresh
+				if err := json.Unmarshal(data, &got); err != nil || !reflect.DeepEqual(got, value) {
+					t.Fatalf("refresh round trip: got %#v, err %v", got, err)
+				}
+			}
+		})
 	}
-	if err := ValidateCriterion(Criterion{ID: "erc", Kind: CriterionKindERCClean, Payload: mustJSON(t, map[string]any{"max_violations": -1})}); err == nil {
-		t.Fatal("negative max_violations accepted")
-	}
-	if err := ValidateCriterion(Criterion{ID: "erc", Kind: CriterionKindERCClean, Payload: mustJSON(t, map[string]any{"max_violations": 0, "extra": 1})}); err == nil {
-		t.Fatal("unknown field accepted")
-	}
-	if err := ValidateCriterion(Criterion{ID: "erc", Kind: CriterionKindERCClean}); err == nil {
-		t.Fatal("missing payload accepted")
-	}
-}
 
-func TestValidateCriterionConnectionPresent(t *testing.T) {
-	valid := Criterion{ID: "conn", Kind: CriterionKindConnectionPresent, Payload: mustJSON(t, map[string]any{"endpoint_a": SensorEndpointA, "endpoint_b": SensorEndpointB})}
-	if err := ValidateCriterion(valid); err != nil {
-		t.Fatalf("valid connection_present rejected: %v", err)
+	var legacy core.Goal
+	if err := json.Unmarshal([]byte(`{"id":"legacy","criteria_revision":3,"status":"verified"}`), &legacy); err != nil {
+		t.Fatal(err)
 	}
-	bad := Criterion{ID: "conn", Kind: CriterionKindConnectionPresent, Payload: mustJSON(t, map[string]any{"endpoint_a": "R1.1", "endpoint_b": "C3.2"})}
-	if err := ValidateCriterion(bad); err == nil {
-		t.Fatal("unsupported endpoints accepted")
+	if legacy.ID != "legacy" || legacy.CriteriaRevision != 3 || legacy.DependencyRevision != 0 || legacy.Status != core.GoalVerified {
+		t.Fatalf("legacy goal did not retain old fields with unknown dependency revision: %#v", legacy)
 	}
-}
-
-func TestValidateCriteriaVocabularyAndIDs(t *testing.T) {
-	if err := ValidateCriteria(nil); err != nil {
-		t.Fatalf("empty criteria rejected: %v", err)
+	var legacyProvenance core.EvidenceProvenance
+	if err := json.Unmarshal([]byte(`{"schema_version":1,"claim":"old","coverage":"all"}`), &legacyProvenance); err != nil {
+		t.Fatal(err)
 	}
-	if err := ValidateCriteria([]Criterion{{ID: "x", Kind: "kicad.beautiful"}}); err == nil {
-		t.Fatal("unknown kind accepted")
-	}
-	dup := []Criterion{
-		{ID: "erc", Kind: CriterionKindERCClean, Payload: mustJSON(t, map[string]any{"max_violations": 0})},
-		{ID: "erc", Kind: CriterionKindERCClean, Payload: mustJSON(t, map[string]any{"max_violations": 0})},
-	}
-	if err := ValidateCriteria(dup); err == nil {
-		t.Fatal("duplicate IDs accepted")
+	if legacyProvenance.SchemaVersion != 1 || legacyProvenance.Dependency != nil || legacyProvenance.Family != "" {
+		t.Fatalf("legacy provenance was not preserved as v1/unknown: %#v", legacyProvenance)
 	}
 }

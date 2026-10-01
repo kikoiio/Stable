@@ -38,6 +38,7 @@ type Goal struct {
 	Status               GoalStatus  `json:"status"`
 	CurrentArtifactID    string      `json:"current_artifact_id"`
 	CriteriaRevision     int         `json:"criteria_revision"`
+	DependencyRevision   int64       `json:"dependency_revision"`
 	Revision             int64       `json:"revision"`
 	Reason               string      `json:"reason"`
 	CreatedAt            time.Time   `json:"created_at"`
@@ -109,6 +110,9 @@ type Decision struct {
 	// nil means the decision predates revision tracking; such decisions cannot
 	// prove they apply to the current criteria and must not drive new actions.
 	CriteriaRevision *int `json:"criteria_revision,omitempty"`
+	// DependencyRevision records the dependency generation observed when the
+	// decision was made. nil means unknown and cannot authorize new actions.
+	DependencyRevision *int64 `json:"dependency_revision,omitempty"`
 }
 
 type ModelDescriptor struct {
@@ -145,13 +149,15 @@ type ActionRecord struct {
 // acceptance evidence must carry non-empty provenance; rows predating V01 read
 // as nil, which status and export surfaces render as "unknown".
 type EvidenceProvenance struct {
-	SchemaVersion    int    `json:"schema_version"` // 1 for V01
-	Claim            string `json:"claim"`
-	Coverage         string `json:"coverage"`
-	CheckerID        string `json:"checker_id"`
-	CheckerVersion   string `json:"checker_version"`
-	SourceLevel      string `json:"source_level"` // tool_check | observation | unknown
-	InvalidationRule string `json:"invalidation_rule"`
+	SchemaVersion    int                 `json:"schema_version"` // 1 for V01
+	Claim            string              `json:"claim"`
+	Coverage         string              `json:"coverage"`
+	CheckerID        string              `json:"checker_id"`
+	CheckerVersion   string              `json:"checker_version"`
+	SourceLevel      string              `json:"source_level"` // tool_check | observation | unknown
+	InvalidationRule string              `json:"invalidation_rule"`
+	Family           CheckFamily         `json:"family,omitempty"`
+	Dependency       *DependencySnapshot `json:"dependency,omitempty"`
 }
 
 type Evidence struct {
@@ -177,9 +183,10 @@ type Evidence struct {
 // verification round ran against. Storage compares tokens before letting a
 // result change the goal's current conclusion.
 type VerificationToken struct {
-	GoalID           string
-	CriteriaRevision int
-	ArtifactID       string
+	GoalID             string
+	CriteriaRevision   int
+	ArtifactID         string
+	DependencyRevision int64
 }
 
 // VerificationResult is the outcome of one full reverification round: all
@@ -192,17 +199,63 @@ type VerificationResult struct {
 }
 
 type GoalSnapshot struct {
-	Goal         Goal               `json:"goal"`
-	Agent        AgentInstance      `json:"agent"`
-	Session      ComputerSession    `json:"session"`
-	Events       []Event            `json:"events"`
-	Observations []Observation      `json:"observations"`
-	Decisions    []Decision         `json:"decisions"`
-	ModelCalls   []ModelCall        `json:"model_calls"`
-	Actions      []ActionRecord     `json:"actions"`
-	Evidence     []Evidence         `json:"evidence"`
-	Conversation []SessionMessage   `json:"conversation,omitempty"`
-	Proposals    []CriteriaProposal `json:"criteria_proposals,omitempty"`
+	Goal         Goal                 `json:"goal"`
+	Agent        AgentInstance        `json:"agent"`
+	Session      ComputerSession      `json:"session"`
+	Events       []Event              `json:"events"`
+	Observations []Observation        `json:"observations"`
+	Decisions    []Decision           `json:"decisions"`
+	ModelCalls   []ModelCall          `json:"model_calls"`
+	Actions      []ActionRecord       `json:"actions"`
+	Evidence     []Evidence           `json:"evidence"`
+	Conversation []SessionMessage     `json:"conversation,omitempty"`
+	Proposals    []CriteriaProposal   `json:"criteria_proposals,omitempty"`
+	Dependencies []DependencySnapshot `json:"dependencies,omitempty"`
+}
+
+// CheckFamily identifies the independently invalidated evidence class.
+type CheckFamily string
+
+const (
+	CheckFamilyERC        CheckFamily = "kicad.erc"
+	CheckFamilyConnection CheckFamily = "sensor.connection"
+)
+
+// DependencySource records one input actually used by a check family.
+type DependencySource struct {
+	Kind     string `json:"kind"`
+	Identity string `json:"identity"`
+	Digest   string `json:"digest,omitempty"`
+	State    string `json:"state"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// DependencySnapshot freezes the inputs and checker identity for one family.
+type DependencySnapshot struct {
+	SchemaVersion  int                `json:"schema_version"`
+	Family         CheckFamily        `json:"family"`
+	Sources        []DependencySource `json:"sources"`
+	CheckerID      string             `json:"checker_id"`
+	CheckerVersion string             `json:"checker_version"`
+	Fingerprint    string             `json:"fingerprint"`
+	Available      bool               `json:"available"`
+	Reason         string             `json:"reason,omitempty"`
+}
+
+// DependencyRefresh is the durable result of reconciling collected snapshots.
+type DependencyRefresh struct {
+	ChangedFamilies    []CheckFamily `json:"changed_families,omitempty"`
+	DependencyRevision int64         `json:"dependency_revision"`
+	Event              *Event        `json:"event,omitempty"`
+	Snapshot           GoalSnapshot  `json:"snapshot"`
+}
+
+type DependencyCollector interface {
+	Collect(context.Context, Goal) ([]DependencySnapshot, error)
+}
+
+type DependencyRefresher interface {
+	Refresh(context.Context, string) (DependencyRefresh, error)
 }
 
 type CapabilityDescriptor struct {

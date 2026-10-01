@@ -27,6 +27,7 @@ type Activities struct {
 	Decider   DecisionMaker
 	Policy    ActionPolicy
 	Executor  ActionExecutor
+	Refresher DependencyRefresher
 }
 
 // evidenceInvalidationRule is recorded in every new evidence row's provenance.
