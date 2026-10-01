@@ -41,6 +41,8 @@ type Goal struct {
 	DependencyRevision   int64       `json:"dependency_revision"`
 	Revision             int64       `json:"revision"`
 	Reason               string      `json:"reason"`
+	SourceSessionID      string      `json:"source_session_id,omitempty"`
+	EvidenceSummary      string      `json:"evidence_summary,omitempty"`
 	CreatedAt            time.Time   `json:"created_at"`
 }
 
@@ -346,6 +348,7 @@ type CriteriaProposal struct {
 	Criteria  []Criterion `json:"criteria"`
 	RawText   string      `json:"raw_text"`
 	CreatedAt time.Time   `json:"created_at"`
+	SessionID string      `json:"session_id,omitempty"`
 }
 
 // Acceptance-criteria vocabulary. The kernel verifies exactly these kinds;

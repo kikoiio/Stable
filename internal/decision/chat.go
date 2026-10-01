@@ -10,6 +10,7 @@ import (
 type ChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	Cache   bool   `json:"-"`
 }
 
 type ChatProvider interface {
@@ -33,23 +34,37 @@ func (p *HTTPProvider) GenerateChat(ctx context.Context, messages []ChatMessage)
 	case "anthropic":
 		endpointURL = "https://api.anthropic.com/v1/messages"
 		var turns []ChatMessage
-		system := ""
+		var systemBlocks []any
+		hasCachedBlock := false
 		for _, m := range messages {
 			if m.Role == "system" {
-				system = m.Content
+				block := map[string]any{"type": "text", "text": m.Content}
+				if m.Cache {
+					block["cache_control"] = map[string]string{"type": "ephemeral"}
+					hasCachedBlock = true
+				}
+				systemBlocks = append(systemBlocks, block)
 			} else {
 				turns = append(turns, m)
 			}
 		}
-		body = map[string]any{"model": p.Config.Model, "max_tokens": 2048, "system": system, "messages": turns}
+		var systemValue any
+		if hasCachedBlock || len(systemBlocks) > 1 {
+			systemValue = systemBlocks
+		} else if len(systemBlocks) == 1 {
+			systemValue = systemBlocks[0].(map[string]any)["text"]
+		} else {
+			systemValue = ""
+		}
+		body = map[string]any{"model": p.Config.Model, "max_tokens": 2048, "system": systemValue, "messages": turns}
 		headers = map[string]string{"x-api-key": p.Config.APIKey, "anthropic-version": "2023-06-01"}
 	case "gemini":
 		endpointURL = "https://generativelanguage.googleapis.com/v1beta/models/" + url.PathEscape(p.Config.Model) + ":generateContent"
 		var contents []any
-		system := ""
+		var systems []string
 		for _, m := range messages {
 			if m.Role == "system" {
-				system = m.Content
+				systems = append(systems, m.Content)
 				continue
 			}
 			role := "user"
@@ -58,7 +73,7 @@ func (p *HTTPProvider) GenerateChat(ctx context.Context, messages []ChatMessage)
 			}
 			contents = append(contents, map[string]any{"role": role, "parts": []any{map[string]string{"text": m.Content}}})
 		}
-		body = map[string]any{"systemInstruction": map[string]any{"parts": []any{map[string]string{"text": system}}}, "contents": contents}
+		body = map[string]any{"systemInstruction": map[string]any{"parts": []any{map[string]string{"text": strings.Join(systems, "\n\n")}}}, "contents": contents}
 		headers = map[string]string{"x-goog-api-key": p.Config.APIKey}
 	default:
 		return "", APIError{Kind: "invalid_provider"}

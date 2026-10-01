@@ -29,6 +29,7 @@ type Spec struct {
 	Objective            string
 	Criteria             []core.Criterion
 	CheckIntervalSeconds int
+	SourceSessionID      string
 }
 
 // Definition is the non-interactive goal definition file consumed by
@@ -127,7 +128,7 @@ func Create(ctx context.Context, s *store.Store, runRoot, temporalAddress, proje
 	}
 	goal := core.Goal{ID: id, Objective: spec.Objective, Criteria: spec.Criteria,
 		AllowedRoot: dir, ArtifactPath: artifactPath, CheckIntervalSeconds: interval,
-		AllowedCapabilities: DefaultCapabilities, Status: core.GoalActive, CurrentArtifactID: digest}
+		AllowedCapabilities: DefaultCapabilities, Status: core.GoalActive, CurrentArtifactID: digest, SourceSessionID: spec.SourceSessionID}
 	snap, err := s.CreateGoal(ctx, goal)
 	if err != nil {
 		return core.Goal{}, err

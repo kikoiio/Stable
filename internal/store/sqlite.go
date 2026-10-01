@@ -80,11 +80,38 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	if _, err = db.Exec(`PRAGMA user_version = 4`); err != nil {
+	if version < 5 {
+		if err = migrateV5(db); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if _, err = db.Exec(`PRAGMA user_version = 5`); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+func migrateV5(db *sql.DB) error {
+	addGoal := !hasColumn(db, "goals", "source_session_id")
+	addProposal := !hasColumn(db, "criteria_proposals", "session_id")
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if addGoal {
+		if _, err = tx.Exec(`ALTER TABLE goals ADD COLUMN source_session_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if addProposal {
+		if _, err = tx.Exec(`ALTER TABLE criteria_proposals ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // migrateV4 adds dependency tracking storage to existing databases.
@@ -346,9 +373,9 @@ func (s *Store) CreateGoal(ctx context.Context, g core.Goal) (core.GoalSnapshot,
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO goals
-		(id,objective,criteria_json,allowed_root,artifact_path,check_interval_seconds,allowed_capabilities_json,status,current_artifact_id,revision,reason,created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, g.ID, g.Objective, encode(g.Criteria), g.AllowedRoot, g.ArtifactPath, g.CheckIntervalSeconds,
-		encode(g.AllowedCapabilities), g.Status, g.CurrentArtifactID, 1, g.Reason, g.CreatedAt.Format(time.RFC3339Nano))
+		(id,objective,criteria_json,allowed_root,artifact_path,check_interval_seconds,allowed_capabilities_json,status,current_artifact_id,revision,reason,created_at,source_session_id)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, g.ID, g.Objective, encode(g.Criteria), g.AllowedRoot, g.ArtifactPath, g.CheckIntervalSeconds,
+		encode(g.AllowedCapabilities), g.Status, g.CurrentArtifactID, 1, g.Reason, g.CreatedAt.Format(time.RFC3339Nano), g.SourceSessionID)
 	if err != nil {
 		return core.GoalSnapshot{}, err
 	}
@@ -370,7 +397,7 @@ func scanGoal(row *sql.Row) (core.Goal, error) {
 	var g core.Goal
 	var criteria, caps, created string
 	err := row.Scan(&g.ID, &g.Objective, &criteria, &g.AllowedRoot, &g.ArtifactPath, &g.CheckIntervalSeconds, &caps, &g.Status,
-		&g.CurrentArtifactID, &g.CriteriaRevision, &g.DependencyRevision, &g.Revision, &g.Reason, &created)
+		&g.CurrentArtifactID, &g.CriteriaRevision, &g.DependencyRevision, &g.Revision, &g.Reason, &created, &g.SourceSessionID)
 	if err != nil {
 		return g, err
 	}
@@ -384,7 +411,7 @@ func scanGoal(row *sql.Row) (core.Goal, error) {
 	return g, nil
 }
 
-const goalSelect = `SELECT id,objective,criteria_json,allowed_root,artifact_path,check_interval_seconds,allowed_capabilities_json,status,current_artifact_id,criteria_revision,dependency_revision,revision,reason,created_at FROM goals WHERE id=?`
+const goalSelect = `SELECT id,objective,criteria_json,allowed_root,artifact_path,check_interval_seconds,allowed_capabilities_json,status,current_artifact_id,criteria_revision,dependency_revision,revision,reason,created_at,source_session_id FROM goals WHERE id=?`
 
 func (s *Store) UpdateStatus(ctx context.Context, id string, expected int64, status core.GoalStatus, reason string) (core.Goal, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -1062,7 +1089,7 @@ func (s *Store) EnsureGoal(ctx context.Context, id string) error {
 }
 
 func (s *Store) ListGoals(ctx context.Context) ([]core.Goal, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,objective,criteria_json,allowed_root,artifact_path,check_interval_seconds,allowed_capabilities_json,status,current_artifact_id,criteria_revision,dependency_revision,revision,reason,created_at FROM goals ORDER BY created_at,id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,objective,criteria_json,allowed_root,artifact_path,check_interval_seconds,allowed_capabilities_json,status,current_artifact_id,criteria_revision,dependency_revision,revision,reason,created_at,source_session_id FROM goals ORDER BY created_at,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1072,7 +1099,7 @@ func (s *Store) ListGoals(ctx context.Context) ([]core.Goal, error) {
 		var g core.Goal
 		var criteria, caps, created string
 		if err = rows.Scan(&g.ID, &g.Objective, &criteria, &g.AllowedRoot, &g.ArtifactPath, &g.CheckIntervalSeconds, &caps, &g.Status,
-			&g.CurrentArtifactID, &g.CriteriaRevision, &g.DependencyRevision, &g.Revision, &g.Reason, &created); err != nil {
+			&g.CurrentArtifactID, &g.CriteriaRevision, &g.DependencyRevision, &g.Revision, &g.Reason, &created, &g.SourceSessionID); err != nil {
 			return nil, err
 		}
 		if err = json.Unmarshal([]byte(criteria), &g.Criteria); err != nil {
@@ -1218,8 +1245,8 @@ func (s *Store) InsertProposal(ctx context.Context, p core.CriteriaProposal) (co
 	if p.GoalID != "" {
 		goalID = p.GoalID
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO criteria_proposals(id,goal_id,status,criteria_json,raw_text,created_at) VALUES(?,?,?,?,?,?)`,
-		p.ID, goalID, p.Status, encode(p.Criteria), p.RawText, p.CreatedAt.Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO criteria_proposals(id,goal_id,status,criteria_json,raw_text,created_at,session_id) VALUES(?,?,?,?,?,?,?)`,
+		p.ID, goalID, p.Status, encode(p.Criteria), p.RawText, p.CreatedAt.Format(time.RFC3339Nano), p.SessionID)
 	if err != nil {
 		return p, err
 	}
@@ -1262,11 +1289,11 @@ func (s *Store) AttachProposalGoal(ctx context.Context, id, goalID string) error
 }
 
 func (s *Store) GetProposal(ctx context.Context, id string) (core.CriteriaProposal, error) {
-	return scanProposal(s.db.QueryRowContext(ctx, `SELECT id,goal_id,status,criteria_json,raw_text,created_at FROM criteria_proposals WHERE id=?`, id))
+	return scanProposal(s.db.QueryRowContext(ctx, `SELECT id,goal_id,status,criteria_json,raw_text,created_at,session_id FROM criteria_proposals WHERE id=?`, id))
 }
 
 func (s *Store) GoalProposals(ctx context.Context, goalID string) ([]core.CriteriaProposal, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,status,criteria_json,raw_text,created_at FROM criteria_proposals WHERE goal_id=? ORDER BY created_at,id`, goalID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,status,criteria_json,raw_text,created_at,session_id FROM criteria_proposals WHERE goal_id=? ORDER BY created_at,id`, goalID)
 	if err != nil {
 		return nil, err
 	}
@@ -1286,7 +1313,7 @@ func scanProposal(row interface{ Scan(...any) error }) (core.CriteriaProposal, e
 	var p core.CriteriaProposal
 	var goalID sql.NullString
 	var criteria, created string
-	if err := row.Scan(&p.ID, &goalID, &p.Status, &criteria, &p.RawText, &created); err != nil {
+	if err := row.Scan(&p.ID, &goalID, &p.Status, &criteria, &p.RawText, &created, &p.SessionID); err != nil {
 		return p, err
 	}
 	p.GoalID = goalID.String

@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"stable/internal/appconfig"
+	"stable/internal/prototype"
 	"stable/internal/runtime"
+	"stable/internal/tui"
 )
 
 // Overridden by -ldflags "-X main.version=..." in release builds (see VERSION).
@@ -29,8 +31,9 @@ func main() {
 func usage() {
 	fmt.Print(`stable ` + version + `
 Usage:
-  stable                (start runtime if needed, enter chat; /goal TEXT sets a goal)
+  stable                (start runtime if needed, enter the production TUI)
   stable demo           (quickstart: run one built-in goal, export, stop)
+  stable prototype      (launch the isolated interactive TUI prototype)
   stable doctor
   stable config init
   stable config check
@@ -39,7 +42,6 @@ Usage:
   stable goal status --goal ID
   stable goal notify --goal ID --event ID --kind design_changed|external_check_failed
   stable goal export --goal ID --out DIRECTORY
-  stable chat [--goal ID] | --say T | --reply T | --create-goal T | --confirm ID | --reject ID
   stable logs
   stable version
 `)
@@ -47,6 +49,10 @@ Usage:
 
 func run(args []string) error {
 	if len(args) == 0 {
+		stdinInfo, statErr := os.Stdin.Stat()
+		if statErr != nil || stdinInfo.Mode()&os.ModeCharDevice == 0 {
+			return errors.New("stable requires an interactive terminal; run it in a terminal to open the TUI")
+		}
 		c, err := appconfig.Load()
 		if err != nil {
 			return err
@@ -67,7 +73,22 @@ func run(args []string) error {
 		}
 		// The chat session outlives the terminal on purpose: goals keep
 		// running after the user quits, so the runtime is left up.
-		return chat(nil, p)
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		return tui.Run(p.ChatSocket, root)
+	}
+	// Keep the demo prototype isolated from production configuration and runtime
+	// initialization. This branch intentionally precedes appconfig.Load.
+	if args[0] == "prototype" {
+		if len(args) != 1 {
+			return errors.New("usage: stable prototype")
+		}
+		return prototype.Run()
+	}
+	if args[0] == "chat" {
+		return errors.New("stable chat was removed; run stable in an interactive terminal to open the TUI")
 	}
 	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		usage()
@@ -177,8 +198,6 @@ func run(args []string) error {
 		return nil
 	case "goal":
 		return goal(args[1:], c, p)
-	case "chat":
-		return chat(args[1:], p)
 	case "demo":
 		return runOnce(c, p)
 	case "chatserve":

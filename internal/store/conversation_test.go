@@ -68,7 +68,7 @@ func TestProposalLifecycle(t *testing.T) {
 	}
 
 	// Session-level proposal precedes goal creation: goal_id stays empty.
-	p, err := s.InsertProposal(ctx, core.CriteriaProposal{ID: "prop-1", Criteria: criteria, RawText: "ERC 全过，J1 连上"})
+	p, err := s.InsertProposal(ctx, core.CriteriaProposal{ID: "prop-1", Criteria: criteria, RawText: "ERC 全过，J1 连上", SessionID: "session-123"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestProposalLifecycle(t *testing.T) {
 		t.Fatalf("status: %q", p.Status)
 	}
 	got, err := s.GetProposal(ctx, "prop-1")
-	if err != nil || got.GoalID != "" {
+	if err != nil || got.GoalID != "" || got.SessionID != "session-123" {
 		t.Fatalf("get: %+v %v", got, err)
 	}
 	if _, err = s.SetProposalStatus(ctx, "prop-1", core.ProposalSuperseded); err == nil {

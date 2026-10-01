@@ -36,7 +36,7 @@ func TestV1DatabaseMigrates(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 5 {
 		t.Fatalf("version %d %v", version, err)
 	}
 	var objective string
@@ -68,7 +68,7 @@ func TestV1DatabaseMigrates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 5 {
 		t.Fatalf("reopen version %d %v", version, err)
 	}
 	g, err = s.GetGoalSnapshot(context.Background(), "legacy")
@@ -119,7 +119,7 @@ func TestV2DatabaseMigratesLegacyVerifiedGoals(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 5 {
 		t.Fatalf("version %d %v", version, err)
 	}
 	snap, err := s.GetGoalSnapshot(ctx, "g-old")
@@ -237,7 +237,7 @@ func TestOldSchemaMigrates(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 5 {
 		t.Fatalf("version %d %v", version, err)
 	}
 	if !hasColumn(s.DB(), "decisions", "model_call_id") {
@@ -268,7 +268,7 @@ func TestOldSchemaMigrates(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
+		if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 5 {
 			t.Fatalf("reopen %d: version %d %v", i, version, err)
 		}
 		if err = s.Close(); err != nil {

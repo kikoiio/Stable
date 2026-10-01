@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS goals (
     dependency_revision INTEGER NOT NULL DEFAULT 0,
     revision INTEGER NOT NULL DEFAULT 0,
     reason TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    source_session_id TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS goals_status ON goals(status);
 CREATE INDEX IF NOT EXISTS goals_revision ON goals(id, revision);
@@ -147,6 +148,7 @@ CREATE TABLE IF NOT EXISTS criteria_proposals (
     status TEXT NOT NULL CHECK(status IN ('proposed','confirmed','rejected','superseded')),
     criteria_json TEXT NOT NULL,
     raw_text TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    session_id TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS criteria_proposals_goal ON criteria_proposals(goal_id, created_at);

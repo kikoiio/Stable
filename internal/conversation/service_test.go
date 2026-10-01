@@ -284,13 +284,13 @@ func readDone(t *testing.T, r *bufio.Reader) {
 	t.Fatal("completion marker missing")
 }
 
-func TestHistoryReplayAndBroadcast(t *testing.T) {
+func TestLegacyHistoryIsNotReplayedButLiveGoalMessagesBroadcast(t *testing.T) {
 	_, socket := startService(t, nil)
 	a, _ := dial(t, socket)
 	b, _ := dial(t, socket)
 	ra, rb := bufio.NewReader(a), bufio.NewReader(b)
 
-	// Both clients receive the initial history replay (empty).
+	// Live goal messages continue to broadcast to connected clients.
 	send(t, a, ClientMsg{Op: "say", Goal: "goal-1", Text: "focus on J1"})
 	msgA := readMsg(t, ra)
 	if msgA.Type != "message" || msgA.Message.Text != "focus on J1" {
@@ -301,13 +301,20 @@ func TestHistoryReplayAndBroadcast(t *testing.T) {
 		t.Fatalf("client B missed broadcast: %+v", msgB)
 	}
 
-	// A reconnecting client replays the full transcript.
+	// A new connection does not replay SQLite chat rows as a session transcript.
 	a.Close()
 	c, _ := dial(t, socket)
 	rc := bufio.NewReader(c)
-	replayed := readMsg(t, rc)
-	if replayed.Type != "message" || replayed.Message.Text != "focus on J1" {
-		t.Fatalf("replay: %+v", replayed)
+	_ = c.SetReadDeadline(time.Now().Add(120 * time.Millisecond))
+	for {
+		line, err := rc.ReadBytes('\n')
+		if err != nil {
+			break
+		}
+		var m ServerMsg
+		if json.Unmarshal(line, &m) == nil && m.Type == "message" && m.Message != nil && m.Message.Text == "focus on J1" {
+			t.Fatalf("legacy SQLite history leaked to new session client: %+v", m)
+		}
 	}
 }
 

@@ -79,18 +79,6 @@ func (s *Service) Close() error { return s.ln.Close() }
 
 func (s *Service) serveConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	// Replay the full history before streaming live updates, so a reconnecting
-	// terminal sees a consistent transcript.
-	history, err := s.deps.Store.ListMessages(ctx)
-	if err != nil {
-		_ = encodeServer(conn, ServerMsg{Type: "error", Error: err.Error()})
-		return
-	}
-	for i := range history {
-		if err = encodeServer(conn, ServerMsg{Type: "message", Message: &history[i]}); err != nil {
-			return
-		}
-	}
 	updates := make(chan ServerMsg, 64)
 	s.mu.Lock()
 	s.clients[updates] = struct{}{}
@@ -120,6 +108,11 @@ func (s *Service) readLoop(ctx context.Context, conn net.Conn, updates chan Serv
 		var c ClientMsg
 		if err := dec.Decode(&c); err != nil {
 			return err
+		}
+		if err := validateClient(c); err != nil {
+			updates <- ServerMsg{Type: "error", Error: err.Error()}
+			updates <- ServerMsg{Type: "done"}
+			continue
 		}
 		msgs, err := s.handle(ctx, c)
 		for i := range msgs {

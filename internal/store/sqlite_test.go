@@ -29,7 +29,7 @@ func newGoalStore(t *testing.T) (*Store, string) {
 func TestOpenV4(t *testing.T) {
 	s, _ := newGoalStore(t)
 	var version int
-	if err := s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
+	if err := s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 5 {
 		t.Fatalf("database version = %d, err = %v", version, err)
 	}
 	for table, column := range map[string]string{"goals": "dependency_revision", "decisions": "dependency_revision"} {
@@ -40,6 +40,22 @@ func TestOpenV4(t *testing.T) {
 	var table string
 	if err := s.DB().QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='goal_dependencies'`).Scan(&table); err != nil {
 		t.Fatalf("goal_dependencies missing from v4 schema: %v", err)
+	}
+}
+
+func TestGoalSourceSessionRoundtrip(t *testing.T) {
+	s, _ := newGoalStore(t)
+	ctx := context.Background()
+	if _, err := s.CreateGoal(ctx, core.Goal{ID: "new-goal", Objective: "source attribution", AllowedRoot: t.TempDir(), SourceSessionID: "session-abc"}); err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.GetGoalSnapshot(ctx, "new-goal")
+	if err != nil || g.Goal.SourceSessionID != "session-abc" {
+		t.Fatalf("goal source: %+v %v", g, err)
+	}
+	legacy, err := s.GetGoalSnapshot(ctx, "goal-1")
+	if err != nil || legacy.Goal.SourceSessionID != "" {
+		t.Fatalf("legacy goal source: %+v %v", legacy, err)
 	}
 }
 
@@ -83,7 +99,7 @@ func TestMigrateV4(t *testing.T) {
 		t.Fatalf("migration wake event: %+v", snapshot.Events)
 	}
 	var version int
-	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 5 {
 		t.Fatalf("migrated version = %d, err = %v", version, err)
 	}
 }
@@ -788,7 +804,7 @@ func TestEvidenceProvenanceRoundtrip(t *testing.T) {
 	s, path := newGoalStore(t)
 	ctx := context.Background()
 	var version int
-	if err := s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
+	if err := s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 5 {
 		t.Fatalf("fresh database version %d %v", version, err)
 	}
 	rev := 2

@@ -7,28 +7,35 @@ import (
 	"io"
 
 	"stable/internal/core"
+	"stable/internal/sessionlog"
 )
 
 // ClientMsg is one line of JSON sent from a chat client to the session service.
 type ClientMsg struct {
-	Op   string `json:"op"`             // chat | say | create_goal | confirm | reject | reply | history | status
-	Goal string `json:"goal,omitempty"` // focused goal (required for say/reply)
-	Text string `json:"text,omitempty"` // natural-language content
-	ID   string `json:"id,omitempty"`   // proposal ID for confirm/reject
+	Op          string `json:"op"`             // session_list | session_create | session_load | chat | say | create_goal | confirm | reject | reply | history | status
+	Goal        string `json:"goal,omitempty"` // focused goal (required for say/reply)
+	Text        string `json:"text,omitempty"` // natural-language content
+	ID          string `json:"id,omitempty"`   // proposal ID for confirm/reject
+	ProjectRoot string `json:"project_root,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
 }
 
 // ServerMsg is one line of JSON pushed from the session service to clients.
 type ServerMsg struct {
-	Type     string                 `json:"type"` // message | proposal | goal_update | error | done
-	Message  *core.SessionMessage   `json:"message,omitempty"`
-	Proposal *core.CriteriaProposal `json:"proposal,omitempty"`
-	Goal     *core.Goal             `json:"goal,omitempty"`
-	Error    string                 `json:"error,omitempty"`
+	Type       string                   `json:"type"` // message | proposal | goal_update | error | done
+	Message    *core.SessionMessage     `json:"message,omitempty"`
+	Proposal   *core.CriteriaProposal   `json:"proposal,omitempty"`
+	Goal       *core.Goal               `json:"goal,omitempty"`
+	Error      string                   `json:"error,omitempty"`
+	Session    *sessionlog.SessionInfo  `json:"session,omitempty"`
+	Sessions   []sessionlog.SessionInfo `json:"sessions,omitempty"`
+	Transcript *sessionlog.Transcript   `json:"transcript,omitempty"`
+	Goals      []core.Goal              `json:"goals,omitempty"`
 }
 
 func validOp(op string) bool {
 	switch op {
-	case "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status":
+	case "session_list", "session_create", "session_load", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status":
 		return true
 	}
 	return false
@@ -41,28 +48,43 @@ func decodeClient(r io.Reader) (ClientMsg, error) {
 	if err := dec.Decode(&m); err != nil {
 		return m, fmt.Errorf("invalid message: %w", err)
 	}
+	if err := validateClient(m); err != nil {
+		return m, err
+	}
+	return m, nil
+}
+
+func validateClient(m ClientMsg) error {
 	if !validOp(m.Op) {
-		return m, fmt.Errorf("unknown op %q", m.Op)
+		return fmt.Errorf("unknown op %q", m.Op)
 	}
 	switch m.Op {
+	case "session_list", "session_create":
+		if m.ProjectRoot == "" {
+			return fmt.Errorf("op %s requires project_root", m.Op)
+		}
+	case "session_load":
+		if m.ProjectRoot == "" || m.SessionID == "" {
+			return fmt.Errorf("op session_load requires project_root and session_id")
+		}
 	case "chat":
 		if m.Text == "" {
-			return m, fmt.Errorf("op chat requires text")
+			return fmt.Errorf("op chat requires text")
 		}
 	case "say", "reply":
 		if m.Goal == "" || m.Text == "" {
-			return m, fmt.Errorf("op %s requires goal and text", m.Op)
+			return fmt.Errorf("op %s requires goal and text", m.Op)
 		}
 	case "create_goal":
 		if m.Text == "" {
-			return m, fmt.Errorf("op create_goal requires text")
+			return fmt.Errorf("op create_goal requires text")
 		}
 	case "confirm", "reject":
 		if m.ID == "" {
-			return m, fmt.Errorf("op %s requires proposal ID", m.Op)
+			return fmt.Errorf("op %s requires proposal ID", m.Op)
 		}
 	}
-	return m, nil
+	return nil
 }
 
 func encodeServer(w io.Writer, m ServerMsg) error {
