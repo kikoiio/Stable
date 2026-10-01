@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -65,11 +66,152 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if _, err = db.Exec(`PRAGMA user_version = 2`); err != nil {
+	if version < 3 {
+		if err = migrateV3(db); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if _, err = db.Exec(`PRAGMA user_version = 3`); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+// migrateV3 adds the V01 versioning columns to evidence and decisions inside a
+// single transaction (each column add rolls the whole migration back on
+// failure), then flips legacy verified goals that lack determinably current
+// evidence to pending_reverification with one idempotent wake event per goal.
+func migrateV3(db *sql.DB) error {
+	addEvidenceRevision := !hasColumn(db, "evidence", "criteria_revision")
+	addEvidenceProvenance := !hasColumn(db, "evidence", "provenance")
+	addEvidenceInvalidated := !hasColumn(db, "evidence", "invalidated_reason")
+	addDecisionRevision := !hasColumn(db, "decisions", "criteria_revision")
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if addEvidenceRevision {
+		if _, err = tx.Exec(`ALTER TABLE evidence ADD COLUMN criteria_revision INTEGER`); err != nil {
+			return err
+		}
+	}
+	if addEvidenceProvenance {
+		if _, err = tx.Exec(`ALTER TABLE evidence ADD COLUMN provenance TEXT`); err != nil {
+			return err
+		}
+	}
+	if addEvidenceInvalidated {
+		if _, err = tx.Exec(`ALTER TABLE evidence ADD COLUMN invalidated_reason TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if addDecisionRevision {
+		if _, err = tx.Exec(`ALTER TABLE decisions ADD COLUMN criteria_revision INTEGER`); err != nil {
+			return err
+		}
+	}
+	rows, err := tx.Query(`SELECT id,criteria_json,current_artifact_id,criteria_revision FROM goals WHERE status='verified'`)
+	if err != nil {
+		return err
+	}
+	type legacyGoal struct {
+		id, criteria, artifact string
+		revision               int
+	}
+	var verified []legacyGoal
+	for rows.Next() {
+		var g legacyGoal
+		if err = rows.Scan(&g.id, &g.criteria, &g.artifact, &g.revision); err != nil {
+			rows.Close()
+			return err
+		}
+		verified = append(verified, g)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, g := range verified {
+		current, err := goalHasCurrentEvidence(tx, g.id, g.criteria, g.artifact, g.revision)
+		if err != nil {
+			return err
+		}
+		if current {
+			continue
+		}
+		if _, err = tx.Exec(`UPDATE goals SET status='pending_reverification',reason=?,revision=revision+1 WHERE id=? AND status='verified'`,
+			"旧版达标结论缺少可核对的当前证据（标准版本/出处未知），已转入待复核", g.id); err != nil {
+			return err
+		}
+		// The event ID doubles as the idempotency key: reopening the database
+		// never produces a second wake event for the same goal.
+		if _, err = tx.Exec(`INSERT OR IGNORE INTO events(id,goal_id,kind,payload_json,received_at,status) VALUES(?,?,?,?,?,'pending')`,
+			"migrate-v3-"+g.id, g.id, core.EventKindCriteriaUpdate, `{"source":"migration-v3"}`, now()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// goalHasCurrentEvidence reports whether every criterion of the goal is backed
+// by evidence that satisfies the evidence-v1 currentness conditions. Legacy
+// rows (NULL revision/provenance) never qualify.
+func goalHasCurrentEvidence(tx *sql.Tx, goalID, criteriaJSON, artifactID string, revision int) (bool, error) {
+	var criteria []core.Criterion
+	if err := json.Unmarshal([]byte(criteriaJSON), &criteria); err != nil {
+		return false, err
+	}
+	if len(criteria) == 0 {
+		return false, nil
+	}
+	for _, c := range criteria {
+		rows, err := tx.Query(`SELECT provenance FROM evidence
+			WHERE goal_id=? AND criterion_id=? AND result='pass' AND invalidated_reason=''
+			AND criteria_revision=? AND artifact_id=?`, goalID, c.ID, revision, artifactID)
+		if err != nil {
+			return false, err
+		}
+		found := false
+		for rows.Next() {
+			var raw sql.NullString
+			if err = rows.Scan(&raw); err != nil {
+				rows.Close()
+				return false, err
+			}
+			if provenanceComplete(raw.String) {
+				found = true
+				break
+			}
+		}
+		rows.Close()
+		if err = rows.Err(); err != nil {
+			return false, err
+		}
+		if !found {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// provenanceComplete checks the evidence-v1 required fields. Empty or
+// unparseable JSON, a newer schema version, or a non-tool_check source all
+// read as unknown and never count as current evidence.
+func provenanceComplete(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	var p core.EvidenceProvenance
+	if json.Unmarshal([]byte(raw), &p) != nil {
+		return false
+	}
+	return p.SchemaVersion == 1 && p.Claim != "" && p.Coverage != "" &&
+		p.CheckerID != "" && p.CheckerVersion != "" &&
+		p.SourceLevel == "tool_check" && p.InvalidationRule != ""
 }
 
 func hasColumn(db *sql.DB, table, column string) bool {
@@ -181,16 +323,7 @@ func (s *Store) UpdateStatus(ctx context.Context, id string, expected int64, sta
 	if n != 1 {
 		return core.Goal{}, ErrRevision
 	}
-	agentStatus := "waiting"
-	if status == core.GoalActive {
-		agentStatus = "running"
-	}
-	if status == core.GoalNeedsHuman {
-		agentStatus = "needs_human"
-	}
-	if status == core.GoalVerified {
-		agentStatus = "finished"
-	}
+	agentStatus := agentStatusFor(status)
 	if _, err = tx.ExecContext(ctx, `UPDATE agents SET status=? WHERE goal_id=?`, agentStatus, id); err != nil {
 		return core.Goal{}, err
 	}
@@ -198,6 +331,20 @@ func (s *Store) UpdateStatus(ctx context.Context, id string, expected int64, sta
 		return core.Goal{}, err
 	}
 	return scanGoal(s.db.QueryRowContext(ctx, goalSelect, id))
+}
+
+// agentStatusFor maps a goal status to the agent row's status label.
+func agentStatusFor(status core.GoalStatus) string {
+	switch status {
+	case core.GoalActive:
+		return "running"
+	case core.GoalNeedsHuman:
+		return "needs_human"
+	case core.GoalVerified:
+		return "finished"
+	default:
+		return "waiting"
+	}
 }
 
 func (s *Store) SetCurrentArtifact(ctx context.Context, id, digest string) error {
@@ -288,6 +435,13 @@ func (s *Store) PendingEvents(ctx context.Context) ([]core.Event, error) {
 	return s.queryEvents(ctx, `SELECT id,goal_id,kind,payload_json,received_at,status FROM events WHERE status='pending' ORDER BY received_at,id`)
 }
 
+// UnprocessedEvents returns every event that still needs delivery or whose
+// processing never completed: both 'pending' and 'signaled' rows. Delivery and
+// dedup key off the event ID (the primary key); 'processed' rows never return.
+func (s *Store) UnprocessedEvents(ctx context.Context) ([]core.Event, error) {
+	return s.queryEvents(ctx, `SELECT id,goal_id,kind,payload_json,received_at,status FROM events WHERE status IN ('pending','signaled') GROUP BY id ORDER BY received_at,id`)
+}
+
 func (s *Store) SetEventStatus(ctx context.Context, id, status string) error {
 	if status != "signaled" && status != "processed" {
 		return errors.New("invalid event status")
@@ -321,8 +475,8 @@ func (s *Store) RecordDecision(ctx context.Context, d core.Decision) error {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO decisions(id,agent_id,observation_id,proposal_json,model_run_id,model_call_id,created_at) VALUES(?,?,?,?,?,?,?)`,
-		d.ID, d.AgentID, d.ObservationID, encode(d.Proposal), d.ModelRunID, d.ModelCallID, d.CreatedAt.Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO decisions(id,agent_id,observation_id,proposal_json,model_run_id,model_call_id,criteria_revision,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		d.ID, d.AgentID, d.ObservationID, encode(d.Proposal), d.ModelRunID, d.ModelCallID, revisionPtr(d.CriteriaRevision), d.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return err
 	}
@@ -330,6 +484,14 @@ func (s *Store) RecordDecision(ctx context.Context, d core.Decision) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// revisionPtr converts a nullable criteria revision to a driver value.
+func revisionPtr(rev *int) any {
+	if rev == nil {
+		return nil
+	}
+	return *rev
 }
 
 func (s *Store) StartModelCall(ctx context.Context, c core.ModelCall) error {
@@ -387,6 +549,8 @@ func (s *Store) modelCalls(ctx context.Context, id string) ([]core.ModelCall, er
 	return out, rows.Err()
 }
 
+var ErrStaleDecision = errors.New("decision criteria revision is unknown or does not match the goal's current criteria revision")
+
 func (s *Store) ReserveAction(ctx context.Context, a core.ActionRecord) (core.ActionRecord, error) {
 	if a.ID == "" || a.DecisionID == "" {
 		return a, errors.New("action ID and decision ID required")
@@ -396,6 +560,22 @@ func (s *Store) ReserveAction(ctx context.Context, a core.ActionRecord) (core.Ac
 		return a, err
 	}
 	defer tx.Rollback()
+	// Guard: the decision must carry a criteria revision matching the goal's
+	// current one. Legacy (NULL) or outdated decisions cannot drive new actions.
+	var decisionRevision sql.NullInt64
+	var goalRevision int
+	err = tx.QueryRowContext(ctx, `SELECT d.criteria_revision, g.criteria_revision FROM decisions d
+		JOIN agents ag ON ag.id=d.agent_id JOIN goals g ON g.id=ag.goal_id WHERE d.id=?`, a.DecisionID).
+		Scan(&decisionRevision, &goalRevision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return a, fmt.Errorf("decision %s: not found", a.DecisionID)
+	}
+	if err != nil {
+		return a, err
+	}
+	if !decisionRevision.Valid || int(decisionRevision.Int64) != goalRevision {
+		return a, ErrStaleDecision
+	}
 	r, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO actions(id,decision_id,expected_artifact_id,desired_postcondition_json,status,result_artifact_id,reason) VALUES(?,?,?,?,?,?,?)`,
 		a.ID, a.DecisionID, a.ExpectedArtifactID, raw(a.DesiredPostcondition), "prepared", "", "")
 	if err != nil {
@@ -430,9 +610,18 @@ func (s *Store) RecordEvidence(ctx context.Context, e core.Evidence) error {
 	if e.CreatedAt.IsZero() {
 		e.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO evidence(id,goal_id,criterion_id,artifact_id,kind,result,report_path,created_at) VALUES(?,?,?,?,?,?,?,?)`,
-		e.ID, e.GoalID, e.CriterionID, e.ArtifactID, e.Kind, e.Result, e.ReportPath, e.CreatedAt.Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO evidence(id,goal_id,criterion_id,artifact_id,kind,result,report_path,criteria_revision,provenance,invalidated_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		e.ID, e.GoalID, e.CriterionID, e.ArtifactID, e.Kind, e.Result, e.ReportPath, revisionPtr(e.CriteriaRevision), provenanceJSON(e.Provenance), e.InvalidatedReason, e.CreatedAt.Format(time.RFC3339Nano))
 	return err
+}
+
+// provenanceJSON serializes provenance; nil stays NULL so legacy-shaped rows
+// keep reading as unknown and are never backfilled.
+func provenanceJSON(p *core.EvidenceProvenance) any {
+	if p == nil {
+		return nil
+	}
+	return encode(p)
 }
 
 func (s *Store) InvalidateEvidence(ctx context.Context, goalID, currentDigest string) error {
@@ -498,7 +687,7 @@ func (s *Store) observations(ctx context.Context, id string) ([]core.Observation
 	return out, rows.Err()
 }
 func (s *Store) decisions(ctx context.Context, id string) ([]core.Decision, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT d.id,d.agent_id,d.observation_id,d.proposal_json,d.model_run_id,d.model_call_id,d.created_at FROM decisions d JOIN agents a ON a.id=d.agent_id WHERE a.goal_id=? ORDER BY d.created_at,d.id`, id)
+	rows, err := s.db.QueryContext(ctx, `SELECT d.id,d.agent_id,d.observation_id,d.proposal_json,d.model_run_id,d.model_call_id,d.criteria_revision,d.created_at FROM decisions d JOIN agents a ON a.id=d.agent_id WHERE a.goal_id=? ORDER BY d.created_at,d.id`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -507,13 +696,18 @@ func (s *Store) decisions(ctx context.Context, id string) ([]core.Decision, erro
 	for rows.Next() {
 		var d core.Decision
 		var p, t string
-		if err = rows.Scan(&d.ID, &d.AgentID, &d.ObservationID, &p, &d.ModelRunID, &d.ModelCallID, &t); err != nil {
+		var rev sql.NullInt64
+		if err = rows.Scan(&d.ID, &d.AgentID, &d.ObservationID, &p, &d.ModelRunID, &d.ModelCallID, &rev, &t); err != nil {
 			return nil, err
 		}
 		if err = json.Unmarshal([]byte(p), &d.Proposal); err != nil {
 			return nil, err
 		}
 		d.CreatedAt = parseTime(t)
+		if rev.Valid {
+			r := int(rev.Int64)
+			d.CriteriaRevision = &r
+		}
 		if d.ModelCallID == "" {
 			d.ModelInfo = "unknown (legacy decision)"
 		}
@@ -540,7 +734,7 @@ func (s *Store) actions(ctx context.Context, id string) ([]core.ActionRecord, er
 	return out, rows.Err()
 }
 func (s *Store) evidence(ctx context.Context, id string) ([]core.Evidence, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,criterion_id,artifact_id,kind,result,report_path,created_at FROM evidence WHERE goal_id=? ORDER BY created_at,id`, id)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,criterion_id,artifact_id,kind,result,report_path,criteria_revision,provenance,invalidated_reason,created_at FROM evidence WHERE goal_id=? ORDER BY created_at,id`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -549,8 +743,21 @@ func (s *Store) evidence(ctx context.Context, id string) ([]core.Evidence, error
 	for rows.Next() {
 		var e core.Evidence
 		var t string
-		if err = rows.Scan(&e.ID, &e.GoalID, &e.CriterionID, &e.ArtifactID, &e.Kind, &e.Result, &e.ReportPath, &t); err != nil {
+		var rev sql.NullInt64
+		var prov sql.NullString
+		if err = rows.Scan(&e.ID, &e.GoalID, &e.CriterionID, &e.ArtifactID, &e.Kind, &e.Result, &e.ReportPath, &rev, &prov, &e.InvalidatedReason, &t); err != nil {
 			return nil, err
+		}
+		if rev.Valid {
+			r := int(rev.Int64)
+			e.CriteriaRevision = &r
+		}
+		if prov.Valid && prov.String != "" {
+			var p core.EvidenceProvenance
+			if err = json.Unmarshal([]byte(prov.String), &p); err != nil {
+				return nil, err
+			}
+			e.Provenance = &p
 		}
 		e.CreatedAt = parseTime(t)
 		out = append(out, e)
@@ -826,4 +1033,223 @@ func (s *Store) GoalIDForDecision(ctx context.Context, decisionID string) (strin
 	var goalID string
 	err := s.db.QueryRowContext(ctx, `SELECT a.goal_id FROM decisions d JOIN agents a ON a.id=d.agent_id WHERE d.id=?`, decisionID).Scan(&goalID)
 	return goalID, err
+}
+
+// CriteriaConfirmation is the result of ConfirmGoalCriteria: the confirmed
+// proposal, the goal as updated by the same transaction, and the single
+// criteria_updated wake event persisted with them.
+type CriteriaConfirmation struct {
+	Proposal core.CriteriaProposal
+	Goal     core.Goal
+	Event    core.Event
+}
+
+// ConfirmGoalCriteria atomically confirms a pending proposal for an existing
+// goal: in one transaction it confirms the proposal (superseding previously
+// confirmed ones), bumps the goal's criteria revision, moves the goal to
+// pending_reverification, records the invalidation reason on the goal's
+// not-yet-invalidated evidence, and inserts the wake event. An invalid,
+// missing, unattached, or already-confirmed proposal returns an error and
+// leaves the goal untouched; a repeated confirmation never yields a second
+// event.
+func (s *Store) ConfirmGoalCriteria(ctx context.Context, proposalID string) (CriteriaConfirmation, error) {
+	var out CriteriaConfirmation
+	p, err := s.GetProposal(ctx, proposalID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return out, fmt.Errorf("proposal %s: not found", proposalID)
+	}
+	if err != nil {
+		return out, err
+	}
+	if p.GoalID == "" {
+		return out, fmt.Errorf("proposal %s: not attached to a goal", proposalID)
+	}
+	if p.Status != core.ProposalPending {
+		return out, fmt.Errorf("proposal %s: status %q is not confirmable", proposalID, p.Status)
+	}
+	if err = core.ValidateCriteria(p.Criteria); err != nil {
+		return out, fmt.Errorf("proposal %s: %w", proposalID, err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return out, err
+	}
+	defer tx.Rollback()
+	r, err := tx.ExecContext(ctx, `UPDATE criteria_proposals SET status='confirmed' WHERE id=? AND status='proposed'`, proposalID)
+	if err != nil {
+		return out, err
+	}
+	if n, _ := r.RowsAffected(); n == 0 {
+		return out, fmt.Errorf("proposal %s: concurrent confirmation rejected", proposalID)
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE criteria_proposals SET status='superseded' WHERE status='confirmed' AND goal_id=? AND id<>?`, p.GoalID, proposalID); err != nil {
+		return out, err
+	}
+	var oldRevision int
+	err = tx.QueryRowContext(ctx, `SELECT criteria_revision FROM goals WHERE id=?`, p.GoalID).Scan(&oldRevision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return out, fmt.Errorf("goal %s: not found", p.GoalID)
+	}
+	if err != nil {
+		return out, err
+	}
+	newRevision := oldRevision + 1
+	goalReason := fmt.Sprintf("已确认新标准（提案 %s，标准版本 v%d），待完整复核", proposalID, newRevision)
+	r, err = tx.ExecContext(ctx, `UPDATE goals SET criteria_json=?,criteria_revision=criteria_revision+1,revision=revision+1,status=?,reason=? WHERE id=?`,
+		encode(p.Criteria), core.GoalPendingReverification, goalReason, p.GoalID)
+	if err != nil {
+		return out, err
+	}
+	if n, _ := r.RowsAffected(); n != 1 {
+		return out, fmt.Errorf("goal %s: not found", p.GoalID)
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE agents SET status=? WHERE goal_id=?`, agentStatusFor(core.GoalPendingReverification), p.GoalID); err != nil {
+		return out, err
+	}
+	invalidateReason := fmt.Sprintf("标准于确认提案 %s 后升级到 v%d，原结论需完整复核", proposalID, newRevision)
+	if _, err = tx.ExecContext(ctx, `UPDATE evidence SET invalidated_reason=? WHERE goal_id=? AND invalidated_reason=''`, invalidateReason, p.GoalID); err != nil {
+		return out, err
+	}
+	// The event ID is derived from the proposal ID, so crash replays and
+	// duplicate delivery collapse onto one row.
+	eventID := "criteria-confirm-" + proposalID
+	payload := encode(map[string]any{"proposal_id": proposalID, "criteria_revision": newRevision})
+	if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO events(id,goal_id,kind,payload_json,received_at,status) VALUES(?,?,?,?,?,'pending')`,
+		eventID, p.GoalID, core.EventKindCriteriaUpdate, payload, now()); err != nil {
+		return out, err
+	}
+	if err = tx.Commit(); err != nil {
+		return out, err
+	}
+	if out.Proposal, err = s.GetProposal(ctx, proposalID); err != nil {
+		return CriteriaConfirmation{}, err
+	}
+	if out.Goal, err = scanGoal(s.db.QueryRowContext(ctx, goalSelect, p.GoalID)); err != nil {
+		return CriteriaConfirmation{}, err
+	}
+	var eventPayload, received string
+	out.Event = core.Event{ID: eventID}
+	err = s.db.QueryRowContext(ctx, `SELECT goal_id,kind,payload_json,received_at,status FROM events WHERE id=?`, eventID).
+		Scan(&out.Event.GoalID, &out.Event.Kind, &eventPayload, &received, &out.Event.Status)
+	if err != nil {
+		return CriteriaConfirmation{}, err
+	}
+	out.Event.Payload = json.RawMessage(eventPayload)
+	out.Event.ReceivedAt = parseTime(received)
+	return out, nil
+}
+
+// CommitVerification stores every evidence row from one reverification round
+// and only lets the round change the goal's current conclusion when the token
+// still matches (criteria revision AND current artifact ID). On a match the
+// goal becomes verified when every criterion passed, otherwise active with the
+// unmet criteria recorded as the reason. On a mismatch the round's evidence is
+// kept as history with an invalidation reason, the goal is left untouched, and
+// current=false is returned.
+func (s *Store) CommitVerification(ctx context.Context, token core.VerificationToken, result core.VerificationResult) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var goalRevision int
+	var artifactID string
+	err = tx.QueryRowContext(ctx, `SELECT criteria_revision,current_artifact_id FROM goals WHERE id=?`, token.GoalID).Scan(&goalRevision, &artifactID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("goal %s: not found", token.GoalID)
+	}
+	if err != nil {
+		return false, err
+	}
+	current := goalRevision == token.CriteriaRevision && artifactID == token.ArtifactID
+	staleReason := ""
+	if !current {
+		staleReason = fmt.Sprintf("复核令牌过期：提交时目标标准版本为 v%d、产物为 %s（令牌为 v%d、%s），本轮结果仅保留为历史",
+			goalRevision, artifactID, token.CriteriaRevision, token.ArtifactID)
+	}
+	for _, e := range result.Evidence {
+		if e.GoalID == "" {
+			e.GoalID = token.GoalID
+		}
+		if e.CreatedAt.IsZero() {
+			e.CreatedAt = time.Now().UTC()
+		}
+		if !current {
+			e.InvalidatedReason = staleReason
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT OR REPLACE INTO evidence(id,goal_id,criterion_id,artifact_id,kind,result,report_path,criteria_revision,provenance,invalidated_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			e.ID, e.GoalID, e.CriterionID, e.ArtifactID, e.Kind, e.Result, e.ReportPath, revisionPtr(e.CriteriaRevision), provenanceJSON(e.Provenance), e.InvalidatedReason, e.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+			return false, err
+		}
+	}
+	if current {
+		status := core.GoalVerified
+		reason := ""
+		if !result.Passed {
+			status = core.GoalActive
+			reason = "复核未通过，未满足项：" + strings.Join(result.Unmet, "、")
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE goals SET status=?,reason=?,revision=revision+1 WHERE id=?`, status, reason, token.GoalID); err != nil {
+			return false, err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE agents SET status=? WHERE goal_id=?`, agentStatusFor(status), token.GoalID); err != nil {
+			return false, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+	return current, nil
+}
+
+// UpdateStatusForToken applies a status change only while the caller's token
+// still matches the goal (criteria revision AND current artifact ID); it
+// returns current=false and leaves the status untouched otherwise. When the
+// artifact changed while the goal is pending_reverification, the goal stays
+// pending and its reason is refreshed to reflect the stale token.
+func (s *Store) UpdateStatusForToken(ctx context.Context, token core.VerificationToken, status core.GoalStatus, reason string) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var goalRevision int
+	var artifactID string
+	var goalStatus core.GoalStatus
+	err = tx.QueryRowContext(ctx, `SELECT criteria_revision,current_artifact_id,status FROM goals WHERE id=?`, token.GoalID).Scan(&goalRevision, &artifactID, &goalStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("goal %s: not found", token.GoalID)
+	}
+	if err != nil {
+		return false, err
+	}
+	if goalRevision != token.CriteriaRevision || artifactID != token.ArtifactID {
+		if goalStatus == core.GoalPendingReverification {
+			stale := fmt.Sprintf("复核令牌已过期（当前标准版本 v%d、产物 %s），保持待复核", goalRevision, artifactID)
+			if reason != "" {
+				stale = stale + "：" + reason
+			}
+			if _, err = tx.ExecContext(ctx, `UPDATE goals SET reason=?,revision=revision+1 WHERE id=? AND status=?`, stale, token.GoalID, core.GoalPendingReverification); err != nil {
+				return false, err
+			}
+		}
+		if err = tx.Commit(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	r, err := tx.ExecContext(ctx, `UPDATE goals SET status=?,reason=?,revision=revision+1 WHERE id=?`, status, reason, token.GoalID)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := r.RowsAffected(); n != 1 {
+		return false, fmt.Errorf("goal %s: not found", token.GoalID)
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE agents SET status=? WHERE goal_id=?`, agentStatusFor(status), token.GoalID); err != nil {
+		return false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }

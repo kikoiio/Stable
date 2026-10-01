@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     proposal_json TEXT NOT NULL,
     model_run_id TEXT NOT NULL DEFAULT '',
 	model_call_id TEXT NOT NULL DEFAULT '',
+	criteria_revision INTEGER,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS decisions_agent_time ON decisions(agent_id, created_at);
@@ -110,6 +111,9 @@ CREATE TABLE IF NOT EXISTS evidence (
     kind TEXT NOT NULL,
     result TEXT NOT NULL CHECK(result IN ('pass','fail','stale')),
     report_path TEXT NOT NULL,
+    criteria_revision INTEGER,
+    provenance TEXT,
+    invalidated_reason TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS evidence_goal_artifact ON evidence(goal_id, artifact_id, created_at);

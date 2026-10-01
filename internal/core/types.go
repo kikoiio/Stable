@@ -11,10 +11,11 @@ import (
 type GoalStatus string
 
 const (
-	GoalActive     GoalStatus = "active"
-	GoalWaiting    GoalStatus = "waiting"
-	GoalNeedsHuman GoalStatus = "needs_human"
-	GoalVerified   GoalStatus = "verified"
+	GoalActive                GoalStatus = "active"
+	GoalWaiting               GoalStatus = "waiting"
+	GoalNeedsHuman            GoalStatus = "needs_human"
+	GoalVerified              GoalStatus = "verified"
+	GoalPendingReverification GoalStatus = "pending_reverification"
 )
 
 type AgentStatus string
@@ -104,6 +105,10 @@ type Decision struct {
 	ModelCallID   string         `json:"model_call_id,omitempty"`
 	ModelInfo     string         `json:"model_info,omitempty"`
 	CreatedAt     time.Time      `json:"created_at"`
+	// CriteriaRevision records the goal's criteria revision at decision time.
+	// nil means the decision predates revision tracking; such decisions cannot
+	// prove they apply to the current criteria and must not drive new actions.
+	CriteriaRevision *int `json:"criteria_revision,omitempty"`
 }
 
 type ModelDescriptor struct {
@@ -136,6 +141,19 @@ type ActionRecord struct {
 	Reason               string          `json:"reason"`
 }
 
+// EvidenceProvenance describes how a piece of evidence was produced. New
+// acceptance evidence must carry non-empty provenance; rows predating V01 read
+// as nil, which status and export surfaces render as "unknown".
+type EvidenceProvenance struct {
+	SchemaVersion    int    `json:"schema_version"` // 1 for V01
+	Claim            string `json:"claim"`
+	Coverage         string `json:"coverage"`
+	CheckerID        string `json:"checker_id"`
+	CheckerVersion   string `json:"checker_version"`
+	SourceLevel      string `json:"source_level"` // tool_check | observation | unknown
+	InvalidationRule string `json:"invalidation_rule"`
+}
+
 type Evidence struct {
 	ID          string    `json:"id"`
 	GoalID      string    `json:"goal_id"`
@@ -145,6 +163,32 @@ type Evidence struct {
 	Result      string    `json:"result"`
 	ReportPath  string    `json:"report_path"`
 	CreatedAt   time.Time `json:"created_at"`
+	// CriteriaRevision is the goal's criteria revision the check ran against;
+	// nil means the row predates revision tracking and its revision is unknown.
+	CriteriaRevision *int                `json:"criteria_revision,omitempty"`
+	Provenance       *EvidenceProvenance `json:"provenance,omitempty"`
+	// InvalidatedReason records why this evidence no longer supports the goal's
+	// current conclusion (e.g. criteria changed). Result keeps the original
+	// pass/fail outcome at check time; invalidation is stored separately.
+	InvalidatedReason string `json:"invalidated_reason,omitempty"`
+}
+
+// VerificationToken identifies the exact criteria revision and artifact a
+// verification round ran against. Storage compares tokens before letting a
+// result change the goal's current conclusion.
+type VerificationToken struct {
+	GoalID           string
+	CriteriaRevision int
+	ArtifactID       string
+}
+
+// VerificationResult is the outcome of one full reverification round: all
+// evidence produced this round, whether every current criterion passed, and
+// the criteria that did not.
+type VerificationResult struct {
+	Evidence []Evidence
+	Passed   bool
+	Unmet    []string
 }
 
 type GoalSnapshot struct {
@@ -382,6 +426,14 @@ type StateStore interface {
 	ReserveAction(context.Context, ActionRecord) (ActionRecord, error)
 	SetActionResult(context.Context, string, string, string, string) error
 	RecordEvidence(context.Context, Evidence) error
+	// CommitVerification stores one reverification round's evidence and only
+	// lets it change the goal's conclusion while the token still matches the
+	// goal's criteria revision and current artifact; it returns whether the
+	// round was current.
+	CommitVerification(context.Context, VerificationToken, VerificationResult) (bool, error)
+	// UpdateStatusForToken applies a status change only while the token still
+	// matches; a stale token never overrides a pending_reverification goal.
+	UpdateStatusForToken(context.Context, VerificationToken, GoalStatus, string) (bool, error)
 	UpsertSession(context.Context, ComputerSession) error
 	GoalIDForDecision(context.Context, string) (string, error)
 	SetCurrentArtifact(context.Context, string, string) error
