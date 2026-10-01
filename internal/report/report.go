@@ -26,32 +26,40 @@ type Status struct {
 // missing on legacy rows (criteria revision, provenance) are rendered as the
 // literal string "unknown" instead of being inferred.
 type NormalizedEvidence struct {
-	ID                string `json:"id"`
-	CriterionID       string `json:"criterion_id"`
-	Kind              string `json:"kind"`
-	Result            string `json:"result"`
-	ReportPath        string `json:"report_path,omitempty"`
-	CriteriaRevision  string `json:"criteria_revision"` // revision number or "unknown"
-	CheckerID         string `json:"checker_id"`
-	CheckerVersion    string `json:"checker_version"`
-	SourceLevel       string `json:"source_level"`
-	InvalidatedReason string `json:"invalidated_reason,omitempty"`
-	Current           bool   `json:"current"`
+	ID                    string                   `json:"id"`
+	CriterionID           string                   `json:"criterion_id"`
+	Kind                  string                   `json:"kind"`
+	Result                string                   `json:"result"`
+	ReportPath            string                   `json:"report_path,omitempty"`
+	CriteriaRevision      string                   `json:"criteria_revision"` // revision number or "unknown"
+	DesignDigest          string                   `json:"design_digest"`
+	DependencyFingerprint string                   `json:"dependency_fingerprint"`
+	Dependency            *core.DependencySnapshot `json:"dependency,omitempty"`
+	CheckerID             string                   `json:"checker_id"`
+	CheckerVersion        string                   `json:"checker_version"`
+	SourceLevel           string                   `json:"source_level"`
+	InvalidatedReason     string                   `json:"invalidated_reason,omitempty"`
+	Current               bool                     `json:"current"`
 }
 
 func normalizeEvidence(snapshot core.GoalSnapshot, artifactID string, e core.Evidence) NormalizedEvidence {
 	out := NormalizedEvidence{
-		ID:                e.ID,
-		CriterionID:       e.CriterionID,
-		Kind:              e.Kind,
-		Result:            e.Result,
-		ReportPath:        e.ReportPath,
-		CriteriaRevision:  "unknown",
-		CheckerID:         "unknown",
-		CheckerVersion:    "unknown",
-		SourceLevel:       "unknown",
-		InvalidatedReason: e.InvalidatedReason,
-		Current:           core.EvidenceCurrent(snapshot.Goal, artifactID, e),
+		ID:                    e.ID,
+		CriterionID:           e.CriterionID,
+		Kind:                  e.Kind,
+		Result:                e.Result,
+		ReportPath:            e.ReportPath,
+		CriteriaRevision:      "unknown",
+		DesignDigest:          "unknown",
+		DependencyFingerprint: "unknown",
+		CheckerID:             "unknown",
+		CheckerVersion:        "unknown",
+		SourceLevel:           "unknown",
+		InvalidatedReason:     e.InvalidatedReason,
+		Current:               core.EvidenceCurrentWithDependencies(snapshot.Goal, artifactID, snapshot.Dependencies, e),
+	}
+	if e.ArtifactID != "" {
+		out.DesignDigest = e.ArtifactID
 	}
 	if e.CriteriaRevision != nil {
 		out.CriteriaRevision = fmt.Sprintf("%d", *e.CriteriaRevision)
@@ -65,6 +73,15 @@ func normalizeEvidence(snapshot core.GoalSnapshot, artifactID string, e core.Evi
 		}
 		if p.SourceLevel != "" {
 			out.SourceLevel = p.SourceLevel
+		}
+		if p.SchemaVersion == 2 && p.Dependency != nil {
+			dep := *p.Dependency
+			out.Dependency = &dep
+			if dep.Fingerprint != "" {
+				out.DependencyFingerprint = dep.Fingerprint
+			}
+		} else {
+			out.DependencyFingerprint = "unknown"
 		}
 	}
 	return out
@@ -112,6 +129,14 @@ func BuildStatus(snapshot core.GoalSnapshot) (Status, error) {
 	if snapshot.Goal.Status != core.GoalVerified {
 		out.Unverified = append(out.Unverified, "goal status is "+string(snapshot.Goal.Status))
 	}
+	if snapshot.Goal.Reason != "" {
+		out.Unverified = append(out.Unverified, "goal reason: "+snapshot.Goal.Reason)
+	}
+	for _, dependency := range snapshot.Dependencies {
+		if !dependency.Available && dependency.Reason != "" {
+			out.Unverified = append(out.Unverified, string(dependency.Family)+" unavailable: "+dependency.Reason)
+		}
+	}
 	for _, e := range snapshot.Evidence {
 		out.Evidence = append(out.Evidence, normalizeEvidence(snapshot, out.ActualArtifactID, e))
 	}
@@ -124,7 +149,7 @@ func BuildStatus(snapshot core.GoalSnapshot) (Status, error) {
 func currentEvidenceFor(snapshot core.GoalSnapshot, criterionID, artifactID string) *core.Evidence {
 	for i := range snapshot.Evidence {
 		e := snapshot.Evidence[i]
-		if e.CriterionID == criterionID && core.EvidenceCurrent(snapshot.Goal, artifactID, e) {
+		if e.CriterionID == criterionID && core.EvidenceCurrentWithDependencies(snapshot.Goal, artifactID, snapshot.Dependencies, e) {
 			return &snapshot.Evidence[i]
 		}
 	}
@@ -211,7 +236,7 @@ func Export(ctx context.Context, snapshot core.GoalSnapshot, outDir string) (Sta
 	}
 	// Archive readable reports of non-current evidence, keeping the original
 	// result and the invalidation reason in a manifest.
-	history := []map[string]string{}
+	history := []map[string]any{}
 	historyReady := false
 	ensureHistory := func() error {
 		if historyReady {
@@ -224,11 +249,12 @@ func Export(ctx context.Context, snapshot core.GoalSnapshot, outDir string) (Sta
 		return nil
 	}
 	for _, e := range snapshot.Evidence {
-		if e.ReportPath == "" || core.EvidenceCurrent(snapshot.Goal, status.ActualArtifactID, e) {
+		if e.ReportPath == "" || core.EvidenceCurrentWithDependencies(snapshot.Goal, status.ActualArtifactID, snapshot.Dependencies, e) {
 			continue
 		}
-		entry := map[string]string{
+		entry := map[string]any{
 			"id": e.ID, "criterion_id": e.CriterionID, "result": e.Result, "invalidated_reason": e.InvalidatedReason,
+			"evidence": normalizeEvidence(snapshot, status.ActualArtifactID, e),
 		}
 		if _, err := os.Stat(e.ReportPath); err == nil {
 			if err = ensureHistory(); err != nil {

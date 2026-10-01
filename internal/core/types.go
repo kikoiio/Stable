@@ -247,6 +247,7 @@ type DependencyRefresh struct {
 	ChangedFamilies    []CheckFamily `json:"changed_families,omitempty"`
 	DependencyRevision int64         `json:"dependency_revision"`
 	Event              *Event        `json:"event,omitempty"`
+	WakeError          string        `json:"wake_error,omitempty"`
 	Snapshot           GoalSnapshot  `json:"snapshot"`
 }
 

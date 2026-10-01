@@ -21,6 +21,7 @@ type Deps struct {
 	ProjectRoot  string
 	RunRoot      string
 	SocketPath   string
+	Refresher    core.DependencyRefresher
 	PollEvery    time.Duration // goal status poll interval; 0 defaults to 2s
 }
 

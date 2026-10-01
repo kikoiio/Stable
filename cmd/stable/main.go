@@ -206,10 +206,7 @@ func goal(args []string, c appconfig.AppConfig, p runtime.Paths) error {
 	if err := p.Prepare(); err != nil {
 		return err
 	}
-	forward := []string{cmd, "--run-root", p.Goals, "--db", p.Database, "--temporal", "127.0.0.1:" + strconv.Itoa(c.TemporalPort)}
-	if cmd == "create" {
-		forward = append(forward, "--project-root", p.Share)
-	}
+	forward := []string{cmd, "--run-root", p.Goals, "--db", p.Database, "--temporal", "127.0.0.1:" + strconv.Itoa(c.TemporalPort), "--project-root", p.Share}
 	forward = append(forward, args[1:]...)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

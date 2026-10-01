@@ -40,8 +40,26 @@ func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) 
 		}
 		out := make([]ServerMsg, 0, len(goals))
 		for i := range goals {
+			if s.deps.Refresher != nil {
+				refreshed, refreshErr := s.deps.Refresher.Refresh(ctx, goals[i].ID)
+				if refreshErr != nil {
+					return nil, fmt.Errorf("refresh dependencies for goal %s: %w", goals[i].ID, refreshErr)
+				}
+				goals[i] = refreshed.Snapshot.Goal
+			} else {
+				snapshot, getErr := s.deps.Store.GetGoalSnapshot(ctx, goals[i].ID)
+				if getErr != nil {
+					return nil, getErr
+				}
+				goals[i] = snapshot.Goal
+			}
 			out = append(out, ServerMsg{Type: "goal_update", Goal: &goals[i]})
 		}
+		s.mu.Lock()
+		for i := range goals {
+			s.statuses[goals[i].ID] = goals[i].Status
+		}
+		s.mu.Unlock()
 		return out, nil
 	case "say":
 		return s.say(ctx, c, core.MessageKindText, core.EventKindUserMessage)

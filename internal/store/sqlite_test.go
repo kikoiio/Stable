@@ -259,6 +259,38 @@ func TestReconcileDependencyIdempotence(t *testing.T) {
 	}
 }
 
+func TestCommitVerificationDependencyRace(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newGoalStore(t)
+	base := []core.DependencySnapshot{
+		{SchemaVersion: 1, Family: core.CheckFamilyERC, CheckerID: "kicad", CheckerVersion: "9.0.8", Fingerprint: "erc-before", Available: true},
+		{SchemaVersion: 1, Family: core.CheckFamilyConnection, CheckerID: "connection", CheckerVersion: "1", Fingerprint: "connection-v1", Available: true},
+	}
+	if _, err := s.ReconcileDependencies(ctx, "goal-1", base); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetCurrentArtifact(ctx, "goal-1", "sha-a"); err != nil {
+		t.Fatal(err)
+	}
+	token := core.VerificationToken{GoalID: "goal-1", CriteriaRevision: 0, ArtifactID: "sha-a", DependencyRevision: 0}
+	changed := append([]core.DependencySnapshot(nil), base...)
+	changed[0].Fingerprint = "erc-after"
+	if _, err := s.ReconcileDependencies(ctx, "goal-1", changed); err != nil {
+		t.Fatal(err)
+	}
+	current, err := s.CommitVerification(ctx, token, core.VerificationResult{Evidence: []core.Evidence{verificationEvidence("old-dependency-pass", "erc", 0)}, Passed: true})
+	if err != nil || current {
+		t.Fatalf("old dependency token unexpectedly committed as current: current=%v err=%v", current, err)
+	}
+	snapshot, err := s.GetGoalSnapshot(ctx, "goal-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Goal.Status != core.GoalPendingReverification || snapshot.Goal.DependencyRevision != 1 || len(snapshot.Evidence) != 1 || snapshot.Evidence[0].InvalidatedReason == "" {
+		t.Fatalf("dependency race overwrote latest state: goal=%+v evidence=%+v", snapshot.Goal, snapshot.Evidence)
+	}
+}
+
 func TestGoalRevision(t *testing.T) {
 	s, _ := newGoalStore(t)
 	ctx := context.Background()
@@ -320,7 +352,8 @@ func TestObservationDecisionAndActionReservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	rev := 0 // goal-1 starts at criteria revision 0
-	d := core.Decision{ID: "d-1", AgentID: "agent-goal-1", ObservationID: "ob-1", Proposal: core.ProposedAction{Kind: "wait", Reason: "test"}, CriteriaRevision: &rev}
+	depRev := int64(0)
+	d := core.Decision{ID: "d-1", AgentID: "agent-goal-1", ObservationID: "ob-1", Proposal: core.ProposedAction{Kind: "wait", Reason: "test"}, CriteriaRevision: &rev, DependencyRevision: &depRev}
 	if err := s.RecordDecision(ctx, d); err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +370,7 @@ func TestObservationDecisionAndActionReservation(t *testing.T) {
 	if err != nil || len(snap.Observations) != 1 || len(snap.Decisions) != 1 || len(snap.Actions) != 1 {
 		t.Fatalf("snapshot %+v %v", snap, err)
 	}
-	if snap.Decisions[0].CriteriaRevision == nil || *snap.Decisions[0].CriteriaRevision != 0 {
+	if snap.Decisions[0].CriteriaRevision == nil || *snap.Decisions[0].CriteriaRevision != 0 || snap.Decisions[0].DependencyRevision == nil || *snap.Decisions[0].DependencyRevision != 0 {
 		t.Fatalf("decision revision not persisted: %+v", snap.Decisions[0])
 	}
 }
@@ -358,7 +391,8 @@ func TestStaleDecisionCannotReserveAction(t *testing.T) {
 	}
 	// A decision recorded at revision 0 goes stale once criteria move to v1.
 	rev0 := 0
-	d := core.Decision{ID: "d-old", AgentID: "agent-goal-1", ObservationID: "ob-1", Proposal: core.ProposedAction{Kind: "repair"}, CriteriaRevision: &rev0}
+	depRev0 := int64(0)
+	d := core.Decision{ID: "d-old", AgentID: "agent-goal-1", ObservationID: "ob-1", Proposal: core.ProposedAction{Kind: "repair"}, CriteriaRevision: &rev0, DependencyRevision: &depRev0}
 	if err := s.RecordDecision(ctx, d); err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +405,7 @@ func TestStaleDecisionCannotReserveAction(t *testing.T) {
 	}
 	// A decision at the current revision reserves fine.
 	rev1 := 1
-	d = core.Decision{ID: "d-new", AgentID: "agent-goal-1", ObservationID: "ob-1", Proposal: core.ProposedAction{Kind: "repair"}, CriteriaRevision: &rev1}
+	d = core.Decision{ID: "d-new", AgentID: "agent-goal-1", ObservationID: "ob-1", Proposal: core.ProposedAction{Kind: "repair"}, CriteriaRevision: &rev1, DependencyRevision: &depRev0}
 	if err := s.RecordDecision(ctx, d); err != nil {
 		t.Fatal(err)
 	}
@@ -384,20 +418,119 @@ func TestStaleDecisionCannotReserveAction(t *testing.T) {
 	}
 	// Legacy decisions read back with a nil revision, never backfilled.
 	for _, dec := range snap.Decisions {
-		if dec.ID == "d-legacy" && dec.CriteriaRevision != nil {
+		if dec.ID == "d-legacy" && (dec.CriteriaRevision != nil || dec.DependencyRevision != nil) {
 			t.Fatalf("legacy decision revision backfilled: %+v", dec)
 		}
 	}
 }
 
+func TestDependencyRevisionGuards(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newGoalStore(t)
+	if err := s.SetCurrentArtifact(ctx, "goal-1", "sha-a"); err != nil {
+		t.Fatal(err)
+	}
+	baseline := []core.DependencySnapshot{
+		{SchemaVersion: 1, Family: core.CheckFamilyERC, CheckerID: "kicad-cli-erc", CheckerVersion: "9.0.8", Fingerprint: "erc-before", Available: true},
+		{SchemaVersion: 1, Family: core.CheckFamilyConnection, CheckerID: "sensor-connection-check", CheckerVersion: "1", Fingerprint: "connection-v1", Available: true},
+	}
+	if _, err := s.ReconcileDependencies(ctx, "goal-1", baseline); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordObservation(ctx, core.Observation{ID: "ob-dep", GoalID: "goal-1", ArtifactID: "sha-a", Facts: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	criteriaRevision := 0
+	dependencyRevision := int64(0)
+	decision := core.Decision{ID: "decision-old-dep", AgentID: "agent-goal-1", ObservationID: "ob-dep", Proposal: core.ProposedAction{Kind: "execute_capability"}, CriteriaRevision: &criteriaRevision, DependencyRevision: &dependencyRevision}
+	if err := s.RecordDecision(ctx, decision); err != nil {
+		t.Fatal(err)
+	}
+	changed := append([]core.DependencySnapshot(nil), baseline...)
+	changed[0].Fingerprint = "erc-after"
+	if _, err := s.ReconcileDependencies(ctx, "goal-1", changed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReserveAction(ctx, core.ActionRecord{ID: "blocked-dep-action", DecisionID: decision.ID, ExpectedArtifactID: "sha-a"}); !errors.Is(err, ErrStaleDecision) {
+		t.Fatalf("old dependency decision reserved action: %v", err)
+	}
+	current, err := s.UpdateStatusForToken(ctx, core.VerificationToken{GoalID: "goal-1", CriteriaRevision: 0, ArtifactID: "sha-a", DependencyRevision: 0}, core.GoalVerified, "stale success")
+	if err != nil || current {
+		t.Fatalf("old dependency token changed status: current=%v err=%v", current, err)
+	}
+	snapshot, err := s.GetGoalSnapshot(ctx, "goal-1")
+	if err != nil || snapshot.Goal.Status != core.GoalPendingReverification || snapshot.Goal.DependencyRevision != 1 || len(snapshot.Actions) != 0 {
+		t.Fatalf("dependency guard failed: snapshot=%+v err=%v", snapshot, err)
+	}
+}
+
+func TestReconcileDependencyTransactionRollback(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newGoalStore(t)
+	base := []core.DependencySnapshot{
+		{SchemaVersion: 1, Family: core.CheckFamilyERC, CheckerID: "kicad", CheckerVersion: "9.0.8", Fingerprint: "erc-before", Available: true},
+		{SchemaVersion: 1, Family: core.CheckFamilyConnection, CheckerID: "connection", CheckerVersion: "1", Fingerprint: "connection-v1", Available: true},
+	}
+	if _, err := s.ReconcileDependencies(ctx, "goal-1", base); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordEvidence(ctx, core.Evidence{ID: "rollback-ev", GoalID: "goal-1", CriterionID: "erc", Kind: "kicad.erc", Result: "pass"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec(`CREATE TRIGGER reject_dependency_event BEFORE INSERT ON events WHEN NEW.kind='dependency_changed' BEGIN SELECT RAISE(ABORT,'injected event failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	changed := append([]core.DependencySnapshot(nil), base...)
+	changed[0].Fingerprint = "erc-after"
+	if _, err := s.ReconcileDependencies(ctx, "goal-1", changed); err == nil {
+		t.Fatal("injected wake event failure did not abort reconciliation")
+	}
+	snapshot, err := s.GetGoalSnapshot(ctx, "goal-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Goal.DependencyRevision != 0 || snapshot.Goal.Status != core.GoalActive || len(snapshot.Events) != 0 || len(snapshot.Dependencies) != 2 || snapshot.Dependencies[0].Fingerprint != "erc-before" || snapshot.Evidence[0].InvalidatedReason != "" {
+		t.Fatalf("failed transaction left partial dependency state: %+v", snapshot)
+	}
+	if _, err := s.DB().Exec(`DROP TRIGGER reject_dependency_event`); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := s.ReconcileDependencies(ctx, "goal-1", changed); err != nil || result.DependencyRevision != 1 || result.Event == nil {
+		t.Fatalf("reconciliation did not recover after rollback: %+v err=%v", result, err)
+	}
+}
+
 func verificationEvidence(id, criterion string, rev int) core.Evidence {
+	family := core.CheckFamilyERC
+	kind := "kicad.erc"
+	checkerID := "kicad-cli-erc"
+	checkerVersion := "9.0.8"
+	if criterion == "conn" || criterion == "connection" {
+		family = core.CheckFamilyConnection
+		kind = "sensor.connection_present"
+		checkerID = "sensor-connection-check"
+		checkerVersion = "1"
+	}
+	dependency := core.DependencySnapshot{SchemaVersion: 1, Family: family, CheckerID: checkerID, CheckerVersion: checkerVersion, Fingerprint: string(family) + "-fingerprint", Available: true}
 	return core.Evidence{
-		ID: id, GoalID: "goal-1", CriterionID: criterion, ArtifactID: "sha-a", Kind: "kicad.erc",
+		ID: id, GoalID: "goal-1", CriterionID: criterion, ArtifactID: "sha-a", Kind: kind,
 		Result: "pass", ReportPath: "/tmp/" + id + ".json", CriteriaRevision: &rev,
 		Provenance: &core.EvidenceProvenance{
-			SchemaVersion: 1, Claim: "checked", Coverage: criterion, CheckerID: "kicad-cli-erc",
-			CheckerVersion: "8.0.7", SourceLevel: "tool_check", InvalidationRule: "criteria or artifact change",
+			SchemaVersion: 2, Claim: "checked", Coverage: criterion, CheckerID: checkerID,
+			CheckerVersion: checkerVersion, SourceLevel: "tool_check", InvalidationRule: "criteria, artifact or dependency change",
+			Family: family, Dependency: &dependency,
 		},
+	}
+}
+
+func seedDependencyBaseline(t *testing.T, s *Store) {
+	t.Helper()
+	_, err := s.ReconcileDependencies(context.Background(), "goal-1", []core.DependencySnapshot{
+		{SchemaVersion: 1, Family: core.CheckFamilyERC, CheckerID: "kicad-cli-erc", CheckerVersion: "9.0.8", Fingerprint: "kicad.erc-fingerprint", Available: true},
+		{SchemaVersion: 1, Family: core.CheckFamilyConnection, CheckerID: "sensor-connection-check", CheckerVersion: "1", Fingerprint: "sensor.connection-fingerprint", Available: true},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -445,13 +578,28 @@ func TestUnprocessedEvents(t *testing.T) {
 func TestCommitVerification(t *testing.T) {
 	s, _ := newGoalStore(t)
 	ctx := context.Background()
+	criteria := []core.Criterion{
+		{ID: "erc", Kind: core.CriterionKindERCClean, Payload: json.RawMessage(`{"max_violations":0}`)},
+		{ID: "conn", Kind: core.CriterionKindConnectionPresent, Payload: json.RawMessage(`{"endpoint_a":"RT1.2","endpoint_b":"J1.2"}`)},
+	}
+	revision, err := s.UpdateGoalCriteria(ctx, "goal-1", criteria)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedDependencyBaseline(t, s)
 	if err := s.SetCurrentArtifact(ctx, "goal-1", "sha-a"); err != nil {
 		t.Fatal(err)
 	}
-	token := core.VerificationToken{GoalID: "goal-1", CriteriaRevision: 0, ArtifactID: "sha-a"}
+	// A prior current connection result can be reused when this round only
+	// checks ERC.
+	connection := verificationEvidence("connection-existing", "conn", revision)
+	if err := s.RecordEvidence(ctx, connection); err != nil {
+		t.Fatal(err)
+	}
+	token := core.VerificationToken{GoalID: "goal-1", CriteriaRevision: revision, ArtifactID: "sha-a", DependencyRevision: 0}
 
 	// All criteria pass with a matching token: goal becomes verified.
-	current, err := s.CommitVerification(ctx, token, core.VerificationResult{Evidence: []core.Evidence{verificationEvidence("ev-1", "erc", 0)}, Passed: true})
+	current, err := s.CommitVerification(ctx, token, core.VerificationResult{Evidence: []core.Evidence{verificationEvidence("ev-1", "erc", revision)}, Passed: true})
 	if err != nil || !current {
 		t.Fatalf("commit: %v %v", current, err)
 	}
@@ -459,13 +607,13 @@ func TestCommitVerification(t *testing.T) {
 	if err != nil || snap.Goal.Status != core.GoalVerified {
 		t.Fatalf("goal not verified: %+v", snap.Goal)
 	}
-	if len(snap.Evidence) != 1 || snap.Evidence[0].InvalidatedReason != "" || snap.Evidence[0].CriteriaRevision == nil {
+	if len(snap.Evidence) != 2 || snap.Evidence[0].InvalidatedReason != "" || snap.Evidence[0].CriteriaRevision == nil {
 		t.Fatalf("evidence stored wrong: %+v", snap.Evidence)
 	}
 
 	// Matching token with unmet criteria: goal goes active with the unmet list.
 	current, err = s.CommitVerification(ctx, token, core.VerificationResult{
-		Evidence: []core.Evidence{verificationEvidence("ev-2", "erc", 0), func() core.Evidence { e := verificationEvidence("ev-3", "conn", 0); e.Result = "fail"; return e }()},
+		Evidence: []core.Evidence{func() core.Evidence { e := verificationEvidence("ev-2", "erc", revision); e.Result = "fail"; return e }()},
 		Passed:   false,
 		Unmet:    []string{"conn"},
 	})
@@ -473,8 +621,39 @@ func TestCommitVerification(t *testing.T) {
 		t.Fatalf("commit unmet: %v %v", current, err)
 	}
 	snap, _ = s.GetGoalSnapshot(ctx, "goal-1")
-	if snap.Goal.Status != core.GoalActive || !strings.Contains(snap.Goal.Reason, "conn") {
+	if snap.Goal.Status != core.GoalActive || !strings.Contains(snap.Goal.Reason, "erc") {
 		t.Fatalf("goal not active with unmet: %+v", snap.Goal)
+	}
+}
+
+func TestCommitVerificationRequiresAllCurrentEvidence(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newGoalStore(t)
+	revision, err := s.UpdateGoalCriteria(ctx, "goal-1", []core.Criterion{
+		{ID: "erc", Kind: core.CriterionKindERCClean, Payload: json.RawMessage(`{"max_violations":0}`)},
+		{ID: "conn", Kind: core.CriterionKindConnectionPresent, Payload: json.RawMessage(`{"endpoint_a":"RT1.2","endpoint_b":"J1.2"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedDependencyBaseline(t, s)
+	if err = s.SetCurrentArtifact(ctx, "goal-1", "sha-a"); err != nil {
+		t.Fatal(err)
+	}
+	token := core.VerificationToken{GoalID: "goal-1", CriteriaRevision: revision, ArtifactID: "sha-a", DependencyRevision: 0}
+	if current, err := s.CommitVerification(ctx, token, core.VerificationResult{Evidence: []core.Evidence{verificationEvidence("only-erc", "erc", revision)}, Passed: true}); err != nil || !current {
+		t.Fatalf("partial evidence commit current=%v err=%v", current, err)
+	}
+	snapshot, err := s.GetGoalSnapshot(ctx, "goal-1")
+	if err != nil || snapshot.Goal.Status == core.GoalVerified || !strings.Contains(snapshot.Goal.Reason, "conn") {
+		t.Fatalf("partial evidence was accepted: goal=%+v err=%v", snapshot.Goal, err)
+	}
+	if current, err := s.CommitVerification(ctx, token, core.VerificationResult{Evidence: []core.Evidence{verificationEvidence("only-connection", "conn", revision)}, Passed: false}); err != nil || !current {
+		t.Fatalf("connection evidence commit current=%v err=%v", current, err)
+	}
+	snapshot, err = s.GetGoalSnapshot(ctx, "goal-1")
+	if err != nil || snapshot.Goal.Status != core.GoalVerified {
+		t.Fatalf("all-current evidence was not aggregated: goal=%+v err=%v", snapshot.Goal, err)
 	}
 }
 
@@ -523,18 +702,23 @@ func TestCommitVerificationStaleToken(t *testing.T) {
 func TestCommitVerificationReplay(t *testing.T) {
 	s, path := newGoalStore(t)
 	ctx := context.Background()
+	revision, err := s.UpdateGoalCriteria(ctx, "goal-1", []core.Criterion{{ID: "erc", Kind: core.CriterionKindERCClean, Payload: json.RawMessage(`{"max_violations":0}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedDependencyBaseline(t, s)
 	if err := s.SetCurrentArtifact(ctx, "goal-1", "sha-a"); err != nil {
 		t.Fatal(err)
 	}
-	token := core.VerificationToken{GoalID: "goal-1", CriteriaRevision: 0, ArtifactID: "sha-a"}
-	round := core.VerificationResult{Evidence: []core.Evidence{verificationEvidence("ev-1", "erc", 0)}, Passed: true}
+	token := core.VerificationToken{GoalID: "goal-1", CriteriaRevision: revision, ArtifactID: "sha-a", DependencyRevision: 0}
+	round := core.VerificationResult{Evidence: []core.Evidence{verificationEvidence("ev-1", "erc", revision)}, Passed: true}
 	// A crash between commit and response makes the caller retry the same
 	// round: INSERT OR REPLACE keeps exactly one row with stable fields.
 	if _, err := s.CommitVerification(ctx, token, round); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
-	s, err := Open(path)
+	s, err = Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}

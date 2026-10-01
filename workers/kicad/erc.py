@@ -15,7 +15,7 @@ CHECKER_ID = 'kicad-cli-erc'
 DEFAULT_MAX_VIOLATIONS = 0
 
 
-def _environment(root: Path) -> dict[str, str]:
+def kicad_environment(root: Path) -> dict[str, str]:
     env = os.environ.copy()
     env['XDG_CACHE_HOME'] = str(root / '.kicad-cache')
     env['XDG_CONFIG_HOME'] = str(root / '.kicad-config')
@@ -28,6 +28,11 @@ def _environment(root: Path) -> dict[str, str]:
         if source.exists() and not dest.exists():
             shutil.copyfile(source, dest)
     return env
+
+
+# Backward-compatible private alias for any local consumers predating the
+# shared dependency collector.
+_environment = kicad_environment
 
 
 def kicad_cli_version(env: dict[str, str]) -> str | None:
@@ -53,7 +58,7 @@ def run_erc(path: Path, root: Path, report: Path, max_violations: int = DEFAULT_
         return 'blocked', '', {'reason': 'design outside allowed root'}, []
     if not report.resolve().is_relative_to(root.resolve()):
         return 'blocked', digest(path), {'reason': 'report outside allowed root'}, []
-    env = _environment(root)
+    env = kicad_environment(root)
     version = kicad_cli_version(env)
     if version is None:
         return 'blocked', digest(path), {'reason': 'kicad-cli version unavailable; result not verifiable'}, []

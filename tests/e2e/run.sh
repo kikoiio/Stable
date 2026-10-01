@@ -43,7 +43,15 @@ start_runner() {
 
 status_file="$run_root/status.json"
 read_status() {
-  "$run_root/bin/agentctl" status --run-root "$run_root/goals" --db "$run_root/state.db" --goal "$goal_id" >"$status_file"
+	local error_file="$run_root/status.error"
+	if "$run_root/bin/agentctl" status --run-root "$run_root/goals" --db "$run_root/state.db" --goal "$goal_id" >"$status_file" 2>"$error_file"; then
+		return 0
+	fi
+	if grep -q 'design changed during dependency collection' "$error_file"; then
+		return 1
+	fi
+	cat "$error_file" >&2
+	return 1
 }
 
 start_runner
@@ -59,7 +67,7 @@ JSON
 
 session_killed=0
 for _ in $(seq 1 900); do
-  read_status
+	if ! read_status; then sleep 0.5; continue; fi
   if [[ "$session_killed" == 0 ]]; then
     gui_pid=$(python3 -c 'import json,sys; s=json.load(open(sys.argv[1]))["snapshot"]["session"]; h=json.loads(s["runtime_handle"]) if s["runtime_handle"] else {}; print(h.get("eeschema_pid",""))' "$status_file")
     if [[ -n "$gui_pid" ]]; then
@@ -83,7 +91,7 @@ runner_pid=
 
 start_runner
 for _ in $(seq 1 900); do
-  read_status
+	if ! read_status; then sleep 0.5; continue; fi
   if python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); sys.exit(0 if x["verified"] and any(e["id"]=="after-crash" and e["status"]=="processed" for e in x["snapshot"]["events"]) else 1)' "$status_file"; then break; fi
   sleep 0.5
 done

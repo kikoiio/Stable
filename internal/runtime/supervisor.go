@@ -18,6 +18,7 @@ import (
 	"stable/internal/appconfig"
 	"stable/internal/conversation"
 	"stable/internal/decision"
+	"stable/internal/dependency"
 	"stable/internal/store"
 )
 
@@ -253,8 +254,13 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	refresher, err := dependency.NewKiCadRefresher(s, p.Goals, p.Share, address)
+	if err != nil {
+		return err
+	}
 	svc, err := conversation.Serve(ctx, conversation.Deps{
 		Store: s, Provider: provider, ChatProvider: chatProvider, Temporal: address, ProjectRoot: p.Share, RunRoot: p.Goals, SocketPath: p.ChatSocket,
+		Refresher: refresher,
 	})
 	if err != nil {
 		return err

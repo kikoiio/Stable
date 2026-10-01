@@ -19,6 +19,7 @@ import (
 	"stable/internal/artifact"
 	"stable/internal/core"
 	"stable/internal/decision"
+	"stable/internal/dependency"
 	"stable/internal/execution"
 	"stable/internal/goalrun"
 	"stable/internal/policy"
@@ -107,7 +108,10 @@ func runConfigured(dbPath, runRoot, address, projectRoot string, appMode bool) e
 	} else {
 		decider = &decision.Codex{SchemaPath: filepath.Join(projectRoot, "schemas/next_action.schema.json"), Workdir: projectRoot, Timeout: 90 * time.Second, Attempts: 2}
 	}
-	activities := &core.Activities{State: state, Artifacts: artifacts, Kicad: kicad, Computer: computer, Decider: decider, Policy: policyEngine, Executor: coordinator}
+	refresher := &dependency.Refresher{State: state, Collector: dependency.KiCadCollector{Kicad: kicad}, Wake: func(ctx context.Context, goalID, eventID string) error {
+		return goalrun.WakeGoal(ctx, address, goalID, eventID)
+	}}
+	activities := &core.Activities{State: state, Artifacts: artifacts, Kicad: kicad, Computer: computer, Decider: decider, Policy: policyEngine, Executor: coordinator, Refresher: refresher}
 	connection, err := client.Dial(client.Options{HostPort: address})
 	if err != nil {
 		return err

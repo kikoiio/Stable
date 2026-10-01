@@ -113,6 +113,13 @@ func (a *Activities) VerifyGoal(ctx context.Context, goalID string) (Verificatio
 	if err != nil {
 		return out, false, err
 	}
+	if a.Refresher != nil {
+		refreshed, refreshErr := a.Refresher.Refresh(ctx, goalID)
+		if refreshErr != nil {
+			return out, false, refreshErr
+		}
+		snap = refreshed.Snapshot
+	}
 	g := snap.Goal
 	before, err := a.Artifacts.Digest(ctx, g.ArtifactPath)
 	if err != nil {
@@ -121,7 +128,7 @@ func (a *Activities) VerifyGoal(ctx context.Context, goalID string) (Verificatio
 	if before != g.CurrentArtifactID {
 		return out, false, errors.New("design changed before checks")
 	}
-	token := VerificationToken{GoalID: goalID, CriteriaRevision: g.CriteriaRevision, ArtifactID: before}
+	token := VerificationToken{GoalID: goalID, CriteriaRevision: g.CriteriaRevision, ArtifactID: before, DependencyRevision: g.DependencyRevision}
 	revision := g.CriteriaRevision
 
 	var ercCriteria, connectionCriteria []Criterion
@@ -135,8 +142,15 @@ func (a *Activities) VerifyGoal(ctx context.Context, goalID string) (Verificatio
 			return out, false, fmt.Errorf("criterion %s: unsupported kind %q", item.ID, item.Kind)
 		}
 	}
+	ercDependency := dependencyFor(snap.Dependencies, CheckFamilyERC)
+	connectionDependency := dependencyFor(snap.Dependencies, CheckFamilyConnection)
+	needERC := len(ercCriteria) > 0 && !criteriaHaveCurrentEvidence(g, before, snap.Dependencies, snap.Evidence, ercCriteria)
+	needConnection := len(connectionCriteria) > 0 && !criteriaHaveCurrentEvidence(g, before, snap.Dependencies, snap.Evidence, connectionCriteria)
 
-	if len(ercCriteria) > 0 {
+	if needERC && (ercDependency == nil || !ercDependency.Available) {
+		out.Unmet = append(out.Unmet, criterionIDs(ercCriteria)...)
+	}
+	if needERC && ercDependency != nil && ercDependency.Available {
 		// One ERC run serves every ERC criterion; the request threshold is the
 		// strictest, and each criterion is judged against its own threshold
 		// from the report's violation count.
@@ -147,7 +161,7 @@ func (a *Activities) VerifyGoal(ctx context.Context, goalID string) (Verificatio
 			}
 		}
 		checkID := uniqueID("erc")
-		report := filepath.Join(g.AllowedRoot, "reports", fmt.Sprintf("erc-v%d-%s-%s.json", revision, checkID, before))
+		report := filepath.Join(g.AllowedRoot, "reports", fmt.Sprintf("erc-v%d-d%d-%s-%s.json", revision, token.DependencyRevision, checkID, before))
 		if err = os.MkdirAll(filepath.Dir(report), 0755); err != nil {
 			return out, false, err
 		}
@@ -197,13 +211,15 @@ func (a *Activities) VerifyGoal(ctx context.Context, goalID string) (Verificatio
 				Kind: "kicad.erc", Result: res, ReportPath: result.EvidencePaths[0], CreatedAt: time.Now().UTC(),
 				CriteriaRevision: &revision,
 				Provenance: &EvidenceProvenance{
-					SchemaVersion:    1,
+					SchemaVersion:    2,
 					Claim:            fmt.Sprintf("ERC 违规数 %d 不超过当前标准允许的 %d", *facts.ViolationCount, itemThreshold),
 					Coverage:         item.Kind + "/" + item.ID,
 					CheckerID:        facts.CheckerID,
 					CheckerVersion:   facts.CheckerVersion,
 					SourceLevel:      "tool_check",
 					InvalidationRule: evidenceInvalidationRule,
+					Family:           CheckFamilyERC,
+					Dependency:       cloneDependency(ercDependency),
 				},
 			})
 			if res != "pass" {
@@ -212,14 +228,19 @@ func (a *Activities) VerifyGoal(ctx context.Context, goalID string) (Verificatio
 		}
 	}
 
-	for _, item := range connectionCriteria {
-		e, err := a.verifyConnection(ctx, goalID, g, item, before, revision)
-		if err != nil {
-			return out, false, err
-		}
-		out.Evidence = append(out.Evidence, e)
-		if e.Result != "pass" {
-			out.Unmet = append(out.Unmet, item.ID)
+	if needConnection && (connectionDependency == nil || !connectionDependency.Available) {
+		out.Unmet = append(out.Unmet, criterionIDs(connectionCriteria)...)
+	}
+	if needConnection && connectionDependency != nil && connectionDependency.Available {
+		for _, item := range connectionCriteria {
+			e, err := a.verifyConnection(ctx, goalID, g, item, before, revision, *connectionDependency)
+			if err != nil {
+				return out, false, err
+			}
+			out.Evidence = append(out.Evidence, e)
+			if e.Result != "pass" {
+				out.Unmet = append(out.Unmet, item.ID)
+			}
 		}
 	}
 
@@ -230,12 +251,95 @@ func (a *Activities) VerifyGoal(ctx context.Context, goalID string) (Verificatio
 	if final != before {
 		return out, false, errors.New("design changed during checks")
 	}
-	out.Passed = len(out.Unmet) == 0
+	if a.Refresher != nil {
+		if _, err = a.Refresher.Refresh(ctx, goalID); err != nil {
+			return out, false, err
+		}
+	}
+	currentEvidence := append(append([]Evidence(nil), snap.Evidence...), out.Evidence...)
+	out.Passed = len(g.Criteria) > 0 && criteriaHaveCurrentEvidence(g, before, snap.Dependencies, currentEvidence, g.Criteria)
 	current, err := a.State.CommitVerification(ctx, token, out)
 	if err != nil {
 		return out, false, err
 	}
+	if current {
+		latest, readErr := a.State.GetGoalSnapshot(ctx, goalID)
+		if readErr != nil {
+			return out, false, readErr
+		}
+		out.Passed = latest.Goal.Status == GoalVerified
+		if !out.Passed && len(out.Unmet) == 0 {
+			out.Unmet = missingCurrentCriteria(latest.Goal, latest.Dependencies, latest.Evidence)
+		}
+	}
 	return out, current, nil
+}
+
+func dependencyFor(dependencies []DependencySnapshot, family CheckFamily) *DependencySnapshot {
+	var found *DependencySnapshot
+	for i := range dependencies {
+		if dependencies[i].Family != family {
+			continue
+		}
+		if found != nil {
+			return nil
+		}
+		found = &dependencies[i]
+	}
+	return found
+}
+
+func criteriaHaveCurrentEvidence(goal Goal, artifactID string, dependencies []DependencySnapshot, evidence []Evidence, criteria []Criterion) bool {
+	if len(criteria) == 0 {
+		return true
+	}
+	for _, criterion := range criteria {
+		found := false
+		for _, item := range evidence {
+			if item.CriterionID == criterion.ID && EvidenceCurrentWithDependencies(goal, artifactID, dependencies, item) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func missingCurrentCriteria(goal Goal, dependencies []DependencySnapshot, evidence []Evidence) []string {
+	missing := make([]string, 0)
+	for _, criterion := range goal.Criteria {
+		found := false
+		for _, item := range evidence {
+			if item.CriterionID == criterion.ID && EvidenceCurrentWithDependencies(goal, goal.CurrentArtifactID, dependencies, item) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, criterion.ID)
+		}
+	}
+	return missing
+}
+
+func criterionIDs(criteria []Criterion) []string {
+	ids := make([]string, 0, len(criteria))
+	for _, criterion := range criteria {
+		ids = append(ids, criterion.ID)
+	}
+	return ids
+}
+
+func cloneDependency(snapshot *DependencySnapshot) *DependencySnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	copy := *snapshot
+	copy.Sources = append([]DependencySource(nil), snapshot.Sources...)
+	return &copy
 }
 
 // ercThreshold reads a criterion's max_violations; a missing threshold keeps
@@ -254,7 +358,7 @@ func ercThreshold(item Criterion) int {
 // design facts and builds provenance-backed evidence bound to the artifact
 // digest and criteria revision. The check is unverifiable (an error, not a
 // pass) when the checker identity is absent from the observation.
-func (a *Activities) verifyConnection(ctx context.Context, goalID string, g Goal, item Criterion, digest string, revision int) (Evidence, error) {
+func (a *Activities) verifyConnection(ctx context.Context, goalID string, g Goal, item Criterion, digest string, revision int, dependency DependencySnapshot) (Evidence, error) {
 	empty := Evidence{}
 	design, err := a.Kicad.Call(ctx, CapabilityRequest{ProtocolVersion: 1, OperationID: uniqueID("inspect"), Kind: "inspect_design", GoalID: goalID, ExpectedArtifactID: digest, Payload: requestPayload(g, nil)})
 	if err != nil {
@@ -283,13 +387,15 @@ func (a *Activities) verifyConnection(ctx context.Context, goalID string, g Goal
 		Kind: "sensor.connection_present", Result: result, CreatedAt: time.Now().UTC(),
 		CriteriaRevision: &revision,
 		Provenance: &EvidenceProvenance{
-			SchemaVersion:    1,
+			SchemaVersion:    2,
 			Claim:            "传感器连线 RT1.2-J1.2 存在",
 			Coverage:         item.Kind + "/" + item.ID,
 			CheckerID:        facts.CheckerID,
 			CheckerVersion:   facts.CheckerVersion,
 			SourceLevel:      "tool_check",
 			InvalidationRule: evidenceInvalidationRule,
+			Family:           CheckFamilyConnection,
+			Dependency:       cloneDependency(&dependency),
 		},
 	}, nil
 }
@@ -318,6 +424,13 @@ func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (
 			_ = a.State.SetEventStatus(ctx, eventID, "processed")
 		}
 		return done, err
+	}
+	if a.Refresher != nil {
+		refreshed, refreshErr := a.Refresher.Refresh(ctx, goalID)
+		if refreshErr != nil {
+			return finish(false, refreshErr)
+		}
+		snap = refreshed.Snapshot
 	}
 	for _, action := range snap.Actions {
 		if action.Status == "prepared" || action.Status == "outcome_unknown" {
@@ -363,14 +476,19 @@ func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (
 		if err != nil {
 			return finish(false, err)
 		}
+		for _, dependency := range snap.Dependencies {
+			if !dependency.Available {
+				return finish(false, nil)
+			}
+		}
 	}
 	valid := make([]Evidence, 0)
 	for _, e := range snap.Evidence {
-		if EvidenceCurrent(snap.Goal, observed.ArtifactID, e) {
+		if EvidenceCurrentWithDependencies(snap.Goal, observed.ArtifactID, snap.Dependencies, e) {
 			valid = append(valid, e)
 		}
 	}
-	token := VerificationToken{GoalID: goalID, CriteriaRevision: snap.Goal.CriteriaRevision, ArtifactID: observed.ArtifactID}
+	token := VerificationToken{GoalID: goalID, CriteriaRevision: snap.Goal.CriteriaRevision, ArtifactID: observed.ArtifactID, DependencyRevision: snap.Goal.DependencyRevision}
 	setStatus := func(status GoalStatus, reason string) {
 		_, _ = a.State.UpdateStatusForToken(ctx, token, status, reason)
 	}
@@ -421,7 +539,8 @@ func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (
 		return finish(false, nil)
 	}
 	decisionRevision := token.CriteriaRevision
-	decision := Decision{ID: uniqueID("decision"), AgentID: snap.Agent.ID, ObservationID: observed.ID, Proposal: proposal, ModelRunID: modelRunID, ModelCallID: modelCallID, CreatedAt: time.Now().UTC(), CriteriaRevision: &decisionRevision}
+	decisionDependencyRevision := token.DependencyRevision
+	decision := Decision{ID: uniqueID("decision"), AgentID: snap.Agent.ID, ObservationID: observed.ID, Proposal: proposal, ModelRunID: modelRunID, ModelCallID: modelCallID, CreatedAt: time.Now().UTC(), CriteriaRevision: &decisionRevision, DependencyRevision: &decisionDependencyRevision}
 	if err = a.State.RecordDecision(ctx, decision); err != nil {
 		return finish(false, err)
 	}
@@ -441,7 +560,7 @@ func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (
 	if err != nil {
 		return finish(false, err)
 	}
-	if latest.Goal.CriteriaRevision != token.CriteriaRevision || latest.Goal.CurrentArtifactID != token.ArtifactID {
+	if latest.Goal.CriteriaRevision != token.CriteriaRevision || latest.Goal.CurrentArtifactID != token.ArtifactID || latest.Goal.DependencyRevision != token.DependencyRevision {
 		return finish(false, nil)
 	}
 	switch proposal.Kind {
@@ -543,7 +662,7 @@ func (a *Activities) finishIfVerified(ctx context.Context, goalID string, result
 	if err != nil {
 		return false, err
 	}
-	token := VerificationToken{GoalID: goalID, CriteriaRevision: latest.Goal.CriteriaRevision, ArtifactID: latest.Goal.CurrentArtifactID}
+	token := VerificationToken{GoalID: goalID, CriteriaRevision: latest.Goal.CriteriaRevision, ArtifactID: latest.Goal.CurrentArtifactID, DependencyRevision: latest.Goal.DependencyRevision}
 	_, err = a.State.UpdateStatusForToken(ctx, token, GoalNeedsHuman, reason)
 	return false, err
 }

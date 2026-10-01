@@ -12,6 +12,7 @@ import (
 	"stable/internal/appconfig"
 	"stable/internal/conversation"
 	"stable/internal/decision"
+	"stable/internal/dependency"
 	"stable/internal/store"
 )
 
@@ -50,8 +51,13 @@ func chatserve(args []string) error {
 	defer s.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	refresher, err := dependency.NewKiCadRefresher(s, *runRoot, *projectRoot, *temporal)
+	if err != nil {
+		return err
+	}
 	svc, err := conversation.Serve(ctx, conversation.Deps{
 		Store: s, Provider: provider, ChatProvider: model.(decision.ChatProvider), Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket,
+		Refresher: refresher,
 	})
 	if err != nil {
 		return err

@@ -7,11 +7,12 @@ check: ## 检查开发环境依赖
 test: ## Go 单元测试
 	go test ./...
 
-e2e: ## 源码级端到端测试（run / waiting_restart / unsupported / criteria_change）
+e2e: ## 源码级端到端测试（含 V01 标准变化与 V02 工程依赖变化）
 	bash tests/e2e/run.sh
 	bash tests/e2e/waiting_restart.sh
 	bash tests/e2e/unsupported.sh
 	bash tests/e2e/criteria_change.sh
+	bash tests/e2e/dependency_change.sh
 
 cases: ## 场景用例（tests/cases，需要 kicad-cli）
 	@for c in tests/cases/cases/*/; do \

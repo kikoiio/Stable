@@ -73,7 +73,8 @@ func TestPreparedBeforeEffectAndReconcileLostReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	rev := 0
-	d := core.Decision{ID: "d", AgentID: "agent-g", ObservationID: "o", Proposal: core.ProposedAction{Kind: "execute_capability", Capability: "repair", Target: path, Parameters: json.RawMessage(`{}`), ExpectedArtifactID: initial, Reason: "repair"}, CriteriaRevision: &rev}
+	depRev := int64(0)
+	d := core.Decision{ID: "d", AgentID: "agent-g", ObservationID: "o", Proposal: core.ProposedAction{Kind: "execute_capability", Capability: "repair", Target: path, Parameters: json.RawMessage(`{}`), ExpectedArtifactID: initial, Reason: "repair"}, CriteriaRevision: &rev, DependencyRevision: &depRev}
 	if err = s.RecordDecision(ctx, d); err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +146,12 @@ func staleGuardFixture(t *testing.T) (context.Context, *store.Store, *countingBr
 
 func recordDecision(t *testing.T, ctx context.Context, s *store.Store, id, path string, revision *int) {
 	t.Helper()
-	d := core.Decision{ID: id, AgentID: "agent-g", ObservationID: "o", Proposal: core.ProposedAction{Kind: "execute_capability", Capability: "repair", Target: path, Parameters: json.RawMessage(`{}`), ExpectedArtifactID: "unused", Reason: "repair"}, CriteriaRevision: revision}
+	var dependencyRevision *int64
+	if revision != nil {
+		current := int64(0)
+		dependencyRevision = &current
+	}
+	d := core.Decision{ID: id, AgentID: "agent-g", ObservationID: "o", Proposal: core.ProposedAction{Kind: "execute_capability", Capability: "repair", Target: path, Parameters: json.RawMessage(`{}`), ExpectedArtifactID: "unused", Reason: "repair"}, CriteriaRevision: revision, DependencyRevision: dependencyRevision}
 	if err := s.RecordDecision(ctx, d); err != nil {
 		t.Fatal(err)
 	}

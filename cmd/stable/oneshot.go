@@ -22,10 +22,7 @@ import (
 const oneshotTimeout = 15 * time.Minute
 
 func agentctl(p runtime.Paths, c appconfig.AppConfig, cmd string, extra ...string) (string, error) {
-	args := []string{cmd, "--run-root", p.Goals, "--db", p.Database, "--temporal", "127.0.0.1:" + strconv.Itoa(c.TemporalPort)}
-	if cmd == "create" {
-		args = append(args, "--project-root", p.Share)
-	}
+	args := []string{cmd, "--run-root", p.Goals, "--db", p.Database, "--temporal", "127.0.0.1:" + strconv.Itoa(c.TemporalPort), "--project-root", p.Share}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	child := exec.CommandContext(ctx, filepath.Join(p.Libexec, "agentctl"), append(args, extra...)...)

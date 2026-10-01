@@ -14,15 +14,34 @@ import (
 )
 
 func currentProvenance(checker string) *core.EvidenceProvenance {
+	family := core.CheckFamilyConnection
+	if checker == "kicad-cli-erc" {
+		family = core.CheckFamilyERC
+	}
+	dep := dependencyFor(family)
 	return &core.EvidenceProvenance{
-		SchemaVersion:    1,
+		SchemaVersion:    2,
 		Claim:            "check passes under current criteria",
 		Coverage:         "sensor board design",
 		CheckerID:        checker,
 		CheckerVersion:   "1.0.0",
 		SourceLevel:      "tool_check",
 		InvalidationRule: "criteria or artifact change",
+		Family:           family,
+		Dependency:       &dep,
 	}
+}
+
+func dependencyFor(family core.CheckFamily) core.DependencySnapshot {
+	checker, version := "sensor-connection-check", "1.0.0"
+	if family == core.CheckFamilyERC {
+		checker, version = "kicad-cli-erc", "1.0.0"
+	}
+	return core.DependencySnapshot{SchemaVersion: 1, Family: family, Sources: []core.DependencySource{{Kind: "fixture", Identity: "fixture", Digest: "digest-" + string(family), State: "available"}}, CheckerID: checker, CheckerVersion: version, Fingerprint: "fingerprint-" + string(family), Available: true}
+}
+
+func reportDependencies() []core.DependencySnapshot {
+	return []core.DependencySnapshot{dependencyFor(core.CheckFamilyERC), dependencyFor(core.CheckFamilyConnection)}
 }
 
 func sensorCriteria(maxViolations int) []core.Criterion {
@@ -64,7 +83,7 @@ func TestScreenshotCannotVerifyAndExportTracksCurrentDesign(t *testing.T) {
 			ID: "g", ArtifactPath: path, CurrentArtifactID: digest, Status: core.GoalVerified,
 			CriteriaRevision: 1, Criteria: sensorCriteria(0),
 		},
-		Evidence: []core.Evidence{{ID: "screen", Kind: "computer.screenshot", Result: "pass", ArtifactID: digest}},
+		Dependencies: reportDependencies(), Evidence: []core.Evidence{{ID: "screen", Kind: "computer.screenshot", Result: "pass", ArtifactID: digest}},
 	}
 	first, err := Export(context.Background(), snapshot, filepath.Join(root, "without-erc"))
 	if err != nil || first.Verified || len(first.Unverified) == 0 {
@@ -120,7 +139,7 @@ func TestStatusERCRechecksCurrentThreshold(t *testing.T) {
 			ID: "g", ArtifactPath: path, CurrentArtifactID: digest, Status: core.GoalVerified,
 			CriteriaRevision: 1, Criteria: sensorCriteria(0),
 		},
-		Evidence: []core.Evidence{erc, currentEvidence("conn", "conn", "sensor.connection_present", digest, "")},
+		Dependencies: reportDependencies(), Evidence: []core.Evidence{erc, currentEvidence("conn", "conn", "sensor.connection_present", digest, "")},
 	}
 	status, err := BuildStatus(snapshot)
 	if err != nil || status.Verified {
@@ -156,7 +175,7 @@ func TestExportPendingHasNoCurrentERCAndArchivesHistory(t *testing.T) {
 			Status: core.GoalPendingReverification, CriteriaRevision: 2, Criteria: sensorCriteria(0),
 			Reason: "标准已升级到 v2，待完整复核",
 		},
-		Evidence: []core.Evidence{
+		Dependencies: reportDependencies(), Evidence: []core.Evidence{
 			{
 				ID: "old-erc", CriterionID: "erc-clean", Kind: "kicad.erc", Result: "pass",
 				ArtifactID: digest, ReportPath: oldReport,
@@ -224,7 +243,7 @@ func TestStatusRequiresEveryCriterionCurrent(t *testing.T) {
 			ID: "g", ArtifactPath: path, CurrentArtifactID: digest, Status: core.GoalVerified,
 			CriteriaRevision: 1, Criteria: sensorCriteria(0),
 		},
-		Evidence: []core.Evidence{legacy},
+		Dependencies: reportDependencies(), Evidence: []core.Evidence{legacy},
 	}
 	status, err := BuildStatus(snapshot)
 	if err != nil || status.Verified {
@@ -249,6 +268,53 @@ func TestStatusRequiresEveryCriterionCurrent(t *testing.T) {
 	}
 }
 
+func TestDependencyStatusProjection(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sensor.kicad_sch")
+	data := []byte("design")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256(data)
+	digest := hex.EncodeToString(hash[:])
+	ercReport := filepath.Join(root, "erc.json")
+	if err := os.WriteFile(ercReport, []byte(`{"sheets":[{"violations":[]}]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	erc := currentEvidence("erc-v2", "erc-clean", "kicad.erc", digest, ercReport)
+	conn := currentEvidence("conn-v2", "conn", "sensor.connection_present", digest, "")
+	snapshot := core.GoalSnapshot{Goal: core.Goal{ID: "g", ArtifactPath: path, CurrentArtifactID: digest, Status: core.GoalVerified, CriteriaRevision: 1, DependencyRevision: 2, Criteria: sensorCriteria(0)}, Dependencies: reportDependencies(), Evidence: []core.Evidence{erc, conn}}
+	snapshot.Dependencies[0].Fingerprint = "new-project-setting"
+	snapshot.Dependencies[0].Available = false
+	snapshot.Dependencies[0].Reason = "selected global symbol table is missing"
+	status, err := BuildStatus(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Verified {
+		t.Fatalf("changed ERC dependency retained verified status: %+v", status)
+	}
+	if status.Evidence[0].Current || !status.Evidence[1].Current {
+		t.Fatalf("dependency did not invalidate only ERC: %+v", status.Evidence)
+	}
+	if status.Evidence[0].DependencyFingerprint != "fingerprint-kicad.erc" || status.Evidence[0].DesignDigest != digest || status.Evidence[0].CriteriaRevision != "1" || status.Evidence[0].Dependency == nil || status.Evidence[0].Dependency.CheckerVersion != "1.0.0" {
+		t.Fatalf("v2 provenance missing from projection: %+v", status.Evidence[0])
+	}
+	if !strings.Contains(strings.Join(status.Unverified, "; "), "no current evidence for criterion erc-clean") {
+		t.Fatalf("missing ERC evidence gap: %v", status.Unverified)
+	}
+	if !strings.Contains(strings.Join(status.Unverified, "; "), "selected global symbol table is missing") {
+		t.Fatalf("unavailable dependency reason omitted: %v", status.Unverified)
+	}
+	legacy := core.Evidence{ID: "v1", CriterionID: "erc-clean", Kind: "kicad.erc", Result: "pass", ArtifactID: digest, CriteriaRevision: revision(1), Provenance: currentProvenance("kicad-cli-erc")}
+	legacy.Provenance.SchemaVersion = 1
+	legacy.Provenance.Dependency = nil
+	projected := normalizeEvidence(snapshot, digest, legacy)
+	if projected.Current || projected.DependencyFingerprint != "unknown" || projected.CheckerVersion != "1.0.0" {
+		t.Fatalf("legacy provenance should remain known except dependency: %+v", projected)
+	}
+}
+
 func TestStatusHandlesUnknownCheckerAndMissingReport(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "sensor.kicad_sch")
@@ -267,7 +333,7 @@ func TestStatusHandlesUnknownCheckerAndMissingReport(t *testing.T) {
 			ID: "g", ArtifactPath: path, CurrentArtifactID: digest, Status: core.GoalVerified,
 			CriteriaRevision: 1, Criteria: sensorCriteria(0),
 		},
-		Evidence: []core.Evidence{
+		Dependencies: reportDependencies(), Evidence: []core.Evidence{
 			unknownChecker,
 			currentEvidence("conn", "conn", "sensor.connection_present", digest, ""),
 		},

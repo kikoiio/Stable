@@ -9,6 +9,7 @@ import sys
 
 from schematic import authorized, digest, inspect, repair
 from erc import DEFAULT_MAX_VIOLATIONS, run_erc
+from dependencies import collect_dependencies
 
 
 def handle(request: dict) -> dict:
@@ -38,6 +39,17 @@ def handle(request: dict) -> dict:
         result['status'] = 'observed'
         result['actual_artifact_id'] = digest(path)
         result['postcondition'] = inspect(path)
+    elif kind == 'kicad.describe_dependencies':
+        before = digest(path)
+        dependencies = collect_dependencies(path, root)
+        after = digest(path)
+        result['actual_artifact_id'] = after
+        result['postcondition'] = {'dependencies': dependencies}
+        if before != after:
+            result['status'] = 'stale'
+            result['error_code'] = 'design_changed_during_dependency_collection'
+        else:
+            result['status'] = 'observed'
     elif kind == 'kicad.repair_connection':
         status, actual, facts = repair(path, root, request.get('expected_artifact_id', ''))
         result.update(status=status, actual_artifact_id=actual, postcondition=facts)

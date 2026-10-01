@@ -750,8 +750,8 @@ func (s *Store) RecordDecision(ctx context.Context, d core.Decision) error {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO decisions(id,agent_id,observation_id,proposal_json,model_run_id,model_call_id,criteria_revision,created_at) VALUES(?,?,?,?,?,?,?,?)`,
-		d.ID, d.AgentID, d.ObservationID, encode(d.Proposal), d.ModelRunID, d.ModelCallID, revisionPtr(d.CriteriaRevision), d.CreatedAt.Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO decisions(id,agent_id,observation_id,proposal_json,model_run_id,model_call_id,criteria_revision,dependency_revision,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		d.ID, d.AgentID, d.ObservationID, encode(d.Proposal), d.ModelRunID, d.ModelCallID, revisionPtr(d.CriteriaRevision), revision64Ptr(d.DependencyRevision), d.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return err
 	}
@@ -763,6 +763,13 @@ func (s *Store) RecordDecision(ctx context.Context, d core.Decision) error {
 
 // revisionPtr converts a nullable criteria revision to a driver value.
 func revisionPtr(rev *int) any {
+	if rev == nil {
+		return nil
+	}
+	return *rev
+}
+
+func revision64Ptr(rev *int64) any {
 	if rev == nil {
 		return nil
 	}
@@ -824,7 +831,7 @@ func (s *Store) modelCalls(ctx context.Context, id string) ([]core.ModelCall, er
 	return out, rows.Err()
 }
 
-var ErrStaleDecision = errors.New("decision criteria revision is unknown or does not match the goal's current criteria revision")
+var ErrStaleDecision = errors.New("decision version is unknown or does not match the goal's current criteria and dependency revisions")
 
 func (s *Store) ReserveAction(ctx context.Context, a core.ActionRecord) (core.ActionRecord, error) {
 	if a.ID == "" || a.DecisionID == "" {
@@ -837,18 +844,19 @@ func (s *Store) ReserveAction(ctx context.Context, a core.ActionRecord) (core.Ac
 	defer tx.Rollback()
 	// Guard: the decision must carry a criteria revision matching the goal's
 	// current one. Legacy (NULL) or outdated decisions cannot drive new actions.
-	var decisionRevision sql.NullInt64
+	var decisionRevision, decisionDependencyRevision sql.NullInt64
 	var goalRevision int
-	err = tx.QueryRowContext(ctx, `SELECT d.criteria_revision, g.criteria_revision FROM decisions d
+	var goalDependencyRevision int64
+	err = tx.QueryRowContext(ctx, `SELECT d.criteria_revision, g.criteria_revision, d.dependency_revision, g.dependency_revision FROM decisions d
 		JOIN agents ag ON ag.id=d.agent_id JOIN goals g ON g.id=ag.goal_id WHERE d.id=?`, a.DecisionID).
-		Scan(&decisionRevision, &goalRevision)
+		Scan(&decisionRevision, &goalRevision, &decisionDependencyRevision, &goalDependencyRevision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return a, fmt.Errorf("decision %s: not found", a.DecisionID)
 	}
 	if err != nil {
 		return a, err
 	}
-	if !decisionRevision.Valid || int(decisionRevision.Int64) != goalRevision {
+	if !decisionRevision.Valid || int(decisionRevision.Int64) != goalRevision || !decisionDependencyRevision.Valid || decisionDependencyRevision.Int64 != goalDependencyRevision {
 		return a, ErrStaleDecision
 	}
 	r, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO actions(id,decision_id,expected_artifact_id,desired_postcondition_json,status,result_artifact_id,reason) VALUES(?,?,?,?,?,?,?)`,
@@ -962,7 +970,7 @@ func (s *Store) observations(ctx context.Context, id string) ([]core.Observation
 	return out, rows.Err()
 }
 func (s *Store) decisions(ctx context.Context, id string) ([]core.Decision, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT d.id,d.agent_id,d.observation_id,d.proposal_json,d.model_run_id,d.model_call_id,d.criteria_revision,d.created_at FROM decisions d JOIN agents a ON a.id=d.agent_id WHERE a.goal_id=? ORDER BY d.created_at,d.id`, id)
+	rows, err := s.db.QueryContext(ctx, `SELECT d.id,d.agent_id,d.observation_id,d.proposal_json,d.model_run_id,d.model_call_id,d.criteria_revision,d.dependency_revision,d.created_at FROM decisions d JOIN agents a ON a.id=d.agent_id WHERE a.goal_id=? ORDER BY d.created_at,d.id`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -971,8 +979,8 @@ func (s *Store) decisions(ctx context.Context, id string) ([]core.Decision, erro
 	for rows.Next() {
 		var d core.Decision
 		var p, t string
-		var rev sql.NullInt64
-		if err = rows.Scan(&d.ID, &d.AgentID, &d.ObservationID, &p, &d.ModelRunID, &d.ModelCallID, &rev, &t); err != nil {
+		var rev, dependencyRevision sql.NullInt64
+		if err = rows.Scan(&d.ID, &d.AgentID, &d.ObservationID, &p, &d.ModelRunID, &d.ModelCallID, &rev, &dependencyRevision, &t); err != nil {
 			return nil, err
 		}
 		if err = json.Unmarshal([]byte(p), &d.Proposal); err != nil {
@@ -982,6 +990,10 @@ func (s *Store) decisions(ctx context.Context, id string) ([]core.Decision, erro
 		if rev.Valid {
 			r := int(rev.Int64)
 			d.CriteriaRevision = &r
+		}
+		if dependencyRevision.Valid {
+			r := dependencyRevision.Int64
+			d.DependencyRevision = &r
 		}
 		if d.ModelCallID == "" {
 			d.ModelInfo = "unknown (legacy decision)"
@@ -1428,19 +1440,20 @@ func (s *Store) CommitVerification(ctx context.Context, token core.VerificationT
 	}
 	defer tx.Rollback()
 	var goalRevision int
+	var dependencyRevision int64
 	var artifactID string
-	err = tx.QueryRowContext(ctx, `SELECT criteria_revision,current_artifact_id FROM goals WHERE id=?`, token.GoalID).Scan(&goalRevision, &artifactID)
+	err = tx.QueryRowContext(ctx, `SELECT criteria_revision,current_artifact_id,dependency_revision FROM goals WHERE id=?`, token.GoalID).Scan(&goalRevision, &artifactID, &dependencyRevision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("goal %s: not found", token.GoalID)
 	}
 	if err != nil {
 		return false, err
 	}
-	current := goalRevision == token.CriteriaRevision && artifactID == token.ArtifactID
+	current := goalRevision == token.CriteriaRevision && artifactID == token.ArtifactID && dependencyRevision == token.DependencyRevision
 	staleReason := ""
 	if !current {
-		staleReason = fmt.Sprintf("复核令牌过期：提交时目标标准版本为 v%d、产物为 %s（令牌为 v%d、%s），本轮结果仅保留为历史",
-			goalRevision, artifactID, token.CriteriaRevision, token.ArtifactID)
+		staleReason = fmt.Sprintf("复核令牌过期：提交时目标标准版本为 v%d、产物为 %s、依赖代次为 %d（令牌为 v%d、%s、依赖代次 %d），本轮结果仅保留为历史",
+			goalRevision, artifactID, dependencyRevision, token.CriteriaRevision, token.ArtifactID, token.DependencyRevision)
 	}
 	for _, e := range result.Evidence {
 		if e.GoalID == "" {
@@ -1458,11 +1471,9 @@ func (s *Store) CommitVerification(ctx context.Context, token core.VerificationT
 		}
 	}
 	if current {
-		status := core.GoalVerified
-		reason := ""
-		if !result.Passed {
-			status = core.GoalActive
-			reason = "复核未通过，未满足项：" + strings.Join(result.Unmet, "、")
+		status, reason, err := verificationConclusion(ctx, tx, token.GoalID)
+		if err != nil {
+			return false, err
 		}
 		if _, err = tx.ExecContext(ctx, `UPDATE goals SET status=?,reason=?,revision=revision+1 WHERE id=?`, status, reason, token.GoalID); err != nil {
 			return false, err
@@ -1477,6 +1488,102 @@ func (s *Store) CommitVerification(ctx context.Context, token core.VerificationT
 	return current, nil
 }
 
+func verificationConclusion(ctx context.Context, tx *sql.Tx, goalID string) (core.GoalStatus, string, error) {
+	goal, err := scanGoal(tx.QueryRowContext(ctx, goalSelect, goalID))
+	if err != nil {
+		return "", "", err
+	}
+	dependencies, err := dependenciesFromQuery(ctx, tx, goalID)
+	if err != nil {
+		return "", "", err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id,goal_id,criterion_id,artifact_id,kind,result,report_path,criteria_revision,provenance,invalidated_reason,created_at FROM evidence WHERE goal_id=? ORDER BY created_at,id`, goalID)
+	if err != nil {
+		return "", "", err
+	}
+	latest := map[string]core.Evidence{}
+	for rows.Next() {
+		var evidence core.Evidence
+		var timestamp string
+		var criteriaRevision sql.NullInt64
+		var provenance sql.NullString
+		if err = rows.Scan(&evidence.ID, &evidence.GoalID, &evidence.CriterionID, &evidence.ArtifactID, &evidence.Kind, &evidence.Result, &evidence.ReportPath, &criteriaRevision, &provenance, &evidence.InvalidatedReason, &timestamp); err != nil {
+			rows.Close()
+			return "", "", err
+		}
+		if criteriaRevision.Valid {
+			revision := int(criteriaRevision.Int64)
+			evidence.CriteriaRevision = &revision
+		}
+		if provenance.Valid && provenance.String != "" {
+			var p core.EvidenceProvenance
+			if err = json.Unmarshal([]byte(provenance.String), &p); err != nil {
+				rows.Close()
+				return "", "", err
+			}
+			evidence.Provenance = &p
+		}
+		evidence.CreatedAt = parseTime(timestamp)
+		asPass := evidence
+		asPass.Result = "pass"
+		if !core.EvidenceCurrentWithDependencies(goal, goal.CurrentArtifactID, dependencies, asPass) {
+			continue
+		}
+		previous, exists := latest[evidence.CriterionID]
+		if !exists || evidence.CreatedAt.After(previous.CreatedAt) || (evidence.CreatedAt.Equal(previous.CreatedAt) && evidence.ID > previous.ID) {
+			latest[evidence.CriterionID] = evidence
+		}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return "", "", err
+	}
+	rows.Close()
+	unmet := make([]string, 0)
+	for _, criterion := range goal.Criteria {
+		evidence, ok := latest[criterion.ID]
+		if !ok || evidence.Result != "pass" {
+			unmet = append(unmet, criterion.ID)
+		}
+	}
+	if len(unmet) == 0 && len(goal.Criteria) > 0 {
+		return core.GoalVerified, "", nil
+	}
+	for _, dependency := range dependencies {
+		if !dependency.Available {
+			reason := dependency.Reason
+			if reason == "" {
+				reason = string(dependency.Family) + " 工程依赖不可用"
+			}
+			return core.GoalPendingReverification, reason + "；目标待复核", nil
+		}
+	}
+	return core.GoalActive, "复核未通过，未满足项：" + strings.Join(unmet, "、"), nil
+}
+
+func dependenciesFromQuery(ctx context.Context, queryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, goalID string) ([]core.DependencySnapshot, error) {
+	rows, err := queryer.QueryContext(ctx, `SELECT snapshot_json FROM goal_dependencies WHERE goal_id=? ORDER BY family`, goalID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var snapshots []core.DependencySnapshot
+	for rows.Next() {
+		var rawSnapshot string
+		var snapshot core.DependencySnapshot
+		if err = rows.Scan(&rawSnapshot); err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal([]byte(rawSnapshot), &snapshot); err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots, rows.Err()
+}
+
 // UpdateStatusForToken applies a status change only while the caller's token
 // still matches the goal (criteria revision AND current artifact ID); it
 // returns current=false and leaves the status untouched otherwise. When the
@@ -1489,18 +1596,19 @@ func (s *Store) UpdateStatusForToken(ctx context.Context, token core.Verificatio
 	}
 	defer tx.Rollback()
 	var goalRevision int
+	var dependencyRevision int64
 	var artifactID string
 	var goalStatus core.GoalStatus
-	err = tx.QueryRowContext(ctx, `SELECT criteria_revision,current_artifact_id,status FROM goals WHERE id=?`, token.GoalID).Scan(&goalRevision, &artifactID, &goalStatus)
+	err = tx.QueryRowContext(ctx, `SELECT criteria_revision,current_artifact_id,dependency_revision,status FROM goals WHERE id=?`, token.GoalID).Scan(&goalRevision, &artifactID, &dependencyRevision, &goalStatus)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("goal %s: not found", token.GoalID)
 	}
 	if err != nil {
 		return false, err
 	}
-	if goalRevision != token.CriteriaRevision || artifactID != token.ArtifactID {
+	if goalRevision != token.CriteriaRevision || artifactID != token.ArtifactID || dependencyRevision != token.DependencyRevision {
 		if goalStatus == core.GoalPendingReverification {
-			stale := fmt.Sprintf("复核令牌已过期（当前标准版本 v%d、产物 %s），保持待复核", goalRevision, artifactID)
+			stale := fmt.Sprintf("复核令牌已过期（当前标准版本 v%d、产物 %s、依赖代次 %d），保持待复核", goalRevision, artifactID, dependencyRevision)
 			if reason != "" {
 				stale = stale + "：" + reason
 			}

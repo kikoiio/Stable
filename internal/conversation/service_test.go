@@ -15,8 +15,94 @@ import (
 	"stable/internal/appconfig"
 	"stable/internal/core"
 	"stable/internal/decision"
+	"stable/internal/dependency"
 	"stable/internal/store"
 )
+
+type dependencyFixtureCollector struct{ snapshots []core.DependencySnapshot }
+
+func (c dependencyFixtureCollector) Collect(context.Context, core.Goal) ([]core.DependencySnapshot, error) {
+	return c.snapshots, nil
+}
+
+type perGoalDependencyCollector map[string][]core.DependencySnapshot
+
+func (c perGoalDependencyCollector) Collect(_ context.Context, goal core.Goal) ([]core.DependencySnapshot, error) {
+	return c[goal.ID], nil
+}
+
+func conversationDependencySet(fingerprint string) []core.DependencySnapshot {
+	return []core.DependencySnapshot{
+		{SchemaVersion: 1, Family: core.CheckFamilyERC, Sources: []core.DependencySource{{Kind: "project", Identity: "project", Digest: fingerprint, State: "available"}}, CheckerID: "kicad-cli-erc", CheckerVersion: "9", Fingerprint: fingerprint, Available: true},
+		{SchemaVersion: 1, Family: core.CheckFamilyConnection, Sources: []core.DependencySource{{Kind: "checker", Identity: "stable", Digest: "1", State: "available"}}, CheckerID: "sensor-connection-check", CheckerVersion: "1", Fingerprint: "connection", Available: true},
+	}
+}
+
+func TestStatusRefreshesDependenciesBeforeListingGoals(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err = s.CreateGoal(ctx, core.Goal{ID: "g", ArtifactPath: filepath.Join(dir, "sensor.kicad_sch"), AllowedRoot: dir, CurrentArtifactID: "design", CriteriaRevision: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.ReconcileDependencies(ctx, "g", conversationDependencySet("before")); err != nil {
+		t.Fatal(err)
+	}
+	refresher := &dependency.Refresher{State: s, Collector: dependencyFixtureCollector{conversationDependencySet("after")}}
+	svc := &Service{deps: Deps{Store: s, Refresher: refresher}, statuses: map[string]core.GoalStatus{}}
+	messages, err := svc.handle(ctx, ClientMsg{Op: "status"})
+	if err != nil || len(messages) != 1 || messages[0].Goal == nil || messages[0].Goal.Status != core.GoalPendingReverification {
+		t.Fatalf("status response did not include refreshed state: %+v err=%v", messages, err)
+	}
+	snapshot, err := s.GetGoalSnapshot(ctx, "g")
+	if err != nil || snapshot.Goal.Status != core.GoalPendingReverification || snapshot.Goal.DependencyRevision != 1 {
+		t.Fatalf("dependency change not persisted before response: %+v err=%v", snapshot.Goal, err)
+	}
+}
+
+func TestStatusRefreshesOnlyChangedGoalInMultiGoalList(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, id := range []string{"changed", "stable"} {
+		if _, err = s.CreateGoal(ctx, core.Goal{ID: id, ArtifactPath: filepath.Join(dir, id+".kicad_sch"), AllowedRoot: dir, CurrentArtifactID: "design", CriteriaRevision: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	changedBefore := conversationDependencySet("before")
+	stable := conversationDependencySet("stable")
+	if _, err = s.ReconcileDependencies(ctx, "changed", changedBefore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.ReconcileDependencies(ctx, "stable", stable); err != nil {
+		t.Fatal(err)
+	}
+	refresher := &dependency.Refresher{State: s, Collector: perGoalDependencyCollector{"changed": conversationDependencySet("after"), "stable": stable}}
+	svc := &Service{deps: Deps{Store: s, Refresher: refresher}, statuses: map[string]core.GoalStatus{}}
+	messages, err := svc.handle(ctx, ClientMsg{Op: "status"})
+	if err != nil || len(messages) != 2 {
+		t.Fatalf("multi-goal status: %+v err=%v", messages, err)
+	}
+	statuses := map[string]core.GoalStatus{}
+	for _, msg := range messages {
+		statuses[msg.Goal.ID] = msg.Goal.Status
+	}
+	if statuses["changed"] != core.GoalPendingReverification || statuses["stable"] != core.GoalActive {
+		t.Fatalf("dependency change leaked across goals: %v", statuses)
+	}
+	events, err := s.UnprocessedEvents(ctx)
+	if err != nil || len(events) != 1 || events[0].GoalID != "changed" {
+		t.Fatalf("goal-local wake event: %+v err=%v", events, err)
+	}
+}
 
 type mockTranspiler struct {
 	server *httptest.Server

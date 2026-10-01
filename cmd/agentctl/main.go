@@ -11,6 +11,7 @@ import (
 
 	"go.temporal.io/sdk/client"
 	"stable/internal/core"
+	"stable/internal/dependency"
 	"stable/internal/goalrun"
 	"stable/internal/report"
 	"stable/internal/store"
@@ -148,7 +149,8 @@ func notify(args []string) error {
 
 func status(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	runRoot, dbPath, _ := common(fs)
+	runRoot, dbPath, address := common(fs)
+	projectRoot := fs.String("project-root", ".", "project root containing workers")
 	goalID := fs.String("goal", "", "goal ID")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -156,7 +158,7 @@ func status(args []string) error {
 	if *goalID == "" {
 		return errors.New("goal ID required")
 	}
-	_, db, err := paths(*runRoot, *dbPath)
+	root, db, err := paths(*runRoot, *dbPath)
 	if err != nil {
 		return err
 	}
@@ -165,7 +167,11 @@ func status(args []string) error {
 		return err
 	}
 	defer s.Close()
-	snap, err := s.GetGoalSnapshot(context.Background(), *goalID)
+	refresher, err := makeRefresher(s, root, *projectRoot, *address)
+	if err != nil {
+		return err
+	}
+	snap, err := refreshedSnapshot(context.Background(), s, refresher, *goalID)
 	if err != nil {
 		return err
 	}
@@ -178,7 +184,8 @@ func status(args []string) error {
 
 func export(args []string) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
-	runRoot, dbPath, _ := common(fs)
+	runRoot, dbPath, address := common(fs)
+	projectRoot := fs.String("project-root", ".", "project root containing workers")
 	goalID := fs.String("goal", "", "goal ID")
 	out := fs.String("out", "", "new delivery directory")
 	if err := fs.Parse(args); err != nil {
@@ -187,7 +194,7 @@ func export(args []string) error {
 	if *goalID == "" || *out == "" {
 		return errors.New("goal ID and output directory required")
 	}
-	_, db, err := paths(*runRoot, *dbPath)
+	root, db, err := paths(*runRoot, *dbPath)
 	if err != nil {
 		return err
 	}
@@ -196,11 +203,11 @@ func export(args []string) error {
 		return err
 	}
 	defer s.Close()
-	snap, err := s.GetGoalSnapshot(context.Background(), *goalID)
+	refresher, err := makeRefresher(s, root, *projectRoot, *address)
 	if err != nil {
 		return err
 	}
-	r, err := report.Export(context.Background(), snap, *out)
+	r, err := refreshedExport(context.Background(), s, refresher, *goalID, *out)
 	if err != nil {
 		return err
 	}
@@ -208,3 +215,25 @@ func export(args []string) error {
 	return nil
 }
 
+func makeRefresher(s *store.Store, runRoot, projectRoot, address string) (*dependency.Refresher, error) {
+	return dependency.NewKiCadRefresher(s, runRoot, projectRoot, address)
+}
+
+// refreshedSnapshot persists any newly observed dependency generation before
+// exposing status or writing an export. Wake failures remain queued in storage.
+func refreshedSnapshot(ctx context.Context, s *store.Store, refresher core.DependencyRefresher, goalID string) (core.GoalSnapshot, error) {
+	if refresher != nil {
+		if _, err := refresher.Refresh(ctx, goalID); err != nil {
+			return core.GoalSnapshot{}, err
+		}
+	}
+	return s.GetGoalSnapshot(ctx, goalID)
+}
+
+func refreshedExport(ctx context.Context, s *store.Store, refresher core.DependencyRefresher, goalID, outDir string) (report.Status, error) {
+	snapshot, err := refreshedSnapshot(ctx, s, refresher, goalID)
+	if err != nil {
+		return report.Status{}, err
+	}
+	return report.Export(ctx, snapshot, outDir)
+}

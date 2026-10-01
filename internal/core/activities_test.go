@@ -36,6 +36,21 @@ func (f executorFunc) ExecuteOrReconcile(ctx context.Context, id string) (core.A
 	return f(ctx, id)
 }
 
+type fixtureRefresher struct {
+	state     *store.Store
+	snapshots []core.DependencySnapshot
+	refreshes int
+	onRefresh func()
+}
+
+func (r *fixtureRefresher) Refresh(ctx context.Context, goalID string) (core.DependencyRefresh, error) {
+	r.refreshes++
+	if r.onRefresh != nil {
+		r.onRefresh()
+	}
+	return r.state.ReconcileDependencies(ctx, goalID, r.snapshots)
+}
+
 func fixtureActivities(t *testing.T) (*core.Activities, *store.Store, string) {
 	t.Helper()
 	ctx := context.Background()
@@ -61,6 +76,13 @@ func fixtureActivities(t *testing.T) (*core.Activities, *store.Store, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	dependencies := []core.DependencySnapshot{
+		{SchemaVersion: 1, Family: core.CheckFamilyERC, CheckerID: "kicad-cli-erc", CheckerVersion: "9.0.4", Fingerprint: "fixture-erc-v1", Available: true},
+		{SchemaVersion: 1, Family: core.CheckFamilyConnection, CheckerID: "sensor-connection-check", CheckerVersion: "1", Fingerprint: "fixture-connection-v1", Available: true},
+	}
+	if _, err = s.ReconcileDependencies(ctx, "g", dependencies); err != nil {
+		t.Fatal(err)
+	}
 	kicad := callerFunc(func(_ context.Context, r core.CapabilityRequest) (core.CapabilityResult, error) {
 		current, _ := art.Digest(ctx, path)
 		result := core.CapabilityResult{ProtocolVersion: 1, OperationID: r.OperationID, ActualArtifactID: current}
@@ -82,7 +104,7 @@ func fixtureActivities(t *testing.T) (*core.Activities, *store.Store, string) {
 		}
 		return result, nil
 	})
-	a := &core.Activities{State: s, Artifacts: art, Kicad: kicad, Policy: policy.Policy{}}
+	a := &core.Activities{State: s, Artifacts: art, Kicad: kicad, Policy: policy.Policy{}, Refresher: &fixtureRefresher{state: s, snapshots: dependencies}}
 	return a, s, path
 }
 
@@ -247,6 +269,30 @@ func TestAskHumanRecordsQuestionAndReplyClearsIt(t *testing.T) {
 	}
 }
 
+func TestEvaluateRefreshesDependenciesBeforeObservation(t *testing.T) {
+	ctx := context.Background()
+	a, s, _ := fixtureActivities(t)
+	refresher := a.Refresher.(*fixtureRefresher)
+	refresher.snapshots[0].Fingerprint = "fixture-erc-v2"
+	refreshed := false
+	refresher.onRefresh = func() { refreshed = true }
+	original := a.Kicad.(callerFunc)
+	a.Kicad = callerFunc(func(ctx context.Context, request core.CapabilityRequest) (core.CapabilityResult, error) {
+		if !refreshed {
+			t.Fatal("KiCad was called before dependency refresh")
+		}
+		return original(ctx, request)
+	})
+	done, err := a.EvaluateGoal(ctx, "g", "timer-refresh")
+	if err != nil || !done {
+		t.Fatalf("evaluate after refreshed dependency: done=%v err=%v", done, err)
+	}
+	snapshot, err := s.GetGoalSnapshot(ctx, "g")
+	if err != nil || snapshot.Goal.Status != core.GoalVerified || snapshot.Goal.DependencyRevision != 1 {
+		t.Fatalf("new dependency result not verified: goal=%+v err=%v", snapshot.Goal, err)
+	}
+}
+
 func TestVerifyRequiresAllCriteria(t *testing.T) {
 	ctx := context.Background()
 	a, s, path := fixtureActivities(t)
@@ -316,11 +362,159 @@ func TestVerifyRequiresAllCriteria(t *testing.T) {
 	}
 }
 
+func TestVerifyOnlyMissingFamily(t *testing.T) {
+	ctx := context.Background()
+	a, s, path := fixtureActivities(t)
+	criteria := []core.Criterion{ercCriteria("erc", 0), ercCriteria("erc-relaxed", 1), connCriterion("conn")}
+	if _, err := s.UpdateGoalCriteria(ctx, "g", criteria); err != nil {
+		t.Fatal(err)
+	}
+	kicad := &verifyKicad{path: path, present: true}
+	a.Kicad = kicad.caller(ctx)
+	first, current, err := a.VerifyGoal(ctx, "g")
+	if err != nil || !current || !first.Passed || kicad.calls != 1 || kicad.inspectCalls != 1 {
+		t.Fatalf("initial full verification: result=%+v current=%v calls=%d/%d err=%v", first, current, kicad.calls, kicad.inspectCalls, err)
+	}
+	snapshot, err := s.GetGoalSnapshot(ctx, "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var connectionID string
+	for _, evidence := range snapshot.Evidence {
+		if evidence.CriterionID == "conn" && core.EvidenceCurrentWithDependencies(snapshot.Goal, snapshot.Goal.CurrentArtifactID, snapshot.Dependencies, evidence) {
+			connectionID = evidence.ID
+		}
+	}
+	if connectionID == "" {
+		t.Fatalf("no current connection evidence: %+v", snapshot.Evidence)
+	}
+	ercReports := map[string]string{}
+	for _, evidence := range snapshot.Evidence {
+		if evidence.Kind == "kicad.erc" && evidence.Provenance != nil && evidence.Provenance.Dependency != nil {
+			ercReports[evidence.CriterionID] = evidence.ReportPath + "/" + evidence.Provenance.Dependency.Fingerprint
+		}
+	}
+	if len(ercReports) != 2 || ercReports["erc"] != ercReports["erc-relaxed"] {
+		t.Fatalf("ERC criteria did not share one report and frozen dependency snapshot: %+v", ercReports)
+	}
+	refresher := a.Refresher.(*fixtureRefresher)
+	refresher.snapshots[0].Fingerprint = "fixture-erc-v2"
+	if _, err = refresher.Refresh(ctx, "g"); err != nil {
+		t.Fatal(err)
+	}
+	kicad.calls, kicad.inspectCalls = 0, 0
+	second, current, err := a.VerifyGoal(ctx, "g")
+	if err != nil || !current || !second.Passed || kicad.calls != 1 || kicad.inspectCalls != 0 {
+		t.Fatalf("targeted ERC verification: result=%+v current=%v calls=%d/%d err=%v", second, current, kicad.calls, kicad.inspectCalls, err)
+	}
+	snapshot, err = s.GetGoalSnapshot(ctx, "g")
+	if err != nil || snapshot.Goal.Status != core.GoalVerified {
+		t.Fatalf("combined current evidence did not verify goal: %+v err=%v", snapshot.Goal, err)
+	}
+	foundConnection := false
+	for _, evidence := range snapshot.Evidence {
+		if evidence.ID == connectionID && evidence.InvalidatedReason == "" && core.EvidenceCurrentWithDependencies(snapshot.Goal, snapshot.Goal.CurrentArtifactID, snapshot.Dependencies, evidence) {
+			foundConnection = true
+		}
+	}
+	if !foundConnection {
+		t.Fatalf("unaffected connection evidence was not reused: %+v", snapshot.Evidence)
+	}
+}
+
+func TestConnectionCheckerChangeOnlyRechecksConnection(t *testing.T) {
+	ctx := context.Background()
+	a, s, path := fixtureActivities(t)
+	if _, err := s.UpdateGoalCriteria(ctx, "g", []core.Criterion{ercCriteria("erc", 0), connCriterion("conn")}); err != nil {
+		t.Fatal(err)
+	}
+	kicad := &verifyKicad{path: path, present: true}
+	a.Kicad = kicad.caller(ctx)
+	if _, current, err := a.VerifyGoal(ctx, "g"); err != nil || !current {
+		t.Fatalf("initial verification: current=%v err=%v", current, err)
+	}
+	snapshot, err := s.GetGoalSnapshot(ctx, "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ercID, connectionID string
+	for _, evidence := range snapshot.Evidence {
+		if evidence.CriterionID == "erc" {
+			ercID = evidence.ID
+		}
+		if evidence.CriterionID == "conn" {
+			connectionID = evidence.ID
+		}
+	}
+	refresher := a.Refresher.(*fixtureRefresher)
+	refresher.snapshots[1].CheckerVersion = "2"
+	refresher.snapshots[1].Fingerprint = "fixture-connection-v2"
+	if _, err = refresher.Refresh(ctx, "g"); err != nil {
+		t.Fatal(err)
+	}
+	kicad.connectionVersion = "2"
+	kicad.calls, kicad.inspectCalls = 0, 0
+	result, current, err := a.VerifyGoal(ctx, "g")
+	if err != nil || !current || !result.Passed || kicad.calls != 0 || kicad.inspectCalls != 1 {
+		t.Fatalf("connection-only refresh: result=%+v current=%v calls=%d/%d err=%v", result, current, kicad.calls, kicad.inspectCalls, err)
+	}
+	snapshot, err = s.GetGoalSnapshot(ctx, "g")
+	if err != nil || snapshot.Goal.Status != core.GoalVerified {
+		t.Fatalf("connection-only result did not combine with ERC: %+v err=%v", snapshot.Goal, err)
+	}
+	for _, evidence := range snapshot.Evidence {
+		if evidence.ID == ercID && evidence.InvalidatedReason != "" {
+			t.Fatalf("ERC evidence was invalidated by connection checker update: %+v", evidence)
+		}
+		if evidence.ID == connectionID && evidence.InvalidatedReason == "" {
+			t.Fatalf("old connection evidence was not invalidated: %+v", evidence)
+		}
+	}
+}
+
+func TestDependencyChangesDuringVerification(t *testing.T) {
+	ctx := context.Background()
+	a, s, path := fixtureActivities(t)
+	if _, err := s.UpdateGoalCriteria(ctx, "g", []core.Criterion{ercCriteria("erc", 0)}); err != nil {
+		t.Fatal(err)
+	}
+	refresher := a.Refresher.(*fixtureRefresher)
+	kicad := &verifyKicad{path: path, present: true}
+	kicad.onERC = func() { refresher.snapshots[0].Fingerprint = "fixture-erc-during-check" }
+	a.Kicad = kicad.caller(ctx)
+	oldResult, current, err := a.VerifyGoal(ctx, "g")
+	if err != nil || current {
+		t.Fatalf("old dependency result accepted: result=%+v current=%v err=%v", oldResult, current, err)
+	}
+	snapshot, err := s.GetGoalSnapshot(ctx, "g")
+	if err != nil || snapshot.Goal.Status != core.GoalPendingReverification || snapshot.Goal.DependencyRevision != 1 || len(snapshot.Evidence) != 1 || snapshot.Evidence[0].InvalidatedReason == "" {
+		t.Fatalf("mid-check dependency change not persisted: goal=%+v evidence=%+v err=%v", snapshot.Goal, snapshot.Evidence, err)
+	}
+	kicad.onERC = nil
+	newResult, current, err := a.VerifyGoal(ctx, "g")
+	if err != nil || !current || !newResult.Passed || kicad.calls != 2 {
+		t.Fatalf("latest dependency was not rechecked: result=%+v current=%v calls=%d err=%v", newResult, current, kicad.calls, err)
+	}
+	snapshot, err = s.GetGoalSnapshot(ctx, "g")
+	if err != nil || snapshot.Goal.Status != core.GoalVerified {
+		t.Fatalf("latest dependency evidence did not verify goal: %+v err=%v", snapshot.Goal, err)
+	}
+}
+
 func boolJSON(b bool) string {
 	if b {
 		return "true"
 	}
 	return "false"
+}
+
+func testDependency(family core.CheckFamily, checker, version, fingerprint string) core.DependencySnapshot {
+	return core.DependencySnapshot{SchemaVersion: 1, Family: family, CheckerID: checker, CheckerVersion: version, Fingerprint: fingerprint, Available: true}
+}
+
+func testDependencyPointer(family core.CheckFamily, checker, version, fingerprint string) *core.DependencySnapshot {
+	dependency := testDependency(family, checker, version, fingerprint)
+	return &dependency
 }
 
 func currentEvidenceFixture() core.Evidence {
@@ -335,20 +529,25 @@ func currentEvidenceFixture() core.Evidence {
 		ReportPath:       "report.json",
 		CriteriaRevision: &rev,
 		Provenance: &core.EvidenceProvenance{
-			SchemaVersion:    1,
+			SchemaVersion:    2,
 			Claim:            "ERC violations within threshold",
 			Coverage:         "erc",
 			CheckerID:        "kicad-cli-erc",
 			CheckerVersion:   "9.0.4",
 			SourceLevel:      "tool_check",
 			InvalidationRule: "criteria or artifact change",
+			Family:           core.CheckFamilyERC,
+			Dependency:       testDependencyPointer(core.CheckFamilyERC, "kicad-cli-erc", "9.0.4", "erc-dependencies"),
 		},
 	}
 }
 
 func TestCurrentEvidence(t *testing.T) {
 	goal := core.Goal{ID: "g", CriteriaRevision: 2, CurrentArtifactID: "digest-1"}
-	current := func(e core.Evidence) bool { return core.EvidenceCurrent(goal, "digest-1", e) }
+	dependencies := []core.DependencySnapshot{testDependency(core.CheckFamilyERC, "kicad-cli-erc", "9.0.4", "erc-dependencies")}
+	current := func(e core.Evidence) bool {
+		return core.EvidenceCurrentWithDependencies(goal, "digest-1", dependencies, e)
+	}
 	if !current(currentEvidenceFixture()) {
 		t.Fatal("complete passing evidence not recognized as current")
 	}
@@ -359,7 +558,7 @@ func TestCurrentEvidence(t *testing.T) {
 		"stale revision":          func(e *core.Evidence) { rev := 1; e.CriteriaRevision = &rev },
 		"artifact mismatch":       func(e *core.Evidence) { e.ArtifactID = "digest-0" },
 		"legacy nil provenance":   func(e *core.Evidence) { e.Provenance = nil },
-		"newer schema unknown":    func(e *core.Evidence) { e.Provenance.SchemaVersion = 2 },
+		"newer schema unknown":    func(e *core.Evidence) { e.Provenance.SchemaVersion = 3 },
 		"empty claim":             func(e *core.Evidence) { e.Provenance.Claim = "" },
 		"empty coverage":          func(e *core.Evidence) { e.Provenance.Coverage = "" },
 		"empty checker id":        func(e *core.Evidence) { e.Provenance.CheckerID = "" },
@@ -375,7 +574,7 @@ func TestCurrentEvidence(t *testing.T) {
 			t.Fatalf("%s: evidence must not be current", name)
 		}
 	}
-	if core.EvidenceCurrent(goal, "", currentEvidenceFixture()) {
+	if core.EvidenceCurrentWithDependencies(goal, "", dependencies, currentEvidenceFixture()) {
 		t.Fatal("empty current artifact must not match")
 	}
 }
@@ -385,11 +584,13 @@ func TestCurrentEvidence(t *testing.T) {
 // checker identity. onERC runs inside each ERC call (to simulate mid-check
 // criteria changes).
 type verifyKicad struct {
-	path       string
-	violations int
-	present    bool
-	onERC      func()
-	calls      int
+	path              string
+	violations        int
+	present           bool
+	connectionVersion string
+	onERC             func()
+	calls             int
+	inspectCalls      int
 }
 
 func (k *verifyKicad) caller(ctx context.Context) callerFunc {
@@ -399,10 +600,15 @@ func (k *verifyKicad) caller(ctx context.Context) callerFunc {
 		result := core.CapabilityResult{ProtocolVersion: 1, OperationID: r.OperationID}
 		switch r.Kind {
 		case "inspect_design":
+			k.inspectCalls++
+			version := k.connectionVersion
+			if version == "" {
+				version = "1"
+			}
 			h := sha256Of(k.path)
 			result.Status = "observed"
 			result.ActualArtifactID = h
-			result.Postcondition = json.RawMessage(`{"sensor.supported":true,"sensor.connection_present":` + boolJSON(k.present) + `,"connection_checker_id":"sensor-connection-check","connection_checker_version":"1"}`)
+			result.Postcondition = json.RawMessage(`{"sensor.supported":true,"sensor.connection_present":` + boolJSON(k.present) + `,"connection_checker_id":"sensor-connection-check","connection_checker_version":"` + version + `"}`)
 		case "kicad.run_erc":
 			k.calls++
 			if k.onERC != nil {
