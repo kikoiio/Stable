@@ -154,6 +154,18 @@ func TestProposalLifecycleIsSessionScopedAndSQLiteAuthoritative(t *testing.T) {
 	}
 }
 
+func TestServerBindsConversationRoot(t *testing.T) {
+	configured, other := t.TempDir(), t.TempDir()
+	svc := &Service{deps: Deps{ProjectRoot: configured}}
+	if _, err := svc.trustedSessionRoot(other); err == nil {
+		t.Fatal("client-selected project root bypassed server binding")
+	}
+	got, err := svc.trustedSessionRoot(configured)
+	if err != nil || got != configured {
+		t.Fatalf("configured root rejected: got=%q err=%v", got, err)
+	}
+}
+
 func TestGoalsStayGlobalAcrossProjectSessions(t *testing.T) {
 	rootA, rootB := t.TempDir(), t.TempDir()
 	s, err := store.Open(filepath.Join(t.TempDir(), "state.db"))

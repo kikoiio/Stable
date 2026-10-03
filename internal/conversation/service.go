@@ -8,21 +8,31 @@ import (
 	"sync"
 	"time"
 
+	"stable/internal/agent"
+	"stable/internal/candidate"
 	"stable/internal/core"
 	"stable/internal/decision"
+	"stable/internal/permission"
 	"stable/internal/store"
 )
 
 type Deps struct {
-	Store        *store.Store
-	Provider     decision.StructuredProvider
-	ChatProvider decision.ChatProvider
-	Temporal     string
-	ProjectRoot  string
-	RunRoot      string
-	SocketPath   string
-	Refresher    core.DependencyRefresher
-	PollEvery    time.Duration // goal status poll interval; 0 defaults to 2s
+	Store              *store.Store
+	Provider           decision.StructuredProvider
+	ChatProvider       decision.ChatProvider
+	Runner             agent.Runner
+	ProviderName       string
+	Model              string
+	RunnerError        string
+	CandidateCheckers  []candidate.Checker
+	PermissionService  *permission.PermissionService
+	ProviderCredential string
+	Temporal           string
+	ProjectRoot        string
+	RunRoot            string
+	SocketPath         string
+	Refresher          core.DependencyRefresher
+	PollEvery          time.Duration // goal status poll interval; 0 defaults to 2s
 }
 
 // Service is the persistent chat session: it owns the unix socket, fans out
@@ -30,11 +40,21 @@ type Deps struct {
 // events. Client connections are thin terminals; all state lives here and in
 // the store.
 type Service struct {
-	deps     Deps
-	ln       net.Listener
-	mu       sync.Mutex
-	clients  map[chan ServerMsg]struct{}
-	statuses map[string]core.GoalStatus
+	deps              Deps
+	ln                net.Listener
+	mu                sync.Mutex
+	clients           map[chan ServerMsg]*clientSubscription
+	statuses          map[string]core.GoalStatus
+	activeRuns        map[string]string
+	notifiedApprovals map[string]bool
+	eventMu           sync.Mutex
+}
+
+type clientSubscription struct {
+	ch            chan ServerMsg
+	sessionID     string
+	runID         string
+	pendingCursor uint64
 }
 
 func Serve(ctx context.Context, deps Deps) (*Service, error) {
@@ -52,7 +72,7 @@ func Serve(ctx context.Context, deps Deps) (*Service, error) {
 		ln.Close()
 		return nil, err
 	}
-	s := &Service{deps: deps, ln: ln, clients: map[chan ServerMsg]struct{}{}, statuses: map[string]core.GoalStatus{}}
+	s := &Service{deps: deps, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, notifiedApprovals: map[string]bool{}}
 	go s.pollGoals(ctx)
 	go func() {
 		<-ctx.Done()
@@ -80,8 +100,9 @@ func (s *Service) Close() error { return s.ln.Close() }
 func (s *Service) serveConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	updates := make(chan ServerMsg, 64)
+	sub := &clientSubscription{ch: updates}
 	s.mu.Lock()
-	s.clients[updates] = struct{}{}
+	s.clients[updates] = sub
 	s.mu.Unlock()
 
 	writerDone := make(chan struct{})
@@ -113,6 +134,79 @@ func (s *Service) readLoop(ctx context.Context, conn net.Conn, updates chan Serv
 			updates <- ServerMsg{Type: "error", Error: err.Error()}
 			updates <- ServerMsg{Type: "done"}
 			continue
+		}
+		switch c.Op {
+		case "run_start":
+			if err := s.startRun(ctx, c, updates); err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			}
+			continue
+		case "run_subscribe":
+			if err := s.subscribeRun(ctx, c, updates); err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			}
+			continue
+		case "run_cancel":
+			if err := s.cancelRun(c, updates); err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			} else {
+				updates <- ServerMsg{Type: "done", RunID: c.RunID}
+			}
+			continue
+		case "review_get":
+			review, err := s.reviewCandidate(ctx, c.CandidateID, c.SessionID)
+			if err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			} else {
+				updates <- ServerMsg{Type: "review", Review: &review}
+			}
+			updates <- ServerMsg{Type: "done"}
+			continue
+		case "review_accept":
+			receipt, err := s.acceptReviewedCandidate(ctx, c)
+			if err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			} else {
+				updates <- ServerMsg{Type: "acceptance", Receipt: &receipt}
+			}
+			updates <- ServerMsg{Type: "done"}
+			continue
+		case "approval_list":
+			approvals, err := s.pendingApprovals(ctx, c.SessionID)
+			if err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			} else {
+				prompts := make([]permission.ApprovalPrompt, 0, len(approvals))
+				for _, approval := range approvals {
+					prompts = append(prompts, permission.Prompt(approval))
+				}
+				updates <- ServerMsg{Type: "approvals", Approvals: prompts}
+			}
+			updates <- ServerMsg{Type: "done"}
+			continue
+		case "approval_resolve":
+			decision, err := s.resolveApproval(ctx, c)
+			if err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			} else {
+				updates <- ServerMsg{Type: "permission_decision", Decision: &decision}
+			}
+			updates <- ServerMsg{Type: "done"}
+			continue
+		case "approval_cancel":
+			if err := s.cancelApproval(ctx, c); err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			} else {
+				updates <- ServerMsg{Type: "approval_cancelled", RunID: c.RunID}
+			}
+			updates <- ServerMsg{Type: "done"}
+			continue
+		case "session_load":
+			s.mu.Lock()
+			if sub := s.clients[updates]; sub != nil {
+				sub.sessionID, sub.runID = c.SessionID, ""
+			}
+			s.mu.Unlock()
 		}
 		msgs, err := s.handle(ctx, c)
 		for i := range msgs {
@@ -149,6 +243,11 @@ func (s *Service) pollGoals(ctx context.Context) {
 			return
 		case <-tick.C:
 		}
+		s.deliverPermissionWakes(ctx)
+		s.pushPendingApprovals(ctx)
+		if s.deps.Store == nil {
+			continue
+		}
 		goals, err := s.deps.Store.ListGoals(ctx)
 		if err != nil {
 			continue
@@ -164,5 +263,28 @@ func (s *Service) pollGoals(ctx context.Context) {
 			}
 		}
 		s.mu.Unlock()
+	}
+}
+
+func (s *Service) pushPendingApprovals(ctx context.Context) {
+	if s.deps.Store == nil {
+		return
+	}
+	s.mu.Lock()
+	seen := map[string]bool{}
+	for _, sub := range s.clients {
+		if sub.sessionID != "" {
+			seen[sub.sessionID] = true
+		}
+	}
+	s.mu.Unlock()
+	for sessionID := range seen {
+		requests, err := s.pendingApprovals(ctx, sessionID)
+		if err != nil {
+			continue
+		}
+		for _, request := range requests {
+			s.pushApproval(ctx, request.ID, sessionID)
+		}
 	}
 }

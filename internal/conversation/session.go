@@ -29,7 +29,7 @@ func jsonDecoder(r interface{ Read([]byte) (int, error) }) *json.Decoder {
 func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) {
 	switch c.Op {
 	case "session_list":
-		root, err := sessionRoot(c.ProjectRoot)
+		root, err := s.trustedSessionRoot(c.ProjectRoot)
 		if err != nil {
 			return nil, err
 		}
@@ -47,7 +47,7 @@ func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) 
 		}
 		return []ServerMsg{{Type: "sessions", Sessions: sessions, Goals: goals}}, nil
 	case "session_create":
-		root, err := sessionRoot(c.ProjectRoot)
+		root, err := s.trustedSessionRoot(c.ProjectRoot)
 		if err != nil {
 			return nil, err
 		}
@@ -57,7 +57,7 @@ func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) 
 		}
 		return []ServerMsg{{Type: "session", Session: &info}}, nil
 	case "session_load":
-		root, err := sessionRoot(c.ProjectRoot)
+		root, err := s.trustedSessionRoot(c.ProjectRoot)
 		if err != nil {
 			return nil, err
 		}
@@ -255,11 +255,31 @@ func sessionRoot(requested string) (string, error) {
 	return a, nil
 }
 
+func (s *Service) trustedSessionRoot(requested string) (string, error) {
+	// Small in-process unit services may omit ProjectRoot; production servers
+	// always bind it at construction and therefore take the exact-match path.
+	if s.deps.ProjectRoot == "" {
+		return sessionRoot(requested)
+	}
+	configured, err := sessionRoot(s.deps.ProjectRoot)
+	if err != nil {
+		return "", fmt.Errorf("configured project root: %w", err)
+	}
+	provided, err := sessionRoot(requested)
+	if err != nil {
+		return "", err
+	}
+	if configured != provided {
+		return "", errors.New("project root does not match the server-bound root")
+	}
+	return configured, nil
+}
+
 func (s *Service) sessionChat(ctx context.Context, c ClientMsg) ([]ServerMsg, error) {
 	if s.deps.ChatProvider == nil {
 		return nil, errors.New("chat model provider not configured; run stable config check")
 	}
-	root, err := sessionRoot(c.ProjectRoot)
+	root, err := s.trustedSessionRoot(c.ProjectRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -342,7 +362,7 @@ func (s *Service) createGoal(ctx context.Context, c ClientMsg) ([]ServerMsg, err
 	description := redactProviderCredential(c.Text, s.deps.ChatProvider, s.deps.Provider)
 	var sessionPath string
 	if c.SessionID != "" {
-		root, e := sessionRoot(c.ProjectRoot)
+		root, e := s.trustedSessionRoot(c.ProjectRoot)
 		if e != nil {
 			return nil, e
 		}

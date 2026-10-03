@@ -7,11 +7,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"stable/internal/agent"
+	"stable/internal/candidate"
 	"stable/internal/conversation"
 	"stable/internal/core"
+	"stable/internal/llm"
+	"stable/internal/permission"
 	"stable/internal/sessionlog"
 )
 
@@ -33,21 +35,36 @@ const (
 )
 
 type Model struct {
-	Socket, Root     string
-	Width, Height    int
-	Panel            Panel
-	Sessions         []sessionlog.SessionInfo
-	ActiveSession    string
-	Events           []sessionlog.Event
-	Goals            []core.Goal
-	SelectedGoal     int
-	Proposals        []core.CriteriaProposal
-	SelectedProposal int
-	Input            textinput.Model
-	Mode             InputMode
-	Pending          bool
-	Status           string
-	Err              error
+	Socket, Root        string
+	Width, Height       int
+	Panel               Panel // retained as an internal compatibility cursor for pre-M01 tests
+	Sessions            []sessionlog.SessionInfo
+	ActiveSession       string
+	Events              []sessionlog.Event
+	Goals               []core.Goal
+	SelectedGoal        int
+	Proposals           []core.CriteriaProposal
+	SelectedProposal    int
+	Composer            Composer
+	Mode                InputMode
+	Navigation          NavigationState
+	Transcript          Transcript
+	Layout              LayoutMetrics
+	Candidates          []CompletionItem
+	CandidateIndex      int
+	Pending             bool
+	Status              string
+	Review              *candidate.Review
+	ReviewCandidate     string
+	ReviewConfirmed     map[string]bool
+	ReviewCursor        int
+	Approvals           []permission.ApprovalPrompt
+	SelectedApproval    int
+	approvalPollStarted bool
+	Err                 error
+	ActiveRunID         string
+	LastCursor          uint64
+	stream              *conversation.StreamClient
 }
 
 type resultMsg struct {
@@ -56,13 +73,60 @@ type resultMsg struct {
 	err  error
 }
 
-func New(socket, root string) Model {
-	in := textinput.New()
-	in.Prompt = ""
-	in.Placeholder = "输入消息后回车"
-	return Model{Socket: socket, Root: root, Width: 120, Height: 32, Input: in}
+type runStreamStartedMsg struct {
+	client *conversation.StreamClient
+	err    error
+	resume bool
+}
+type runStreamMsg struct {
+	client  *conversation.StreamClient
+	message conversation.ServerMsg
+	err     error
+}
+type approvalPollTick time.Time
+
+func approvalPollCmd() tea.Cmd {
+	return tea.Tick(2*time.Second, func(now time.Time) tea.Msg { return approvalPollTick(now) })
 }
 
+func openRunCmd(socket string, request agent.ExecutionRequest) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		client, err := conversation.OpenRun(ctx, socket, request)
+		return runStreamStartedMsg{client: client, err: err}
+	}
+}
+func receiveRunCmd(client *conversation.StreamClient) tea.Cmd {
+	return func() tea.Msg {
+		message, err := client.Receive()
+		return runStreamMsg{client: client, message: message, err: err}
+	}
+}
+func resumeRunCmd(socket, sessionID, runID string, cursor uint64) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		client, err := conversation.SubscribeRun(ctx, socket, sessionID, runID, cursor)
+		return runStreamStartedMsg{client: client, err: err, resume: true}
+	}
+}
+func cancelRunCmd(client *conversation.StreamClient, sessionID, runID string) tea.Cmd {
+	return func() tea.Msg {
+		return runStreamMsg{client: client, message: conversation.ServerMsg{Type: "cancel_sent"}, err: client.Cancel(sessionID, runID)}
+	}
+}
+func resubscribeRunCmd(client *conversation.StreamClient, sessionID, runID string, cursor uint64) tea.Cmd {
+	return func() tea.Msg {
+		return runStreamMsg{client: client, message: conversation.ServerMsg{Type: "resubscribed"}, err: client.Send(conversation.ClientMsg{Op: "run_subscribe", SessionID: sessionID, RunID: runID, AfterSeq: cursor})}
+	}
+}
+
+func New(socket, root string) Model {
+	c := NewComposer()
+	_ = c.Focus()
+	return Model{Socket: socket, Root: root, Width: 120, Height: 32, Composer: c, Navigation: NavigationState{Mode: ChatView}}
+}
 func (m Model) Init() tea.Cmd {
 	return requestCmd(m.Socket, conversation.ClientMsg{Op: "session_list", ProjectRoot: m.Root})
 }
@@ -79,19 +143,109 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.Width, m.Height = v.Width, v.Height
+		m.resize()
 		return m, nil
+	case approvalPollTick:
+		if m.ActiveSession == "" {
+			return m, approvalPollCmd()
+		}
+		return m, tea.Batch(requestCmd(m.Socket, conversation.ClientMsg{Op: "approval_list", SessionID: m.ActiveSession}), approvalPollCmd())
 	case resultMsg:
 		return m.handleResult(v)
+	case runStreamStartedMsg:
+		if v.err != nil {
+			m.Pending = false
+			m.ActiveRunID = ""
+			m.Err, m.Status = v.err, "请求失败："+v.err.Error()
+			if m.ActiveSession != "" {
+				return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "session_load", ProjectRoot: m.Root, SessionID: m.ActiveSession})
+			}
+			return m, nil
+		}
+		m.stream = v.client
+		if !v.resume {
+			m.Pending = true
+		}
+		return m, receiveRunCmd(v.client)
+	case runStreamMsg:
+		if v.err != nil {
+			if m.stream != nil {
+				_ = m.stream.Close()
+				m.stream = nil
+			}
+			m.Err, m.Status = v.err, "连接中断，正在恢复运行流…"
+			if m.ActiveRunID != "" {
+				return m, resumeRunCmd(m.Socket, m.ActiveSession, m.ActiveRunID, m.LastCursor)
+			}
+			m.Pending = false
+			return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "session_load", ProjectRoot: m.Root, SessionID: m.ActiveSession})
+		}
+		if v.message.Type == "cancel_sent" {
+			return m, nil
+		}
+		if v.message.Type == "error" {
+			m.Err, m.Status = fmt.Errorf("%s", v.message.Error), "请求失败："+v.message.Error
+			_ = v.client.Close()
+			m.stream = nil
+			m.Pending = false
+			m.ActiveRunID = ""
+			return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "session_load", ProjectRoot: m.Root, SessionID: m.ActiveSession})
+		}
+		if v.message.Type == "resubscribed" {
+			return m, receiveRunCmd(v.client)
+		}
+		if m.Pending && m.ActiveRunID != "" && v.message.RunID != "" && v.message.RunID != m.ActiveRunID {
+			return m, receiveRunCmd(v.client)
+		}
+		m.applyRunMessage(v.message)
+		if v.message.Type == "resync" {
+			return m, resubscribeRunCmd(v.client, m.ActiveSession, v.message.RunID, v.message.Cursor)
+		}
+		if v.message.Type == "run_outcome" {
+			m.Pending = false
+			if v.message.Outcome != nil {
+				switch v.message.Outcome.Status {
+				case agent.RunCompleted:
+					m.Status = "回答完成。"
+				case agent.RunCancelled:
+					m.Status = "已取消；已收到的内容已保留。"
+				case agent.RunAwaitingTools:
+					m.Status = "模型请求了工具；当前阶段未执行工具。"
+				case agent.RunFailed:
+					m.Status = "运行失败；已收到的内容已保留。"
+				}
+			}
+			_ = v.client.Close()
+			m.stream = nil
+			m.ActiveRunID = ""
+			return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "session_load", ProjectRoot: m.Root, SessionID: m.ActiveSession})
+		}
+		return m, receiveRunCmd(v.client)
 	case tea.KeyMsg:
 		if v.String() == "ctrl+c" {
+			if m.stream != nil && m.ActiveRunID != "" {
+				_ = m.stream.Cancel(m.ActiveSession, m.ActiveRunID)
+			}
 			return m, tea.Quit
 		}
-		if m.Mode != "" {
-			return m.handleInput(v)
+		if m.Navigation.Mode != ChatView {
+			return m.handleNavigationKey(v)
 		}
-		return m.handleKey(v)
+		if len(m.Approvals) > 0 {
+			return m.handleApprovalKey(v)
+		}
+		if m.Review != nil {
+			return m.handleReviewKey(v)
+		}
+		return m.handleChatKey(v)
 	}
 	return m, nil
+}
+func (m *Model) resize() {
+	m.Layout = ComputeLayout(m.Width, m.Height, m.Composer.Height())
+	m.Composer.SetSize(max(1, m.Width-4), max(1, min(6, m.Height/3)))
+	m.Layout = ComputeLayout(m.Width, m.Height, m.Composer.Height())
+	m.Transcript.SetSize(m.Layout.TranscriptWidth, m.Layout.TranscriptHeight)
 }
 
 func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
@@ -109,6 +263,42 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 	}
 	for _, x := range r.msgs {
 		switch x.Type {
+		case "review":
+			if x.Review != nil {
+				m.Review = x.Review
+				m.ReviewCandidate = x.Review.CandidateID
+				m.ReviewConfirmed = map[string]bool{}
+				m.ReviewCursor = 0
+				m.Status = "候选预览已载入：a 普通接收，f 强制接收（逐项确认），Esc 关闭。"
+			}
+		case "acceptance":
+			m.Review = nil
+			m.ReviewConfirmed = nil
+			m.Status = "候选已接收，目标仍需独立复核。"
+		case "error":
+			m.Err = fmt.Errorf("%s", x.Error)
+			m.Status = "请求未完成。"
+		case "approvals":
+			m.Approvals = append([]permission.ApprovalPrompt(nil), x.Approvals...)
+			if m.SelectedApproval >= len(m.Approvals) {
+				m.SelectedApproval = max(0, len(m.Approvals)-1)
+			}
+		case "permission_decision", "approval_cancelled":
+			id := ""
+			if x.Decision != nil {
+				id = x.Decision.ApprovalID
+			}
+			if x.Approval != nil {
+				id = x.Approval.ID
+			}
+			m.removeApproval(id)
+			if x.Decision != nil {
+				m.Status = "授权决定已记录：" + string(x.Decision.Kind)
+			}
+		case "approval_pending":
+			if x.Approval != nil {
+				m.upsertApproval(*x.Approval)
+			}
 		case "sessions":
 			m.Sessions = x.Sessions
 			m.Goals = x.Goals
@@ -126,6 +316,12 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 		case "transcript":
 			if x.Transcript != nil {
 				m.Events = x.Transcript.Events
+				m.LastCursor = 0
+				for _, event := range m.Events {
+					if event.Seq > m.LastCursor {
+						m.LastCursor = event.Seq
+					}
+				}
 			}
 			if x.Goals != nil {
 				m.Goals = x.Goals
@@ -134,6 +330,7 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 			if m.Err == nil {
 				m.Status = "会话已加载。"
 			}
+			m.Transcript.SetEvents(m.Events)
 		case "goal_update":
 			if x.Goal != nil {
 				m.upsertGoal(*x.Goal)
@@ -150,9 +347,16 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 			return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "session_load", ProjectRoot: m.Root, SessionID: m.ActiveSession})
 		}
 	}
+	if r.op == "session_load" && m.ActiveSession != "" {
+		list := requestCmd(m.Socket, conversation.ClientMsg{Op: "approval_list", SessionID: m.ActiveSession})
+		if !m.approvalPollStarted {
+			m.approvalPollStarted = true
+			return m, tea.Batch(list, approvalPollCmd())
+		}
+		return m, list
+	}
 	return m, nil
 }
-
 func proposalsFromEvents(events []sessionlog.Event) []core.CriteriaProposal {
 	var out []core.CriteriaProposal
 	for _, e := range events {
@@ -185,304 +389,25 @@ func (m *Model) upsertProposal(p core.CriteriaProposal) {
 	}
 	m.Proposals = append(m.Proposals, p)
 }
-
-func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch k.String() {
-	case "q":
-		return m, tea.Quit
-	case "tab":
-		m.Panel = (m.Panel + 1) % 3
-	case "1":
-		m.Panel = SessionsPanel
-	case "2":
-		m.Panel = ChatPanel
-	case "3":
-		m.Panel = GoalsPanel
-	case "up", "k":
-		if m.Panel == SessionsPanel && len(m.Sessions) > 0 {
-			m.SelectedSession(-1)
-		} else if m.Panel == GoalsPanel && m.SelectedGoal > 0 {
-			m.SelectedGoal--
-		} else if m.Panel == ChatPanel && m.SelectedProposal > 0 {
-			m.SelectedProposal--
+func (m *Model) upsertApproval(a permission.ApprovalPrompt) {
+	for i := range m.Approvals {
+		if m.Approvals[i].ID == a.ID {
+			m.Approvals[i] = a
+			return
 		}
-	case "down", "j":
-		if m.Panel == SessionsPanel && len(m.Sessions) > 1 {
-			m.SelectedSession(1)
-		} else if m.Panel == GoalsPanel && m.SelectedGoal+1 < len(m.Goals) {
-			m.SelectedGoal++
-		} else if m.Panel == ChatPanel && m.SelectedProposal+1 < len(m.Proposals) {
-			m.SelectedProposal++
-		}
-	case "enter":
-		if m.Panel == SessionsPanel && len(m.Sessions) > 0 {
-			m.ActiveSession = m.Sessions[clamp(m.sessionIndex(), 0, len(m.Sessions)-1)].ID
-			m.Pending = true
-			return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "session_load", ProjectRoot: m.Root, SessionID: m.ActiveSession})
-		} else {
-			m.Mode = ChatInput
-			m.Input.Placeholder = "输入普通聊天消息"
-			m.Input.Focus()
-			return m, textinput.Blink
-		}
-	case "s":
-		m.Pending = true
-		return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "session_create", ProjectRoot: m.Root})
-	case "n":
-		m.startInput(GoalInput, "描述一个新目标；提交后会生成待审验收标准")
-	case "r":
-		if len(m.Goals) == 0 {
-			m.Status = "请先选择一个全局目标。"
-		} else {
-			m.startInput(SayInput, "输入发给选中目标的纠偏")
-		}
-	case "p":
-		if len(m.Goals) == 0 {
-			m.Status = "请先选择一个全局目标。"
-		} else {
-			m.startInput(ReplyInput, "回复选中目标的待答问题")
-		}
-	case "y":
-		if len(m.Proposals) > 0 {
-			p := m.Proposals[clamp(m.SelectedProposal, 0, len(m.Proposals)-1)]
-			if p.Status == core.ProposalPending {
-				m.Pending = true
-				return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "confirm", ID: p.ID, ProjectRoot: m.Root, SessionID: m.ActiveSession})
-			}
-		}
-	case "x":
-		if len(m.Proposals) > 0 {
-			p := m.Proposals[clamp(m.SelectedProposal, 0, len(m.Proposals)-1)]
-			if p.Status == core.ProposalPending {
-				m.Pending = true
-				return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "reject", ID: p.ID, ProjectRoot: m.Root, SessionID: m.ActiveSession})
-			}
-		}
-	case "esc":
-		m.Status = ""
 	}
-	return m, nil
+	m.Approvals = append(m.Approvals, a)
 }
-
-func (m *Model) SelectedSession(delta int) {
-	i := clamp(m.sessionIndex()+delta, 0, len(m.Sessions)-1)
-	m.ActiveSession = m.Sessions[i].ID
-}
-func (m Model) sessionIndex() int {
-	for i, s := range m.Sessions {
-		if s.ID == m.ActiveSession {
-			return i
-		}
-	}
-	return 0
-}
-func (m *Model) startInput(mode InputMode, placeholder string) {
-	m.Mode = mode
-	m.Input.Placeholder = placeholder
-	m.Input.SetValue("")
-	m.Input.Focus()
-}
-
-func (m Model) handleInput(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch k.String() {
-	case "esc":
-		m.Mode = ""
-		m.Input.Blur()
-		m.Status = "已取消输入。"
-		return m, nil
-	case "enter":
-		text := strings.TrimSpace(m.Input.Value())
-		if text == "" {
-			m.Status = "请输入非空内容。"
-			return m, nil
-		}
-		req := conversation.ClientMsg{ProjectRoot: m.Root, SessionID: m.ActiveSession, Text: text}
-		if len(m.Goals) > 0 && m.Panel == GoalsPanel {
-			req.Goal = m.Goals[clamp(m.SelectedGoal, 0, len(m.Goals)-1)].ID
-		}
-		switch m.Mode {
-		case GoalInput:
-			req.Op = "create_goal"
-		case SayInput:
-			req.Op = "say"
-		case ReplyInput:
-			req.Op = "reply"
-			if len(m.Goals) > 0 {
-				req.Goal = m.Goals[clamp(m.SelectedGoal, 0, len(m.Goals)-1)].ID
+func (m *Model) removeApproval(id string) {
+	for i := range m.Approvals {
+		if m.Approvals[i].ID == id {
+			m.Approvals = append(m.Approvals[:i], m.Approvals[i+1:]...)
+			if m.SelectedApproval >= len(m.Approvals) {
+				m.SelectedApproval = max(0, len(m.Approvals)-1)
 			}
-		default:
-			req.Op = "chat"
-		}
-		if req.Op == "say" {
-			if len(m.Goals) > 0 {
-				req.Goal = m.Goals[clamp(m.SelectedGoal, 0, len(m.Goals)-1)].ID
-			}
-		}
-		m.Pending = true
-		m.Mode = ""
-		m.Input.SetValue("")
-		m.Input.Blur()
-		return m, requestCmd(m.Socket, req)
-	}
-	var cmd tea.Cmd
-	m.Input, cmd = m.Input.Update(k)
-	return m, cmd
-}
-
-func (m Model) View() string {
-	if m.Width < 45 || m.Height < 12 {
-		return "STABLE · production TUI\n终端窗口较小，请放大窗口。按 q 退出。"
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "Stable · %s\n", m.ActiveSession)
-	fmt.Fprintf(&b, "[1] Sessions (%d)   [2] Chat   [3] Global Goals\n\n", len(m.Sessions))
-	if m.Width >= 112 {
-		available := m.Width - 8
-		left := available * 22 / 100
-		middle := available * 48 / 100
-		right := available - left - middle
-		panelHeight := max(5, m.Height-13)
-		panels := []string{renderPanel("SESSIONS", limited(m.sessionView(max(8, left-4)), panelHeight, false), left, panelHeight, m.Panel == SessionsPanel), renderPanel("CHAT / PROPOSALS", limited(m.chatView(max(8, middle-4)), panelHeight, true), middle, panelHeight, m.Panel == ChatPanel), renderPanel("GLOBAL GOALS", limited(m.goalView(max(8, right-4)), panelHeight, false), right, panelHeight, m.Panel == GoalsPanel)}
-		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, panels...))
-	} else {
-		switch m.Panel {
-		case SessionsPanel:
-			fmt.Fprintf(&b, "%s\n", renderPanel("SESSIONS", limited(m.sessionView(m.Width-6), m.Height-14, false), m.Width-4, m.Height-13, true))
-		case GoalsPanel:
-			fmt.Fprintf(&b, "%s\n", renderPanel("GLOBAL GOALS", limited(m.goalView(m.Width-6), m.Height-14, false), m.Width-4, m.Height-13, true))
-		default:
-			fmt.Fprintf(&b, "%s\n", renderPanel("CHAT / PROPOSALS", limited(m.chatView(m.Width-6), m.Height-14, true), m.Width-4, m.Height-13, true))
+			return
 		}
 	}
-	if m.Mode != "" {
-		fmt.Fprintf(&b, "\n%s\n", m.Input.View())
-	}
-	if m.Pending {
-		b.WriteString("\n等待服务响应… 导航和 q 退出仍可用。")
-	}
-	if m.Status != "" {
-		fmt.Fprintf(&b, "\n%s", m.Status)
-	}
-	if m.Err != nil {
-		fmt.Fprintf(&b, "\n错误：%s", m.Err.Error())
-	}
-	b.WriteString("\n\n↑/↓ 选择 · Enter 激活/聊天 · s 新建会话 · n 新目标 · y 确认 · x 拒绝 · r 纠偏 · p 回复 · q 退出")
-	return b.String()
-}
-
-func renderPanel(title, content string, width, height int, focused bool) string {
-	style := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Width(max(4, width-2)).Height(max(3, height-3)).Padding(0, 1).BorderForeground(lipgloss.Color("240"))
-	if focused {
-		style = style.BorderForeground(lipgloss.Color("205"))
-	}
-	return style.Render(title + "\n" + content)
-}
-func limited(text string, maxLines int, keepLast bool) string {
-	if maxLines < 1 {
-		return ""
-	}
-	lines := strings.Split(text, "\n")
-	if len(lines) <= maxLines {
-		return text
-	}
-	if keepLast {
-		lines = lines[len(lines)-maxLines:]
-	} else {
-		lines = lines[:maxLines]
-	}
-	return strings.Join(lines, "\n")
-}
-
-func (m Model) sessionView(width int) string {
-	var b strings.Builder
-	for i, s := range m.Sessions {
-		mark := " "
-		if s.ID == m.ActiveSession {
-			mark = "›"
-		}
-		title := s.Title
-		if len(title) > width-4 {
-			title = title[:max(1, width-4)]
-		}
-		fmt.Fprintf(&b, "%s %s\n", mark, title)
-		if i >= 12 {
-			break
-		}
-	}
-	b.WriteString("\ns 新建")
-	return b.String()
-}
-func (m Model) chatView(width int) string {
-	var b strings.Builder
-	shown := 0
-	for _, e := range m.Events {
-		if e.Type == sessionlog.EventMessage {
-			var msg sessionlog.Message
-			raw, _ := json.Marshal(e.Data)
-			_ = json.Unmarshal(raw, &msg)
-			label := msg.Role
-			if label == "assistant" {
-				label = "Stable"
-			}
-			text := strings.ReplaceAll(msg.Text, "\n", " ")
-			if len(text) > width-12 {
-				text = text[:max(1, width-12)] + "…"
-			}
-			fmt.Fprintf(&b, "%s: %s\n", label, text)
-			shown++
-		}
-	}
-	if shown == 0 {
-		b.WriteString("空会话。按 Enter 开始聊天。\n")
-	}
-	if len(m.Proposals) > 0 {
-		b.WriteString("\n待审提案：\n")
-		for i, p := range m.Proposals {
-			mark := " "
-			if i == m.SelectedProposal {
-				mark = "›"
-			}
-			fmt.Fprintf(&b, "%s %s [%s] · %d 项标准\n", mark, p.ID, p.Status, len(p.Criteria))
-			if i == m.SelectedProposal {
-				for _, c := range p.Criteria {
-					fmt.Fprintf(&b, "  - %s (%s): %s\n", c.ID, c.Kind, string(c.Payload))
-				}
-			}
-		}
-	}
-	return b.String()
-}
-func (m Model) goalView(width int) string {
-	var b strings.Builder
-	for i, g := range m.Goals {
-		mark := " "
-		if i == m.SelectedGoal {
-			mark = "›"
-		}
-		name := g.Objective
-		if name == "" {
-			name = g.ID
-		}
-		if len(name) > width-12 {
-			name = name[:max(1, width-12)] + "…"
-		}
-		fmt.Fprintf(&b, "%s %s [%s]\n", mark, name, g.Status)
-		if i == m.SelectedGoal {
-			if g.Reason != "" {
-				fmt.Fprintf(&b, " 原因：%s\n", g.Reason)
-			}
-			if g.SourceSessionID != "" {
-				fmt.Fprintf(&b, " 来源：%s\n", g.SourceSessionID)
-			}
-			if g.EvidenceSummary != "" {
-				fmt.Fprintf(&b, " 证据：%s\n", g.EvidenceSummary)
-			}
-		}
-	}
-	if len(m.Goals) == 0 {
-		b.WriteString("暂无目标。\n")
-	}
-	return b.String()
 }
 func clamp(n, lo, hi int) int {
 	if hi < lo {
@@ -495,6 +420,445 @@ func clamp(n, lo, hi int) int {
 		return hi
 	}
 	return n
+}
+func (m Model) sessionIndex() int {
+	for i, s := range m.Sessions {
+		if s.ID == m.ActiveSession {
+			return i
+		}
+	}
+	return 0
+}
+func (m *Model) SelectedSession(delta int) {
+	i := clamp(m.sessionIndex()+delta, 0, len(m.Sessions)-1)
+	if len(m.Sessions) > 0 {
+		m.ActiveSession = m.Sessions[i].ID
+	}
+}
+
+func (m Model) handleChatKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.Mode != "" {
+		return m.handleInput(k)
+	}
+	switch k.String() {
+	case "ctrl+s":
+		m.Navigation = NavigationState{Mode: SessionPickerView, Cursor: m.sessionIndex()}
+		return m, nil
+	case "ctrl+g":
+		m.Navigation = NavigationState{Mode: GoalPickerView, Cursor: m.SelectedGoal}
+		return m, nil
+	case "pgup", "ctrl+up":
+		var cmd tea.Cmd
+		m.Transcript.Viewport, cmd = m.Transcript.Viewport.Update(k)
+		return m, cmd
+	case "pgdown", "ctrl+down":
+		var cmd tea.Cmd
+		m.Transcript.Viewport, cmd = m.Transcript.Viewport.Update(k)
+		return m, cmd
+	case "up", "k":
+		if len(m.Candidates) > 0 {
+			m.CandidateIndex = (m.CandidateIndex - 1 + len(m.Candidates)) % len(m.Candidates)
+			return m, nil
+		}
+		if m.Pending && len(m.Sessions) > 0 {
+			m.SelectedSession(-1)
+			return m, nil
+		}
+		return m, m.Composer.Update(k)
+	case "down", "j":
+		if len(m.Candidates) > 0 {
+			m.CandidateIndex = (m.CandidateIndex + 1) % len(m.Candidates)
+			return m, nil
+		}
+		if m.Pending && len(m.Sessions) > 1 {
+			m.SelectedSession(1)
+			return m, nil
+		}
+		return m, m.Composer.Update(k)
+	case "esc":
+		if m.Pending && m.stream != nil && m.ActiveRunID != "" {
+			m.Status = "正在取消运行…"
+			return m, cancelRunCmd(m.stream, m.ActiveSession, m.ActiveRunID)
+		}
+		m.Composer.Blur()
+		m.Mode = ""
+		m.Status = ""
+		return m, nil
+	case "ctrl+j":
+		m.Composer.SetValue(m.Composer.Value() + "\n")
+		return m, nil
+	case "tab":
+		m.refreshCompletions()
+		if len(m.Candidates) > 0 {
+			item := m.Candidates[m.CandidateIndex%len(m.Candidates)]
+			value := m.Composer.Value()
+			if item.Kind == CommandCompletion {
+				m.Composer.SetValue(item.InsertText)
+			} else {
+				at := strings.LastIndex(value, "@")
+				if at >= 0 {
+					m.Composer.SetValue(value[:at] + item.InsertText)
+				}
+			}
+			m.Candidates = nil
+			return m, nil
+		}
+		return m, nil
+	case "enter":
+		return m.submitComposer()
+	default:
+		cmd := m.Composer.Update(k)
+		m.refreshCompletions()
+		return m, cmd
+	}
+}
+
+func (m Model) handleInput(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if k.String() == "esc" {
+		m.Mode = ""
+		m.Composer.Blur()
+		m.Status = "已取消输入。"
+		return m, nil
+	}
+	if k.String() == "ctrl+j" {
+		m.Composer.SetValue(m.Composer.Value() + "\n")
+		return m, nil
+	}
+	if k.String() == "tab" {
+		m.refreshCompletions()
+		if len(m.Candidates) > 0 {
+			item := m.Candidates[m.CandidateIndex%len(m.Candidates)]
+			value := m.Composer.Value()
+			if item.Kind == CommandCompletion {
+				m.Composer.SetValue(item.InsertText)
+			} else if at := strings.LastIndex(value, "@"); at >= 0 {
+				m.Composer.SetValue(value[:at] + item.InsertText)
+			}
+			m.Candidates = nil
+		}
+		return m, nil
+	}
+	if k.String() == "enter" {
+		return m.submitComposer()
+	}
+	cmd := m.Composer.Update(k)
+	m.refreshCompletions()
+	return m, cmd
+}
+
+func (m *Model) refreshCompletions() {
+	value := m.Composer.Value()
+	if strings.HasPrefix(value, "/") && !strings.ContainsAny(value, " \n") {
+		m.Candidates = builtinCommands{}.List(value)
+		return
+	}
+	if at := strings.LastIndex(value, "@"); at >= 0 && !strings.ContainsAny(value[at:], " \n") {
+		items, _ := (projectPathCompleter{}).Complete(m.Root, value[at:])
+		m.Candidates = items
+		return
+	}
+	m.Candidates = nil
+}
+func (m Model) submitComposer() (tea.Model, tea.Cmd) {
+	text := strings.TrimSpace(m.Composer.Value())
+	if text == "" {
+		m.Status = "请输入非空内容。"
+		return m, nil
+	}
+	if text == "/sessions" {
+		m.Composer.SetValue("")
+		m.Navigation = NavigationState{Mode: SessionPickerView, Cursor: m.sessionIndex()}
+		return m, nil
+	}
+	if text == "/goals" {
+		m.Composer.SetValue("")
+		m.Navigation = NavigationState{Mode: GoalPickerView, Cursor: m.SelectedGoal}
+		return m, nil
+	}
+	if strings.HasPrefix(text, "/review ") {
+		candidateID := strings.TrimSpace(strings.TrimPrefix(text, "/review "))
+		if candidateID == "" || strings.ContainsAny(candidateID, " \t\n") {
+			m.Status = "用法：/review 候选ID"
+			return m, nil
+		}
+		m.Pending = true
+		m.Status = "正在生成候选预览…"
+		m.Composer.SetValue("")
+		return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "review_get", CandidateID: candidateID, SessionID: m.ActiveSession})
+	}
+	req := conversation.ClientMsg{ProjectRoot: m.Root, SessionID: m.ActiveSession, Text: text}
+	if len(m.Goals) > 0 && m.Navigation.Mode == GoalPickerView {
+		req.Goal = m.Goals[clamp(m.SelectedGoal, 0, len(m.Goals)-1)].ID
+	}
+	switch m.Mode {
+	case GoalInput:
+		req.Op = "create_goal"
+	case SayInput:
+		req.Op = "say"
+	case ReplyInput:
+		req.Op = "reply"
+	default:
+		req.Op = "chat"
+	}
+	if (req.Op == "say" || req.Op == "reply") && len(m.Goals) > 0 {
+		req.Goal = m.Goals[clamp(m.SelectedGoal, 0, len(m.Goals)-1)].ID
+	}
+	m.Pending = true
+	m.Status = "请求已提交。"
+	m.Err = nil
+	m.Mode = ""
+	m.Composer.SetValue("")
+	m.Composer.Blur()
+	if req.Op == "chat" {
+		runID, err := sessionlog.NewID()
+		if err != nil {
+			m.Status, m.Pending = "无法创建运行 ID："+err.Error(), false
+			return m, nil
+		}
+		request := agent.ExecutionRequest{RunID: runID, Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: m.ActiveSession}, Intent: text, Messages: []llm.Message{{Role: "user", Content: text}}}
+		m.ActiveRunID = runID
+		m.Events = append(m.Events, sessionlog.Event{Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "user", Text: text, Kind: "text"}})
+		m.Transcript.SetEvents(m.Events)
+		m.Status = "正在连接模型…"
+		return m, openRunCmd(m.Socket, request)
+	}
+	return m, requestCmd(m.Socket, req)
+}
+
+func (m Model) handleReviewKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch k.String() {
+	case "esc":
+		m.Review, m.ReviewConfirmed = nil, nil
+		m.Status = "已关闭候选预览。"
+		return m, nil
+	case " ":
+		if len(m.Review.Findings) > 0 {
+			finding := m.Review.Findings[clamp(m.ReviewCursor, 0, len(m.Review.Findings)-1)]
+			if finding.Result != candidate.FindingPass {
+				m.ReviewConfirmed[finding.ID] = !m.ReviewConfirmed[finding.ID]
+			}
+		}
+		return m, nil
+	case "right", "l":
+		if m.ReviewCursor < len(m.Review.Findings)-1 {
+			m.ReviewCursor++
+		}
+		return m, nil
+	case "left", "h":
+		if m.ReviewCursor > 0 {
+			m.ReviewCursor--
+		}
+		return m, nil
+	case "a":
+		m.Pending, m.Status = true, "正在核对并接收候选…"
+		return m, m.acceptReview(candidate.AcceptNormal)
+	case "f":
+		var confirmed []string
+		for _, finding := range m.Review.Findings {
+			if finding.Result != candidate.FindingPass {
+				if !m.ReviewConfirmed[finding.ID] {
+					m.Status = "强制接收前需逐项确认所有失败或不可用项；Space 确认当前项。"
+					return m, nil
+				}
+				confirmed = append(confirmed, finding.ID)
+			}
+		}
+		m.Pending, m.Status = true, "正在核对并强制接收候选…"
+		return m, m.acceptReview(candidate.AcceptForce, confirmed...)
+	}
+	return m, nil
+}
+
+func (m Model) handleApprovalKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if len(m.Approvals) == 0 {
+		return m, nil
+	}
+	a := m.Approvals[clamp(m.SelectedApproval, 0, len(m.Approvals)-1)]
+	switch k.String() {
+	case "esc":
+		return m, nil
+	case "up", "k":
+		if m.SelectedApproval > 0 {
+			m.SelectedApproval--
+		}
+		return m, nil
+	case "down", "j":
+		if m.SelectedApproval < len(m.Approvals)-1 {
+			m.SelectedApproval++
+		}
+		return m, nil
+	case "1", "2", "3":
+		choice, err := approvalChoice(k.String())
+		if err != nil {
+			m.Err = err
+			return m, nil
+		}
+		m.Pending = true
+		m.Status = "正在记录授权决定…"
+		return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "approval_resolve", SessionID: m.ActiveSession, ApprovalID: a.ID, ApprovalChoice: string(choice)})
+	case "c":
+		m.Pending = true
+		m.Status = "正在取消授权请求…"
+		return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "approval_cancel", SessionID: m.ActiveSession, ApprovalID: a.ID})
+	}
+	return m, nil
+}
+
+func approvalChoice(key string) (permission.ApprovalChoice, error) {
+	switch key {
+	case "1":
+		return permission.ChoiceAllowOnce, nil
+	case "2":
+		return permission.ChoiceSaveRule, nil
+	case "3":
+		return permission.ChoiceDeny, nil
+	default:
+		return "", fmt.Errorf("unknown approval choice")
+	}
+}
+
+func (m Model) acceptReview(mode candidate.AcceptanceMode, confirmed ...string) tea.Cmd {
+	decisionID, err := sessionlog.NewID()
+	if err != nil {
+		return func() tea.Msg { return resultMsg{op: "review_accept", err: err} }
+	}
+	return requestCmd(m.Socket, conversation.ClientMsg{Op: "review_accept", CandidateID: m.Review.CandidateID, DecisionID: decisionID, PreviewDigest: m.Review.Digest, CandidateDigest: m.Review.CandidateDigest, FormalDigest: m.Review.FormalDigest, AcceptanceMode: string(mode), Confirmed: confirmed})
+}
+
+func (m *Model) applyRunMessage(message conversation.ServerMsg) {
+	switch message.Type {
+	case "approval_pending":
+		if message.Approval != nil {
+			m.upsertApproval(*message.Approval)
+			m.Status = "需要用户授权；按 1/2/3 决定，c 取消。"
+		}
+	case "approval_resolved", "approval_cancelled":
+		id := ""
+		if message.Approval != nil {
+			id = message.Approval.ID
+		}
+		if message.Decision != nil {
+			id = message.Decision.ApprovalID
+		}
+		m.removeApproval(id)
+	case "run_started":
+		if m.Pending {
+			m.ActiveRunID = message.RunID
+		}
+		m.Status = "正在生成…"
+	case "run_event":
+		if message.RunEvent == nil {
+			return
+		}
+		if m.Pending && m.ActiveRunID != "" && message.RunEvent.RunID != m.ActiveRunID {
+			return
+		}
+		if m.Pending && message.RunEvent.RunID != "" {
+			m.ActiveRunID = message.RunEvent.RunID
+		}
+		event := sessionlog.Event{SessionID: message.RunEvent.SessionID, Seq: message.Cursor, At: message.RunEvent.At, Type: sessionlog.EventRunEvent, Data: *message.RunEvent}
+		if message.Cursor != 0 {
+			if message.Cursor > m.LastCursor {
+				m.LastCursor = message.Cursor
+			}
+			found := false
+			for _, existing := range m.Events {
+				if existing.Seq == message.Cursor && existing.Type == sessionlog.EventRunEvent {
+					found = true
+					break
+				}
+			}
+			if !found {
+				m.Events = append(m.Events, event)
+				m.Transcript.SetEvents(m.Events)
+			}
+		}
+		if message.RunEvent.Kind == "text_delta" {
+			m.Status = "正在生成…"
+		}
+		if message.RunEvent.Kind == "error" {
+			m.Status = "模型返回错误；已收到的内容已保留。"
+		}
+	case "resync":
+		m.Status = "正在同步遗漏的运行事件…"
+	}
+}
+func (m Model) handleNavigationKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch k.String() {
+	case "esc":
+		m.Navigation.Mode = ChatView
+		m.Composer.Focus()
+		return m, nil
+	case "up", "k":
+		if m.Navigation.Cursor > 0 {
+			m.Navigation.Cursor--
+		}
+	case "down", "j":
+		limit := len(m.Sessions)
+		if m.Navigation.Mode == GoalPickerView {
+			limit = len(m.Goals)
+		}
+		if m.Navigation.Cursor+1 < limit {
+			m.Navigation.Cursor++
+		}
+	case "enter":
+		if m.Navigation.Mode == SessionPickerView && len(m.Sessions) > 0 {
+			m.ActiveSession = m.Sessions[clamp(m.Navigation.Cursor, 0, len(m.Sessions)-1)].ID
+			m.Navigation.Mode = ChatView
+			m.Pending = true
+			m.Status = "正在加载会话…"
+			return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "session_load", ProjectRoot: m.Root, SessionID: m.ActiveSession})
+		}
+		if m.Navigation.Mode == GoalPickerView && len(m.Goals) > 0 {
+			m.SelectedGoal = clamp(m.Navigation.Cursor, 0, len(m.Goals)-1)
+			m.Navigation.Mode = ChatView
+		}
+	}
+	return m, nil
+}
+
+func (m Model) View() string {
+	m.resize()
+	if m.Layout.TooSmall {
+		return "Stable · 共用对话\n终端窗口较小，请放大窗口。 Ctrl+C 退出。"
+	}
+	if m.Navigation.Mode == SessionPickerView {
+		return "会话\n" + renderSessions(m.Sessions, m.ActiveSession, m.Navigation.Cursor, m.Width) + "\n" + renderStatus(m.statusState(), m.ActiveSession, m.Navigation.Mode, m.Width)
+	}
+	if m.Navigation.Mode == GoalPickerView {
+		return "目标\n" + renderGoals(m.Goals, m.Navigation.Cursor, m.Width) + "\n" + renderStatus(m.statusState(), m.ActiveSession, m.Navigation.Mode, m.Width)
+	}
+	var b strings.Builder
+	if len(m.Approvals) > 0 {
+		return renderApprovalDialog(m.Approvals, m.SelectedApproval, m.Width)
+	}
+	if m.Review != nil {
+		errorText := ""
+		if m.Err != nil {
+			errorText = m.Err.Error()
+		}
+		return renderReview(*m.Review, m.ReviewConfirmed, m.ReviewCursor, m.Status, errorText, m.Width)
+	}
+	fmt.Fprintf(&b, "%s\n", m.Transcript.View())
+	b.WriteString("\n")
+	b.WriteString(m.Composer.View())
+	if len(m.Candidates) > 0 {
+		fmt.Fprintf(&b, "\n%s", (Overlay{Width: m.Width - 4, Height: min(5, max(1, m.Height/4))}).Render(m.Candidates, m.CandidateIndex%len(m.Candidates)))
+	}
+	if m.Err != nil {
+		fmt.Fprintf(&b, "\n错误：%s", m.Err.Error())
+	}
+	b.WriteString("\n" + renderStatus(m.statusState(), m.ActiveSession, m.Navigation.Mode, m.Width))
+	return b.String()
+}
+func (m Model) statusState() StatusState {
+	if m.Err != nil {
+		return StatusState{Phase: StatusError, Text: m.Err.Error()}
+	}
+	if m.Pending {
+		return StatusState{Phase: StatusLoading, Text: "等待服务响应"}
+	}
+	return StatusState{Phase: StatusIdle, Text: m.Status}
 }
 
 func Run(socket, root string) error {
