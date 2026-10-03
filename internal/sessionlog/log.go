@@ -37,7 +37,7 @@ func Append(root, id, typ string, data any) (Event, error) {
 		return Event{}, errors.New("event type is required")
 	}
 	switch typ {
-	case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary:
+	case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent:
 	default:
 		return Event{}, fmt.Errorf("unknown event type %q", typ)
 	}
@@ -71,6 +71,11 @@ func Append(root, id, typ string, data any) (Event, error) {
 		}
 		if len(replay.Events) > 0 {
 			seq = replay.Events[len(replay.Events)-1].Seq
+		}
+		if typ == EventRunStarted || typ == EventRunEvent {
+			if err := validateRunAppend(id, typ, data, replay.Events); err != nil {
+				return Event{}, err
+			}
 		}
 		if typ == EventToolResult {
 			var result ToolResult
@@ -173,6 +178,113 @@ func Replay(root, id string) (Transcript, error) {
 	return replayFile(path, id)
 }
 
+func ReplayAfter(root, id string, afterSeq uint64) (Transcript, error) {
+	transcript, err := Replay(root, id)
+	if err != nil {
+		return Transcript{}, err
+	}
+	filtered := transcript.Events[:0]
+	for _, event := range transcript.Events {
+		if event.Seq > afterSeq {
+			filtered = append(filtered, event)
+		}
+	}
+	transcript.Events = filtered
+	return transcript, nil
+}
+
+func validateRunAppend(sessionID, typ string, data any, events []Event) error {
+	starts := map[string]RunStarted{}
+	lastSeq := map[string]uint64{}
+	terminal := map[string]bool{}
+	for _, event := range events {
+		switch event.Type {
+		case EventRunStarted:
+			var started RunStarted
+			if decodeData(event.Data, &started) == nil {
+				starts[started.RunID] = started
+			}
+		case EventRunEvent:
+			var runEvent RunEvent
+			if decodeData(event.Data, &runEvent) == nil {
+				lastSeq[runEvent.RunID] = runEvent.RunSeq
+				if runEvent.Kind == "terminal" {
+					terminal[runEvent.RunID] = true
+				}
+			}
+		}
+	}
+	if typ == EventRunStarted {
+		var started RunStarted
+		if err := decodeData(data, &started); err != nil || started.RunID == "" || started.Intent == "" {
+			return errors.New("run_started requires run_id and intent")
+		}
+		if starts[started.RunID].RunID != "" {
+			return errors.New("run ID already exists in session")
+		}
+		switch started.WorkKind {
+		case "session":
+			if started.GoalID != "" || started.WorkItemID != "" {
+				return errors.New("session run cannot include goal IDs")
+			}
+		case "goal":
+			if started.GoalID == "" || started.WorkItemID == "" {
+				return errors.New("goal run requires goal and work item IDs")
+			}
+		default:
+			return errors.New("run has invalid work kind")
+		}
+		return nil
+	}
+	var runEvent RunEvent
+	if err := decodeData(data, &runEvent); err != nil || runEvent.ID == "" || runEvent.RunID == "" || runEvent.RunSeq == 0 || runEvent.Kind == "" || runEvent.At.IsZero() {
+		return errors.New("run_event requires event ID, run ID, sequence, kind, and time")
+	}
+	if runEvent.SessionID != sessionID {
+		return errors.New("run_event session does not match log")
+	}
+	if starts[runEvent.RunID].RunID == "" {
+		return errors.New("run_event has no run_started event")
+	}
+	if terminal[runEvent.RunID] {
+		return errors.New("run_event follows terminal event")
+	}
+	if runEvent.RunSeq != lastSeq[runEvent.RunID]+1 {
+		return errors.New("run_event sequence is not monotonic")
+	}
+	if runEvent.Kind == "terminal" {
+		var result struct {
+			Status string `json:"status"`
+		}
+		if err := decodeData(runEvent.Payload, &result); err != nil {
+			return errors.New("terminal event has invalid payload")
+		}
+		switch result.Status {
+		case "completed", "cancelled", "failed", "awaiting_tools":
+		default:
+			return errors.New("terminal event has invalid status")
+		}
+	}
+	for _, event := range events {
+		if event.Type != EventRunEvent {
+			continue
+		}
+		var previous RunEvent
+		if decodeData(event.Data, &previous) == nil && previous.ID == runEvent.ID {
+			return errors.New("duplicate run event ID")
+		}
+	}
+	return nil
+}
+
+func decodeData(data any, target any) error {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, target)
+}
+
 func replayFile(path, id string) (Transcript, error) {
 	if err := checkTrailingNewline(path); err != nil {
 		return Transcript{}, err
@@ -187,6 +299,10 @@ func replayFile(path, id string) (Transcript, error) {
 	s.Buffer(make([]byte, 4096), 8<<20)
 	var expected uint64 = 1
 	openCalls := map[string]bool{}
+	runStarts := map[string]RunStarted{}
+	runSeq := map[string]uint64{}
+	runTerminal := map[string]bool{}
+	runEventIDs := map[string]bool{}
 	for s.Scan() {
 		line := append([]byte(nil), s.Bytes()...)
 		var e Event
@@ -197,7 +313,7 @@ func replayFile(path, id string) (Transcript, error) {
 			return out, fmt.Errorf("session log invalid envelope at seq %d", expected)
 		}
 		switch e.Type {
-		case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary:
+		case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent:
 		default:
 			return out, fmt.Errorf("session log has unknown event type %q at seq %d", e.Type, e.Seq)
 		}
@@ -222,6 +338,48 @@ func replayFile(path, id string) (Transcript, error) {
 			if json.Unmarshal(raw, &boundary) != nil || boundary.FromSeq == 0 || boundary.ToSeq < boundary.FromSeq || boundary.Summary == "" {
 				return out, fmt.Errorf("session log has invalid compaction boundary at seq %d", e.Seq)
 			}
+		case EventRunStarted:
+			var started RunStarted
+			if decodeData(e.Data, &started) != nil || started.RunID == "" || started.Intent == "" || runStarts[started.RunID].RunID != "" {
+				return out, fmt.Errorf("session log has invalid run_started at seq %d", e.Seq)
+			}
+			switch started.WorkKind {
+			case "session":
+				if started.GoalID != "" || started.WorkItemID != "" {
+					return out, fmt.Errorf("session log has invalid session run at seq %d", e.Seq)
+				}
+			case "goal":
+				if started.GoalID == "" || started.WorkItemID == "" {
+					return out, fmt.Errorf("session log has invalid goal run at seq %d", e.Seq)
+				}
+			default:
+				return out, fmt.Errorf("session log has invalid run kind at seq %d", e.Seq)
+			}
+			runStarts[started.RunID] = started
+		case EventRunEvent:
+			var runEvent RunEvent
+			if decodeData(e.Data, &runEvent) != nil || runEvent.ID == "" || runEvent.RunID == "" || runEvent.SessionID != id || runEvent.RunSeq == 0 || runEvent.Kind == "" || runEvent.At.IsZero() {
+				return out, fmt.Errorf("session log has invalid run_event at seq %d", e.Seq)
+			}
+			if runStarts[runEvent.RunID].RunID == "" || runTerminal[runEvent.RunID] || runEvent.RunSeq != runSeq[runEvent.RunID]+1 || runEventIDs[runEvent.ID] {
+				return out, fmt.Errorf("session log has invalid run event order at seq %d", e.Seq)
+			}
+			if runEvent.Kind == "terminal" {
+				var result struct {
+					Status string `json:"status"`
+				}
+				if decodeData(runEvent.Payload, &result) != nil {
+					return out, fmt.Errorf("session log has invalid terminal at seq %d", e.Seq)
+				}
+				switch result.Status {
+				case "completed", "cancelled", "failed", "awaiting_tools":
+				default:
+					return out, fmt.Errorf("session log has invalid terminal status at seq %d", e.Seq)
+				}
+				runTerminal[runEvent.RunID] = true
+			}
+			runSeq[runEvent.RunID] = runEvent.RunSeq
+			runEventIDs[runEvent.ID] = true
 		}
 		out.Events = append(out.Events, e)
 		expected++

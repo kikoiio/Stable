@@ -56,7 +56,27 @@ const (
 	EventToolCall       = "tool_call"
 	EventToolResult     = "tool_result"
 	EventBoundary       = "compaction_boundary"
+	EventRunStarted     = "run_started"
+	EventRunEvent       = "run_event"
 )
+
+type RunStarted struct {
+	RunID      string `json:"run_id"`
+	WorkKind   string `json:"work_kind"`
+	GoalID     string `json:"goal_id,omitempty"`
+	WorkItemID string `json:"work_item_id,omitempty"`
+	Intent     string `json:"intent"`
+}
+
+type RunEvent struct {
+	ID        string    `json:"id"`
+	RunID     string    `json:"run_id"`
+	SessionID string    `json:"session_id"`
+	RunSeq    uint64    `json:"run_seq"`
+	At        time.Time `json:"at"`
+	Kind      string    `json:"kind"`
+	Payload   any       `json:"payload,omitempty"`
+}
 
 type Transcript struct {
 	Session SessionInfo `json:"session"`

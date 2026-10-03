@@ -3,6 +3,9 @@ package dependency
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"stable/internal/core"
@@ -23,7 +26,12 @@ func TestKiCadCollector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	goal := core.Goal{ID: "goal-1", ArtifactPath: "/run/goals/goal-1/sensor.kicad_sch", AllowedRoot: "/run/goals/goal-1", CurrentArtifactID: "artifact"}
+	root := t.TempDir()
+	allowed := filepath.Join(root, "goal-1")
+	if err := os.MkdirAll(allowed, 0700); err != nil {
+		t.Fatal(err)
+	}
+	goal := core.Goal{ID: "goal-1", ArtifactPath: filepath.Join(allowed, "sensor.kicad_sch"), AllowedRoot: allowed, CurrentArtifactID: "artifact"}
 	calls := 0
 	collector := KiCadCollector{Kicad: collectorCaller(func(_ context.Context, req core.CapabilityRequest) (core.CapabilityResult, error) {
 		calls++
@@ -34,6 +42,15 @@ func TestKiCadCollector(t *testing.T) {
 		if err := json.Unmarshal(req.Payload, &payload); err != nil || payload["path"] != goal.ArtifactPath || payload["allowed_root"] != goal.AllowedRoot {
 			t.Fatalf("dependency path payload: %v %v", payload, err)
 		}
+		if payload["project_root"] != goal.AllowedRoot {
+			t.Fatalf("dependency collection must be scoped to the formal project: %v", payload)
+		}
+		for _, key := range []string{"candidate_root", "run_root"} {
+			scratch := payload[key]
+			if scratch == "" || !strings.HasPrefix(scratch, root+string(os.PathSeparator)) {
+				t.Fatalf("dependency scratch %s outside the collector run root: %v", key, payload)
+			}
+		}
 		return core.CapabilityResult{Status: "observed", ActualArtifactID: "artifact", Postcondition: body}, nil
 	})}
 	got, err := collector.Collect(context.Background(), goal)
@@ -43,7 +60,11 @@ func TestKiCadCollector(t *testing.T) {
 }
 
 func TestKiCadCollectorRejectsUnexpectedResults(t *testing.T) {
-	goal := core.Goal{ID: "g", ArtifactPath: "/root/design.kicad_sch", AllowedRoot: "/root", CurrentArtifactID: "artifact"}
+	allowed := filepath.Join(t.TempDir(), "g")
+	if err := os.MkdirAll(allowed, 0700); err != nil {
+		t.Fatal(err)
+	}
+	goal := core.Goal{ID: "g", ArtifactPath: filepath.Join(allowed, "design.kicad_sch"), AllowedRoot: allowed, CurrentArtifactID: "artifact"}
 	for name, response := range map[string]core.CapabilityResult{
 		"blocked":                 {Status: "blocked"},
 		"mid-call design change":  {Status: "stale", ActualArtifactID: "other", Postcondition: json.RawMessage(`{"dependencies":[]}`)},
@@ -60,7 +81,11 @@ func TestKiCadCollectorRejectsUnexpectedResults(t *testing.T) {
 }
 
 func TestKiCadCollectorAcceptsStableArtifactNewerThanRecordedGoal(t *testing.T) {
-	goal := core.Goal{ID: "g", ArtifactPath: "/root/design.kicad_sch", AllowedRoot: "/root", CurrentArtifactID: "recorded"}
+	allowed := filepath.Join(t.TempDir(), "g")
+	if err := os.MkdirAll(allowed, 0700); err != nil {
+		t.Fatal(err)
+	}
+	goal := core.Goal{ID: "g", ArtifactPath: filepath.Join(allowed, "design.kicad_sch"), AllowedRoot: allowed, CurrentArtifactID: "recorded"}
 	dependencies := []core.DependencySnapshot{
 		{SchemaVersion: 1, Family: core.CheckFamilyERC, CheckerID: "kicad-cli-erc", CheckerVersion: "9.0.8", Fingerprint: "erc-v1", Available: true},
 		{SchemaVersion: 1, Family: core.CheckFamilyConnection, CheckerID: "sensor-connection-check", CheckerVersion: "1", Fingerprint: "connection-v1", Available: true},

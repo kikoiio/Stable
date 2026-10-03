@@ -10,11 +10,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"stable/internal/agent"
 	"stable/internal/artifact"
+	"stable/internal/conversation"
 	"stable/internal/core"
+	"stable/internal/llm"
 	"stable/internal/policy"
+	"stable/internal/sessionlog"
 	"stable/internal/store"
 )
 
@@ -28,6 +34,12 @@ type deciderFunc func(context.Context, core.DecisionContext) (core.ProposedActio
 
 func (f deciderFunc) Decide(ctx context.Context, r core.DecisionContext) (core.ProposedAction, error) {
 	return f(ctx, r)
+}
+
+type goalRunFunc func(context.Context, agent.ExecutionRequest) (agent.RunOutcome, error)
+
+func (f goalRunFunc) RunGoal(ctx context.Context, request agent.ExecutionRequest) (agent.RunOutcome, error) {
+	return f(ctx, request)
 }
 
 type executorFunc func(context.Context, string) (core.ActionRecord, error)
@@ -51,9 +63,10 @@ func (r *fixtureRefresher) Refresh(ctx context.Context, goalID string) (core.Dep
 	return r.state.ReconcileDependencies(ctx, goalID, r.snapshots)
 }
 
-func fixtureActivities(t *testing.T) (*core.Activities, *store.Store, string) {
+func fixtureActivities(t *testing.T, source ...bool) (*core.Activities, *store.Store, string) {
 	t.Helper()
 	ctx := context.Background()
+	withSource := len(source) == 0 || source[0]
 	root := t.TempDir()
 	path := filepath.Join(root, "design.txt")
 	if err := os.WriteFile(path, []byte("fault"), 0644); err != nil {
@@ -72,7 +85,15 @@ func fixtureActivities(t *testing.T) (*core.Activities, *store.Store, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	_, err = s.CreateGoal(ctx, core.Goal{ID: "g", Objective: "test", AllowedRoot: root, ArtifactPath: path, CurrentArtifactID: hash, AllowedCapabilities: []string{"repair"}, Criteria: []core.Criterion{{ID: "erc", Kind: "kicad.erc_clean", Payload: json.RawMessage(`{}`)}}})
+	var sourceSessionID string
+	if withSource {
+		sourceSession, sessionErr := sessionlog.Create(root, "goal source")
+		if sessionErr != nil {
+			t.Fatal(sessionErr)
+		}
+		sourceSessionID = sourceSession.ID
+	}
+	_, err = s.CreateGoal(ctx, core.Goal{ID: "g", Objective: "test", AllowedRoot: root, ArtifactPath: path, CurrentArtifactID: hash, SourceSessionID: sourceSessionID, AllowedCapabilities: []string{"repair"}, Criteria: []core.Criterion{{ID: "erc", Kind: "kicad.erc_clean", Payload: json.RawMessage(`{}`)}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,6 +127,198 @@ func fixtureActivities(t *testing.T) (*core.Activities, *store.Store, string) {
 	})
 	a := &core.Activities{State: s, Artifacts: art, Kicad: kicad, Policy: policy.Policy{}, Refresher: &fixtureRefresher{state: s, snapshots: dependencies}}
 	return a, s, path
+}
+
+func TestCandidateReadyActionBlocksNewLegacyDecisions(t *testing.T) {
+	ctx := context.Background()
+	a, state, _ := fixtureActivities(t, false)
+	decisionCalls := 0
+	a.Decider = deciderFunc(func(context.Context, core.DecisionContext) (core.ProposedAction, error) {
+		decisionCalls++
+		return core.ProposedAction{Kind: "wait", Reason: "unexpected new decision"}, nil
+	})
+	// Seed the action state through the store-facing interfaces used by the
+	// activity; a ready candidate must remain the sole user-review handoff.
+	snap, err := state.GetGoalSnapshot(ctx, "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, dependencyRevision := snap.Goal.CriteriaRevision, snap.Goal.DependencyRevision
+	if err = state.RecordObservation(ctx, core.Observation{ID: "ready-observation", GoalID: "g", EventID: "ready-observation-event", ArtifactID: snap.Goal.CurrentArtifactID, Facts: json.RawMessage(`{"design":{},"computer":{}}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err = state.RecordDecision(ctx, core.Decision{ID: "ready-decision", AgentID: "agent-g", ObservationID: "ready-observation", Proposal: core.ProposedAction{Kind: "execute_capability", Capability: "kicad.repair_connection"}, CriteriaRevision: &revision, DependencyRevision: &dependencyRevision}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = state.ReserveAction(ctx, core.ActionRecord{ID: "action-ready", DecisionID: "ready-decision", ExpectedArtifactID: snap.Goal.CurrentArtifactID, DesiredPostcondition: json.RawMessage(`{"sensor.connection_present":true}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err = state.SetActionResult(ctx, "action-ready", "candidate_ready", "candidate-digest", "candidate is ready for user review"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.EvaluateGoal(ctx, "g", "ready-timer"); err != nil {
+		t.Fatal(err)
+	}
+	if decisionCalls != 0 {
+		t.Fatal("new decision was created while candidate review was pending")
+	}
+}
+
+func TestLegacyGoalSkipsConversationRunnerAndReachesDecider(t *testing.T) {
+	ctx := context.Background()
+	a, state, _ := fixtureActivities(t, false)
+	runnerCalled := false
+	deciderCalled := false
+	a.GoalRunner = goalRunFunc(func(context.Context, agent.ExecutionRequest) (agent.RunOutcome, error) {
+		runnerCalled = true
+		return agent.RunOutcome{Status: agent.RunCompleted}, nil
+	})
+	a.Decider = deciderFunc(func(context.Context, core.DecisionContext) (core.ProposedAction, error) {
+		deciderCalled = true
+		return core.ProposedAction{Kind: "wait", Reason: "legacy path"}, nil
+	})
+	if _, err := a.EvaluateGoal(ctx, "g", "legacy-timer"); err != nil {
+		t.Fatal(err)
+	}
+	if runnerCalled {
+		t.Fatal("conversation runner was invoked for a source-less legacy goal")
+	}
+	if !deciderCalled {
+		t.Fatal("legacy goal did not reach the stable decider")
+	}
+	snapshot, err := state.GetGoalSnapshot(ctx, "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Goal.Status != core.GoalWaiting || snapshot.Goal.Reason != "legacy path" {
+		t.Fatalf("legacy goal status=%s reason=%q", snapshot.Goal.Status, snapshot.Goal.Reason)
+	}
+}
+
+func TestGoalRunnerOutcomesKeepVerificationUnderStableControl(t *testing.T) {
+	for _, status := range []agent.RunStatus{agent.RunFailed, agent.RunCancelled, agent.RunAwaitingTools, agent.RunCompleted} {
+		t.Run(string(status), func(t *testing.T) {
+			ctx := context.Background()
+			a, state, _ := fixtureActivities(t)
+			var got agent.ExecutionRequest
+			a.GoalRunner = goalRunFunc(func(_ context.Context, request agent.ExecutionRequest) (agent.RunOutcome, error) {
+				got = request
+				return agent.RunOutcome{RunID: "run-1", Status: status}, nil
+			})
+			a.Decider = deciderFunc(func(context.Context, core.DecisionContext) (core.ProposedAction, error) {
+				return core.ProposedAction{Kind: "wait", Reason: "continue stable verification"}, nil
+			})
+			if _, err := a.EvaluateGoal(ctx, "g", "work-item"); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := state.GetGoalSnapshot(ctx, "g")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Goal.Status == core.GoalVerified {
+				t.Fatalf("run outcome %s verified the goal", status)
+			}
+			if got.Work.Kind != agent.WorkGoal || got.Work.SessionID == "" || got.Work.GoalID != "g" || got.Work.WorkItemID != "work-item" || got.BaselineVersion == "" || len(got.AllowedScope) != 1 {
+				t.Fatalf("goal request lost attribution or bounds: %+v", got)
+			}
+		})
+	}
+}
+
+type cancellationProvider struct {
+	started  chan struct{}
+	observed chan struct{}
+	once     sync.Once
+}
+
+func (p *cancellationProvider) Stream(ctx context.Context, _ llm.Request) (<-chan llm.Event, <-chan error) {
+	events := make(chan llm.Event, 1)
+	errs := make(chan error)
+	go func() {
+		events <- llm.Event{Kind: llm.TextDelta, Text: "partial"}
+		p.once.Do(func() { close(p.started) })
+		<-ctx.Done()
+		close(p.observed)
+		close(events)
+		close(errs)
+	}()
+	return events, errs
+}
+
+func TestGoalActivityCancellationThroughSharedSocketNeverVerifies(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	a, state, path := fixtureActivities(t)
+	root := filepath.Dir(path)
+	socket := filepath.Join(root, "conversation.sock")
+	provider := &cancellationProvider{started: make(chan struct{}), observed: make(chan struct{})}
+	runner := agent.NewRunner(provider, agent.RunnerOptions{MaxRetries: -1})
+	serviceCtx, stopService := context.WithCancel(context.Background())
+	defer stopService()
+	svc, err := conversation.Serve(serviceCtx, conversation.Deps{Store: state, Runner: runner, ProviderName: "fixture", Model: "fixture", ProjectRoot: root, SocketPath: socket})
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	defer svc.Close()
+	a.GoalRunner = conversation.GoalSocketClient{Socket: socket}
+	activityDone := make(chan error, 1)
+	go func() { _, runErr := a.EvaluateGoal(ctx, "g", "goal-cancel-item"); activityDone <- runErr }()
+	select {
+	case <-provider.started:
+	case <-time.After(3 * time.Second):
+		cancel()
+		t.Fatal("goal agent run did not start")
+	}
+	cancel()
+	select {
+	case runErr := <-activityDone:
+		if !errors.Is(runErr, context.Canceled) {
+			t.Fatalf("activity error=%v", runErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("cancelled goal activity did not finish")
+	}
+	select {
+	case <-provider.observed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("provider did not observe cancellation")
+	}
+	snapshot, err := state.GetGoalSnapshot(context.Background(), "g")
+	if err != nil || snapshot.Goal.Status == core.GoalVerified {
+		t.Fatalf("goal status after cancel=%+v err=%v", snapshot.Goal, err)
+	}
+	transcript, err := sessionlog.Replay(root, snapshot.Goal.SourceSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var partial, terminal bool
+	for _, event := range transcript.Events {
+		if event.Type != sessionlog.EventRunEvent {
+			continue
+		}
+		var run sessionlog.RunEvent
+		raw, _ := json.Marshal(event.Data)
+		if decodeErr := json.Unmarshal(raw, &run); decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		if run.RunID == "" {
+			continue
+		}
+		if run.Kind == string(agent.EventTextDelta) {
+			partial = true
+		}
+		if run.Kind == string(agent.EventTerminal) {
+			var payload struct {
+				Status agent.RunStatus `json:"status"`
+			}
+			terminalRaw, _ := json.Marshal(run.Payload)
+			_ = json.Unmarshal(terminalRaw, &payload)
+			terminal = payload.Status == agent.RunCancelled
+		}
+	}
+	if !partial || !terminal {
+		t.Fatalf("cancelled goal stream did not persist partial/terminal: %+v", transcript.Events)
+	}
 }
 
 func TestObserveInvalidatesOldEvidenceAndVerifyCurrentDigest(t *testing.T) {

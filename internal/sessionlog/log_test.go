@@ -158,3 +158,65 @@ func TestListSortsByRecentActivity(t *testing.T) {
 		t.Fatalf("recent order: %+v", got)
 	}
 }
+
+func TestRunEventsEnforcePerRunSequenceAndReplayCursor(t *testing.T) {
+	root := t.TempDir()
+	s, err := Create(root, "stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now().UTC()
+	if _, err = Append(root, s.ID, EventRunStarted, RunStarted{RunID: "r1", WorkKind: "session", Intent: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := Append(root, s.ID, EventRunEvent, RunEvent{ID: "e1", RunID: "r1", SessionID: s.ID, RunSeq: 1, At: startedAt, Kind: "text_delta", Payload: map[string]string{"text": "a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventRunStarted, RunStarted{RunID: "r2", WorkKind: "goal", GoalID: "g1", WorkItemID: "w1", Intent: "goal work"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventRunEvent, RunEvent{ID: "e2", RunID: "r2", SessionID: s.ID, RunSeq: 1, At: startedAt.Add(time.Millisecond), Kind: "text_delta", Payload: map[string]string{"text": "b"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventRunEvent, RunEvent{ID: "e3", RunID: "r1", SessionID: s.ID, RunSeq: 2, At: startedAt.Add(2 * time.Millisecond), Kind: "terminal", Payload: map[string]string{"status": "completed"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventRunEvent, RunEvent{ID: "e4", RunID: "r1", SessionID: s.ID, RunSeq: 3, At: startedAt.Add(3 * time.Millisecond), Kind: "text_delta"}); err == nil {
+		t.Fatal("event after terminal accepted")
+	}
+	if _, err = Append(root, s.ID, EventRunEvent, RunEvent{ID: "e5", RunID: "r2", SessionID: s.ID, RunSeq: 3, At: startedAt.Add(4 * time.Millisecond), Kind: "text_delta"}); err == nil {
+		t.Fatal("run sequence gap accepted")
+	}
+	partial, err := ReplayAfter(root, s.ID, first.Seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(partial.Events) != 3 || partial.Events[0].Seq != first.Seq+1 {
+		t.Fatalf("cursor replay=%+v", partial.Events)
+	}
+	full, err := Replay(root, s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Events) != 6 {
+		t.Fatalf("full event count=%d", len(full.Events))
+	}
+}
+
+func TestRunEventsRejectMissingStartOrWrongSession(t *testing.T) {
+	root := t.TempDir()
+	s, err := Create(root, "stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventRunEvent, RunEvent{ID: "orphan", RunID: "missing", SessionID: s.ID, RunSeq: 1, At: time.Now().UTC(), Kind: "text_delta"}); err == nil {
+		t.Fatal("orphan run event accepted")
+	}
+	if _, err = Append(root, s.ID, EventRunStarted, RunStarted{RunID: "r1", WorkKind: "session", Intent: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventRunEvent, RunEvent{ID: "wrong-session", RunID: "r1", SessionID: "other", RunSeq: 1, At: time.Now().UTC(), Kind: "text_delta"}); err == nil {
+		t.Fatal("cross-session event accepted")
+	}
+}

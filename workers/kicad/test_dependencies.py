@@ -177,7 +177,7 @@ class DependencyTest(unittest.TestCase):
     def test_bridge_rejects_design_change_during_dependency_collection(self):
         collect = bridge.collect_dependencies
 
-        def collect_then_change(path, root):
+        def collect_then_change(path, root, env=None):
             result = collect(path, root)
             Path(path).write_text(Path(path).read_text(encoding='utf-8') + '\n', encoding='utf-8')
             return result

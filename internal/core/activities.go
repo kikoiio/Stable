@@ -9,6 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"stable/internal/agent"
+	"stable/internal/candidate"
+	"stable/internal/llm"
 )
 
 type CapabilityCaller interface {
@@ -20,14 +24,20 @@ type ActionExecutor interface {
 }
 
 type Activities struct {
-	State     StateStore
-	Artifacts ArtifactStore
-	Kicad     CapabilityCaller
-	Computer  CapabilityCaller
-	Decider   DecisionMaker
-	Policy    ActionPolicy
-	Executor  ActionExecutor
-	Refresher DependencyRefresher
+	State      StateStore
+	Artifacts  ArtifactStore
+	Kicad      CapabilityCaller
+	Computer   CapabilityCaller
+	Decider    DecisionMaker
+	Policy     ActionPolicy
+	Executor   ActionExecutor
+	Refresher  DependencyRefresher
+	GoalRunner GoalRunClient
+	RunRoot    string
+}
+
+type GoalRunClient interface {
+	RunGoal(context.Context, agent.ExecutionRequest) (agent.RunOutcome, error)
 }
 
 // evidenceInvalidationRule is recorded in every new evidence row's provenance.
@@ -67,7 +77,10 @@ func (a *Activities) ObserveGoal(ctx context.Context, goalID, eventID string) (O
 		}
 		g.CurrentArtifactID = current
 	}
-	payload := requestPayload(g, nil)
+	payload, err := a.requestPayload(g, nil)
+	if err != nil {
+		return out, err
+	}
 	design, err := a.Kicad.Call(ctx, CapabilityRequest{ProtocolVersion: 1, OperationID: uniqueID("inspect"), Kind: "inspect_design", GoalID: goalID, ExpectedArtifactID: current, Payload: payload})
 	if err != nil {
 		return out, err
@@ -77,7 +90,11 @@ func (a *Activities) ObserveGoal(ctx context.Context, goalID, eventID string) (O
 	}
 	computerFacts := map[string]any{"status": "absent", "session_id": snap.Session.ID, "generation": snap.Session.Generation}
 	if snap.Session.Generation > 0 {
-		computer, err := a.Computer.Call(ctx, CapabilityRequest{ProtocolVersion: 1, OperationID: uniqueID("computer-observe"), Kind: "computer.observe", GoalID: goalID, ExpectedArtifactID: current, Payload: requestPayload(g, &snap.Session)})
+		computerPayload, payloadErr := a.computerRequestPayload(g, &snap.Session)
+		if payloadErr != nil {
+			return out, payloadErr
+		}
+		computer, err := a.Computer.Call(ctx, CapabilityRequest{ProtocolVersion: 1, OperationID: uniqueID("computer-observe"), Kind: "computer.observe", GoalID: goalID, ExpectedArtifactID: current, Payload: computerPayload})
 		if err == nil {
 			var observed ComputerObservation
 			if json.Unmarshal(computer.Postcondition, &observed) == nil {
@@ -161,12 +178,20 @@ func (a *Activities) VerifyGoal(ctx context.Context, goalID string) (Verificatio
 			}
 		}
 		checkID := uniqueID("erc")
-		report := filepath.Join(g.AllowedRoot, "reports", fmt.Sprintf("erc-v%d-d%d-%s-%s.json", revision, token.DependencyRevision, checkID, before))
-		if err = os.MkdirAll(filepath.Dir(report), 0755); err != nil {
-			return out, false, err
+		basePayload, payloadErr := a.requestPayload(g, nil)
+		if payloadErr != nil {
+			return out, false, payloadErr
 		}
 		var props map[string]any
-		if err = json.Unmarshal(requestPayload(g, nil), &props); err != nil {
+		if err = json.Unmarshal(basePayload, &props); err != nil {
+			return out, false, err
+		}
+		checkRunRoot, ok := props["run_root"].(string)
+		if !ok || checkRunRoot == "" {
+			return out, false, errors.New("private check run root is missing")
+		}
+		report := filepath.Join(checkRunRoot, "checks", goalID, fmt.Sprintf("erc-v%d-d%d-%s-%s.json", revision, token.DependencyRevision, checkID, before))
+		if err = os.MkdirAll(filepath.Dir(report), 0755); err != nil {
 			return out, false, err
 		}
 		props["report_path"] = report
@@ -360,7 +385,11 @@ func ercThreshold(item Criterion) int {
 // pass) when the checker identity is absent from the observation.
 func (a *Activities) verifyConnection(ctx context.Context, goalID string, g Goal, item Criterion, digest string, revision int, dependency DependencySnapshot) (Evidence, error) {
 	empty := Evidence{}
-	design, err := a.Kicad.Call(ctx, CapabilityRequest{ProtocolVersion: 1, OperationID: uniqueID("inspect"), Kind: "inspect_design", GoalID: goalID, ExpectedArtifactID: digest, Payload: requestPayload(g, nil)})
+	payload, err := a.requestPayload(g, nil)
+	if err != nil {
+		return empty, err
+	}
+	design, err := a.Kicad.Call(ctx, CapabilityRequest{ProtocolVersion: 1, OperationID: uniqueID("inspect"), Kind: "inspect_design", GoalID: goalID, ExpectedArtifactID: digest, Payload: payload})
 	if err != nil {
 		return empty, err
 	}
@@ -432,9 +461,28 @@ func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (
 		}
 		snap = refreshed.Snapshot
 	}
+	setWaitingBeforeObservation := func(reason string) {
+		_, _ = a.State.UpdateStatus(ctx, goalID, snap.Goal.Revision, GoalWaiting, reason)
+	}
 	for _, action := range snap.Actions {
+		if action.Status == "awaiting_permission" {
+			setWaitingBeforeObservation("waiting for user permission to continue the isolated candidate action")
+			return finish(false, nil)
+		}
+		if action.Status == "candidate_ready" || action.Status == "awaiting_accept" {
+			setWaitingBeforeObservation("candidate is ready for user review and acceptance")
+			return finish(false, nil)
+		}
 		if action.Status == "prepared" || action.Status == "outcome_unknown" {
-			_, _ = a.Executor.ExecuteOrReconcile(ctx, action.DecisionID)
+			updated, executeErr := a.Executor.ExecuteOrReconcile(ctx, action.DecisionID)
+			if executeErr == nil && updated.Status == "awaiting_permission" {
+				setWaitingBeforeObservation("waiting for user permission to continue the isolated candidate action")
+				return finish(false, nil)
+			}
+			if executeErr == nil && (updated.Status == "candidate_ready" || updated.Status == "awaiting_accept") {
+				setWaitingBeforeObservation("candidate is ready for user review and acceptance")
+				return finish(false, nil)
+			}
 		}
 	}
 	observed, err := a.ObserveGoal(ctx, goalID, eventID)
@@ -500,6 +548,41 @@ func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (
 		{Name: "kicad.repair_connection", PostconditionKind: "sensor.connection_present"},
 		{Name: "computer.ensure_open", PostconditionKind: "computer.open"},
 	}, Conversation: conversation}
+	// Session-owned goals may use the conversation agent before the stable
+	// decider. Legacy goals have no source session and must retain their
+	// existing decider/coordinator path even when the worker also serves chat.
+	if a.GoalRunner != nil && snap.Goal.SourceSessionID != "" {
+		intent, err := goalWorkIntent(ctxForModel)
+		if err != nil {
+			return finish(false, err)
+		}
+		permissionBounds, _ := json.Marshal(snap.Goal.AllowedCapabilities)
+		request := agent.ExecutionRequest{
+			RunID:  uniqueID("goal-run"),
+			Work:   agent.WorkRef{Kind: agent.WorkGoal, SessionID: snap.Goal.SourceSessionID, GoalID: goalID, WorkItemID: eventID},
+			Intent: intent,
+			Messages: []llm.Message{
+				{Role: "system", Content: "You are Stable's general agent. Explain the next useful work for the goal. Do not claim to have modified files, executed tools, or verified the goal. Stable owns all tools and verification."},
+				{Role: "user", Content: intent},
+			},
+			BaselineVersion:  observed.ArtifactID,
+			AllowedScope:     []string{snap.Goal.AllowedRoot},
+			ResourceBounds:   json.RawMessage(`{}`),
+			PermissionBounds: permissionBounds,
+		}
+		outcome, runErr := a.GoalRunner.RunGoal(ctx, request)
+		if runErr != nil {
+			if ctx.Err() != nil {
+				return finish(false, ctx.Err())
+			}
+			setStatus(GoalWaiting, "goal agent run failed")
+			return finish(false, nil)
+		}
+		if outcome.Status != agent.RunCompleted {
+			setStatus(GoalWaiting, "goal agent run ended: "+string(outcome.Status))
+			return finish(false, nil)
+		}
+	}
 	var proposal ProposedAction
 	var modelRunID string
 	var modelCallID string
@@ -574,6 +657,14 @@ func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (
 			setStatus(GoalWaiting, "action outcome unknown: "+err.Error())
 			return finish(false, nil)
 		}
+		if action.Status == "candidate_ready" || action.Status == "awaiting_accept" {
+			setStatus(GoalWaiting, "candidate is ready for user review and acceptance")
+			return finish(false, nil)
+		}
+		if action.Status == "awaiting_permission" {
+			setStatus(GoalWaiting, "waiting for user permission to continue the isolated candidate action")
+			return finish(false, nil)
+		}
 		if action.Status != "applied" {
 			setStatus(GoalNeedsHuman, action.Reason)
 			return finish(false, nil)
@@ -601,7 +692,11 @@ func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (
 		if snap.Session.Generation > 0 {
 			requestKind = "computer.recover"
 		}
-		result, err := a.Computer.Call(ctx, CapabilityRequest{ProtocolVersion: 1, OperationID: action.ID, Kind: requestKind, GoalID: goalID, ExpectedArtifactID: observed.ArtifactID, Payload: requestPayload(snap.Goal, &snap.Session)})
+		computerPayload, payloadErr := a.computerRequestPayload(snap.Goal, &snap.Session)
+		if payloadErr != nil {
+			return finish(false, payloadErr)
+		}
+		result, err := a.Computer.Call(ctx, CapabilityRequest{ProtocolVersion: 1, OperationID: action.ID, Kind: requestKind, GoalID: goalID, ExpectedArtifactID: observed.ArtifactID, Payload: computerPayload})
 		if err != nil {
 			_ = a.State.SetActionResult(ctx, action.ID, "outcome_unknown", "", err.Error())
 			return finish(false, nil)
@@ -644,6 +739,21 @@ func (a *Activities) EvaluateGoal(ctx context.Context, goalID, eventID string) (
 	return finish(false, nil)
 }
 
+func goalWorkIntent(in DecisionContext) (string, error) {
+	payload := struct {
+		Objective    string           `json:"objective"`
+		Criteria     []Criterion      `json:"criteria"`
+		Observation  json.RawMessage  `json:"observation"`
+		Evidence     []Evidence       `json:"current_evidence"`
+		Conversation []SessionMessage `json:"conversation,omitempty"`
+	}{in.Goal.Objective, in.Goal.Criteria, in.Observation.Facts, in.ValidEvidence, in.Conversation}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return "Work on this Stable goal item. Summarize useful next work from the current facts; do not claim execution or verification.\n" + string(encoded), nil
+}
+
 // finishIfVerified reports workflow completion only when the committed round
 // was current and passed; a stale round changes nothing and leaves the next
 // wake to decide.
@@ -675,13 +785,77 @@ func (a *Activities) WaitingForHuman(ctx context.Context, goalID string) (bool, 
 	return found, err
 }
 
-func requestPayload(g Goal, session *ComputerSession) json.RawMessage {
-	data := map[string]any{"path": g.ArtifactPath, "allowed_root": g.AllowedRoot}
+func (a *Activities) requestPayload(g Goal, session *ComputerSession) (json.RawMessage, error) {
+	runRoot := a.runRoot(g)
+	candidateRoot := filepath.Join(runRoot, ".stable-bridge-candidates", "inspect-"+g.ID)
+	privateRunRoot := filepath.Join(runRoot, ".stable-bridge-runs", g.ID)
+	for _, path := range []string{candidateRoot, privateRunRoot} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			return nil, err
+		}
+		if err := os.Chmod(path, 0700); err != nil {
+			return nil, err
+		}
+	}
+	data := map[string]any{"path": g.ArtifactPath, "allowed_root": g.AllowedRoot, "project_root": g.AllowedRoot, "candidate_root": candidateRoot, "run_root": privateRunRoot}
 	if session != nil {
 		data["session"] = session
 	}
-	b, _ := json.Marshal(data)
-	return b
+	b, err := json.Marshal(data)
+	return b, err
+}
+
+func (a *Activities) computerRequestPayload(g Goal, session *ComputerSession) (json.RawMessage, error) {
+	formalRoot, err := filepath.Abs(g.AllowedRoot)
+	if err != nil {
+		return nil, err
+	}
+	_, baseline, err := candidate.BuildManifest(formalRoot)
+	if err != nil {
+		return nil, err
+	}
+	candidateID := "computer-" + g.ID + "-" + baseline[:12]
+	candidateParent := filepath.Join(filepath.Dir(formalRoot), ".stable-candidates")
+	candidateRoot := filepath.Join(candidateParent, candidateID)
+	if _, err = os.Lstat(candidateRoot); os.IsNotExist(err) {
+		created, createErr := candidate.CreateCandidate(candidateID, formalRoot, candidateParent)
+		if createErr != nil {
+			return nil, createErr
+		}
+		candidateRoot = created.CandidateRoot
+	} else if err != nil {
+		return nil, err
+	} else if _, _, err = candidate.BuildManifest(candidateRoot); err != nil {
+		return nil, err
+	}
+	cleanArtifact, err := filepath.Rel(formalRoot, g.ArtifactPath)
+	if err != nil {
+		return nil, err
+	}
+	cleanArtifact, err = candidate.CleanRelative(cleanArtifact)
+	if err != nil {
+		return nil, err
+	}
+	target := filepath.Join(candidateRoot, cleanArtifact)
+	runRoot := filepath.Join(a.runRoot(g), ".stable-computer-runs", g.ID)
+	if err = os.MkdirAll(runRoot, 0700); err != nil {
+		return nil, err
+	}
+	if err = os.Chmod(runRoot, 0700); err != nil {
+		return nil, err
+	}
+	data := map[string]any{"path": target, "allowed_root": candidateRoot, "project_root": formalRoot, "candidate_root": candidateRoot, "run_root": runRoot}
+	if session != nil {
+		data["session"] = session
+	}
+	return json.Marshal(data)
+}
+
+func (a *Activities) runRoot(g Goal) string {
+	if a.RunRoot != "" {
+		return a.RunRoot
+	}
+	return filepath.Dir(g.AllowedRoot)
 }
 
 func uniqueID(prefix string) string { return fmt.Sprintf("%s-%d", prefix, time.Now().UTC().UnixNano()) }

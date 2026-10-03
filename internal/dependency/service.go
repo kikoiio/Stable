@@ -3,11 +3,13 @@ package dependency
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"stable/internal/core"
 	"stable/internal/execution"
 	"stable/internal/goalrun"
+	"stable/internal/sandbox"
 )
 
 type State interface {
@@ -25,7 +27,9 @@ type Refresher struct {
 }
 
 // NewKiCadRefresher builds the single shared dependency rule using the same
-// Python capability bridge and goal wake path as the worker runtime.
+// Python capability bridge and goal wake path as the worker runtime. The
+// bridge executes inside the verified Linux sandbox; without one dependency
+// collection fails closed.
 func NewKiCadRefresher(state State, runRoot, projectRoot, temporalAddress string) (*Refresher, error) {
 	project, err := filepath.Abs(projectRoot)
 	if err != nil {
@@ -35,8 +39,12 @@ func NewKiCadRefresher(state State, runRoot, projectRoot, temporalAddress string
 	if err != nil {
 		return nil, err
 	}
-	bridge := &execution.PythonBridge{Script: filepath.Join(project, "workers/kicad/bridge.py"), AllowedRoot: root}
-	return &Refresher{State: state, Collector: KiCadCollector{Kicad: bridge}, Wake: func(ctx context.Context, goalID, eventID string) error {
+	helper, helperErr := os.Executable()
+	if helperErr != nil {
+		helper = ""
+	}
+	bridge := &execution.PythonBridge{Script: filepath.Join(project, "workers/kicad/bridge.py"), AllowedRoot: root, Sandbox: sandbox.LinuxManager{}, ProfileFor: execution.SandboxProfileFor(root, helper)}
+	return &Refresher{State: state, Collector: KiCadCollector{Kicad: bridge, RunRoot: root}, Wake: func(ctx context.Context, goalID, eventID string) error {
 		return goalrun.WakeGoal(ctx, temporalAddress, goalID, eventID)
 	}}, nil
 }

@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 
 from schematic import authorized, digest, inspect, repair
-from erc import DEFAULT_MAX_VIOLATIONS, run_erc
+from erc import DEFAULT_MAX_VIOLATIONS, kicad_environment, run_erc
 from dependencies import collect_dependencies
 
 
@@ -30,6 +30,9 @@ def handle(request: dict) -> dict:
     payload = request.get('payload') or {}
     path = Path(payload.get('path', ''))
     root = Path(payload.get('allowed_root', ''))
+    # Private run directory for KiCad user state and reports; without one the
+    # allowed root must be writable (legacy direct calls only).
+    state_root = Path(payload['run_root']) if payload.get('run_root') else None
     if not payload.get('path') or not payload.get('allowed_root') or not authorized(path, root):
         result['status'] = 'blocked'
         result['error_code'] = 'target_outside_root'
@@ -41,7 +44,8 @@ def handle(request: dict) -> dict:
         result['postcondition'] = inspect(path)
     elif kind == 'kicad.describe_dependencies':
         before = digest(path)
-        dependencies = collect_dependencies(path, root)
+        env = kicad_environment(state_root) if state_root else None
+        dependencies = collect_dependencies(path, root, env=env)
         after = digest(path)
         result['actual_artifact_id'] = after
         result['postcondition'] = {'dependencies': dependencies}
@@ -63,7 +67,7 @@ def handle(request: dict) -> dict:
             result['status'] = 'blocked'
             result['error_code'] = 'invalid_max_violations'
         else:
-            status, actual, facts, paths = run_erc(path, root, report, threshold)
+            status, actual, facts, paths = run_erc(path, root, report, threshold, state_root=state_root)
             result.update(status=status, actual_artifact_id=actual, postcondition=facts, evidence_paths=paths)
     return result
 

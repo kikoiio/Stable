@@ -10,6 +10,7 @@ import (
 
 	"stable/internal/artifact"
 	"stable/internal/core"
+	"stable/internal/permission"
 	"stable/internal/policy"
 	"stable/internal/store"
 )
@@ -23,8 +24,14 @@ type lostReceiptBridge struct {
 
 func (b *lostReceiptBridge) Call(ctx context.Context, r core.CapabilityRequest) (core.CapabilityResult, error) {
 	result := core.CapabilityResult{ProtocolVersion: 1, OperationID: r.OperationID}
+	var payload struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(r.Payload, &payload); err != nil {
+		return result, err
+	}
 	if r.Kind == "inspect_design" {
-		data, err := os.ReadFile(b.path)
+		data, err := os.ReadFile(payload.Path)
 		if err != nil {
 			return result, err
 		}
@@ -38,7 +45,7 @@ func (b *lostReceiptBridge) Call(ctx context.Context, r core.CapabilityRequest) 
 	}
 	b.preparedSeen = len(snap.Actions) == 1 && snap.Actions[0].Status == "prepared"
 	b.executes++
-	if err = os.WriteFile(b.path, []byte("fixed"), 0644); err != nil {
+	if err = os.WriteFile(payload.Path, []byte("fixed"), 0644); err != nil {
 		return result, err
 	}
 	return result, ErrOutcomeUnknown
@@ -79,7 +86,7 @@ func TestPreparedBeforeEffectAndReconcileLostReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	bridge := &lostReceiptBridge{store: s, path: path}
-	c := Coordinator{Store: s, Artifacts: art, Policy: policy.Policy{Declared: map[string]core.CapabilityDescriptor{"repair": {Name: "repair"}}}, Capabilities: map[string]Caller{"repair": bridge}, Postconditions: map[string]json.RawMessage{"repair": json.RawMessage(`{"connected":true}`)}}
+	c := Coordinator{Store: s, Artifacts: art, Policy: policy.Policy{Declared: map[string]core.CapabilityDescriptor{"repair": {Name: "repair"}}}, Capabilities: map[string]Caller{"repair": bridge}, Postconditions: map[string]json.RawMessage{"repair": json.RawMessage(`{"connected":true}`)}, Permissions: allowPermissionGate{}}
 	a, err := c.ExecuteOrReconcile(ctx, "d")
 	if !errors.Is(err, ErrOutcomeUnknown) || a.Status != "outcome_unknown" {
 		t.Fatalf("first action %+v %v", a, err)
@@ -88,11 +95,15 @@ func TestPreparedBeforeEffectAndReconcileLostReceipt(t *testing.T) {
 		t.Fatal("effect occurred before prepared record")
 	}
 	a, err = c.ExecuteOrReconcile(ctx, "d")
-	if err != nil || a.Status != "applied" {
+	if err != nil || a.Status != "candidate_ready" {
 		t.Fatalf("reconcile %+v %v", a, err)
 	}
 	if bridge.executes != 1 {
 		t.Fatalf("executed %d times", bridge.executes)
+	}
+	formal, err := os.ReadFile(path)
+	if err != nil || string(formal) != "fault" {
+		t.Fatalf("formal project changed before acceptance: %q %v", formal, err)
 	}
 	snap, err := s.GetGoalSnapshot(ctx, "g")
 	if err != nil || len(snap.Actions) != 1 {
@@ -102,6 +113,14 @@ func TestPreparedBeforeEffectAndReconcileLostReceipt(t *testing.T) {
 
 // countingBridge records capability calls and never changes the artifact.
 type countingBridge struct{ calls int }
+
+type allowPermissionGate struct{}
+
+func (allowPermissionGate) Authorize(_ context.Context, a permission.Authority, o permission.Operation) (permission.PermissionDecision, error) {
+	scope, _ := a.ScopeDigest()
+	op, _ := o.Digest()
+	return permission.PermissionDecision{Kind: permission.DecisionAllow, Reason: "test approval", ScopeDigest: scope, OperationDigest: op}, nil
+}
 
 func (b *countingBridge) Call(_ context.Context, r core.CapabilityRequest) (core.CapabilityResult, error) {
 	b.calls++
@@ -140,7 +159,7 @@ func staleGuardFixture(t *testing.T) (context.Context, *store.Store, *countingBr
 		t.Fatal(err)
 	}
 	bridge := &countingBridge{}
-	c := Coordinator{Store: s, Artifacts: art, Policy: policy.Policy{Declared: map[string]core.CapabilityDescriptor{"repair": {Name: "repair"}}}, Capabilities: map[string]Caller{"repair": bridge}, Postconditions: map[string]json.RawMessage{"repair": json.RawMessage(`{"connected":true}`)}}
+	c := Coordinator{Store: s, Artifacts: art, Policy: policy.Policy{Declared: map[string]core.CapabilityDescriptor{"repair": {Name: "repair"}}}, Capabilities: map[string]Caller{"repair": bridge}, Postconditions: map[string]json.RawMessage{"repair": json.RawMessage(`{"connected":true}`)}, Permissions: allowPermissionGate{}}
 	return ctx, s, bridge, c, path, before
 }
 
@@ -215,5 +234,27 @@ func TestStaleDecisionCriteriaGuard(t *testing.T) {
 	snap, err := s.GetGoalSnapshot(ctx, "g")
 	if err != nil || len(snap.Actions) != 1 {
 		t.Fatalf("actions %+v %v", snap.Actions, err)
+	}
+}
+
+func TestLegacyActionFailsClosedWithoutPermissionGate(t *testing.T) {
+	ctx, s, bridge, c, path, before := staleGuardFixture(t)
+	snap, _ := s.GetGoalSnapshot(ctx, "g")
+	revision, dependencyRevision := snap.Goal.CriteriaRevision, snap.Goal.DependencyRevision
+	d := core.Decision{ID: "d-no-permission-gate", AgentID: "agent-g", ObservationID: "o", Proposal: core.ProposedAction{Kind: "execute_capability", Capability: "repair", Target: path, Parameters: json.RawMessage(`{}`), ExpectedArtifactID: snap.Goal.CurrentArtifactID, Reason: "repair"}, CriteriaRevision: &revision, DependencyRevision: &dependencyRevision}
+	if err := s.RecordDecision(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	c.Permissions = nil
+	a, err := c.ExecuteOrReconcile(ctx, "d-no-permission-gate")
+	if err == nil || a.Status == "candidate_ready" {
+		t.Fatalf("action was not blocked by missing permission gate: %+v %v", a, err)
+	}
+	formal, readErr := os.ReadFile(path)
+	if readErr != nil || string(formal) != string(before) {
+		t.Fatalf("formal project changed: %q %v", formal, readErr)
+	}
+	if bridge.calls != 1 {
+		t.Fatalf("expected only pre-effect inspection, calls=%d", bridge.calls)
 	}
 }

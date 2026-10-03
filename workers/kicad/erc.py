@@ -53,12 +53,16 @@ def kicad_cli_version(env: dict[str, str]) -> str | None:
     return version or None
 
 
-def run_erc(path: Path, root: Path, report: Path, max_violations: int = DEFAULT_MAX_VIOLATIONS) -> tuple[str, str, dict, list[str]]:
+def run_erc(path: Path, root: Path, report: Path, max_violations: int = DEFAULT_MAX_VIOLATIONS, state_root: Path | None = None) -> tuple[str, str, dict, list[str]]:
     if not authorized(path, root):
         return 'blocked', '', {'reason': 'design outside allowed root'}, []
-    if not report.resolve().is_relative_to(root.resolve()):
-        return 'blocked', digest(path), {'reason': 'report outside allowed root'}, []
-    env = kicad_environment(root)
+    # KiCad user state and the report belong to the private run directory so
+    # the project root can stay read-only; legacy callers without a separate
+    # state root keep both under the allowed root.
+    state = Path(state_root) if state_root else root
+    if not report.resolve().is_relative_to(state.resolve()):
+        return 'blocked', digest(path), {'reason': 'report outside the private run root'}, []
+    env = kicad_environment(state)
     version = kicad_cli_version(env)
     if version is None:
         return 'blocked', digest(path), {'reason': 'kicad-cli version unavailable; result not verifiable'}, []

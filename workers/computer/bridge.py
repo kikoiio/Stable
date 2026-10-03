@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -93,6 +94,19 @@ def accept_first_run_dialog(display: str, window_id: int) -> None:
         x11.XCloseDisplay(connection)
 
 
+def import_tool() -> str | None:
+    """Resolve a screenshot tool that is a real file inside the sandbox.
+
+    /usr/bin/import is usually a symlink through /etc/alternatives, which the
+    minimal sandbox does not mount; prefer the versioned real binaries.
+    """
+    for name in ('import-im7.q16', 'import-im7', 'import-im6.q16', 'import-im6', 'import'):
+        candidate = shutil.which(name)
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def observation(root: Path, path: Path, handle: dict, capture: bool = True) -> dict:
     session_id = handle.get('session_id', '')
     generation = int(handle.get('generation', 0))
@@ -106,13 +120,15 @@ def observation(root: Path, path: Path, handle: dict, capture: bool = True) -> d
     identity = window(root, display, path.stem) if alive else ''
     screenshot = ''
     if alive and identity and capture:
-        screen_dir = root / 'screenshots'
-        screen_dir.mkdir(parents=True, exist_ok=True)
-        safe_id = re.sub(r'[^A-Za-z0-9_.-]', '_', session_id)
-        target = screen_dir / f'{safe_id}-{generation}-{time.time_ns()}.png'
-        result = subprocess.run(['import', '-window', 'root', str(target)], env=x_env(root, display), capture_output=True, timeout=10)
-        if result.returncode == 0 and target.is_file() and target.stat().st_size > 0:
-            screenshot = str(target)
+        tool = import_tool()
+        if tool:
+            screen_dir = root / 'screenshots'
+            screen_dir.mkdir(parents=True, exist_ok=True)
+            safe_id = re.sub(r'[^A-Za-z0-9_.-]', '_', session_id)
+            target = screen_dir / f'{safe_id}-{generation}-{time.time_ns()}.png'
+            result = subprocess.run([tool, '-window', 'root', str(target)], env=x_env(root, display), capture_output=True, timeout=10)
+            if result.returncode == 0 and target.is_file() and target.stat().st_size > 0:
+                screenshot = str(target)
     state = 'open' if alive and identity and (not capture or screenshot) else 'stale'
     return {
         'session_id': session_id,
@@ -154,8 +170,12 @@ def start(root: Path, path: Path, session_id: str, generation: int) -> dict:
             continue
         candidate = f':{number}'
         with (logs / f'xvfb-{generation}.log').open('ab') as output:
-            process = subprocess.Popen(['Xvfb', candidate, '-screen', '0', '1280x800x24', '-nolisten', 'tcp'],
-                                       stdout=output, stderr=output, start_new_session=True)
+            # GLX is disabled: inside the minimal sandbox the vendor EGL stack
+            # segfaults Xvfb during GL probing, and headless KiCad does not
+            # need the extension.
+            process = subprocess.Popen(['Xvfb', candidate, '-screen', '0', '1280x800x24', '-nolisten', 'tcp',
+                                        '-extension', 'GLX'],
+                                       stdout=output, stderr=output)
         for _ in range(30):
             if process.poll() is not None:
                 # Xvfb died (e.g. another session won the race for this
@@ -171,8 +191,7 @@ def start(root: Path, path: Path, session_id: str, generation: int) -> dict:
         raise RuntimeError('unable to start Xvfb')
     env = x_env(root, display)
     with (logs / f'eeschema-{generation}.log').open('ab') as output:
-        gui = subprocess.Popen(['eeschema', str(path.resolve())], env=env, stdout=output, stderr=output,
-                               start_new_session=True)
+        gui = subprocess.Popen(['eeschema', str(path.resolve())], env=env, stdout=output, stderr=output)
     handle = {
         'session_id': session_id,
         'generation': generation,
@@ -188,7 +207,13 @@ def start(root: Path, path: Path, session_id: str, generation: int) -> dict:
             return handle
         seen = subprocess.run(['xwininfo', '-root', '-tree'], env=env, text=True, capture_output=True, timeout=5)
         for line in seen.stdout.splitlines():
-            if ('配置 KiCad 设置路径' in line or '配置全局符号库表' in line) and 'eeschema' in line:
+            # The first-run dialogs appear in the guest locale: Chinese under
+            # the developer desktop, English inside the locale-less sandbox.
+            # The eeschema "Information" dialog is the OpenGL software-
+            # rendering fallback notice, expected under the GLX-less Xvfb.
+            if ('配置 KiCad 设置路径' in line or '配置全局符号库表' in line
+                    or 'Configure KiCad Settings Path' in line or 'Configure Global Symbol Library Table' in line
+                    or '"Information"' in line) and 'eeschema' in line:
                 match = re.search(r'0x[0-9a-fA-F]+', line)
                 if match and match.group(0) not in accepted:
                     accept_first_run_dialog(display, int(match.group(0), 16))
@@ -198,8 +223,10 @@ def start(root: Path, path: Path, session_id: str, generation: int) -> dict:
         time.sleep(0.15)
     snapshot = subprocess.run(['xwininfo', '-root', '-tree'], env=env, text=True, capture_output=True, timeout=5)
     (logs / f'windows-{generation}.log').write_text(snapshot.stdout + '\n' + snapshot.stderr)
-    subprocess.run(['import', '-window', 'root', str(logs / f'failed-{generation}.png')],
-                   env=env, capture_output=True, timeout=10)
+    tool = import_tool()
+    if tool:
+        subprocess.run([tool, '-window', 'root', str(logs / f'failed-{generation}.png')],
+                       env=env, capture_output=True, timeout=10)
     stop(handle)
     raise RuntimeError('KiCad schematic window did not open')
 
@@ -214,9 +241,10 @@ def handle(request: dict) -> dict:
         result['error_code'] = 'protocol_error'
         return result
     payload = request.get('payload') or {}
-    root = Path(payload.get('allowed_root', ''))
+    allowed_root = Path(payload.get('allowed_root', ''))
     path = Path(payload.get('path', ''))
-    if not payload.get('allowed_root') or not payload.get('path') or not inside(path, root):
+    root = Path(payload.get('run_root', ''))
+    if not payload.get('allowed_root') or not payload.get('path') or not payload.get('run_root') or not inside(path, allowed_root):
         result['error_code'] = 'target_outside_root'
         return result
     kind = request.get('kind')
@@ -262,14 +290,54 @@ def handle(request: dict) -> dict:
     return result
 
 
+def serve_session(path: str) -> None:
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection.connect(path)
+    with connection:
+        channel = connection.makefile('rwb', buffering=0)
+        try:
+            serve_session_stream(channel, channel)
+        finally:
+            channel.close()
+
+
+def serve_session_stream(reader, writer) -> None:
+    writer.write(b'{"ready":true}\n')
+    while True:
+        line = reader.readline((1 << 20) + 1)
+        if not line:
+            return
+        if len(line) > (1 << 20):
+            raise RuntimeError('computer session request exceeds limit')
+        request = json.loads(line)
+        try:
+            response = handle(request)
+        except Exception as exc:
+            response = {
+                'protocol_version': 1,
+                'operation_id': request.get('operation_id', ''),
+                'status': 'blocked', 'actual_artifact_id': '', 'evidence_paths': [],
+                'postcondition': {'reason': str(exc)}, 'error_code': 'computer_exception',
+            }
+        writer.write((json.dumps(response, ensure_ascii=False) + '\n').encode('utf-8'))
+
+
 if __name__ == '__main__':
-    try:
-        request = json.load(sys.stdin)
-        print(json.dumps(handle(request), ensure_ascii=False), flush=True)
-    except Exception as exc:
-        print(json.dumps({
-            'protocol_version': 1,
-            'operation_id': request.get('operation_id', '') if 'request' in locals() else '',
-            'status': 'blocked', 'actual_artifact_id': '', 'evidence_paths': [],
-            'postcondition': {'reason': str(exc)}, 'error_code': 'computer_exception',
-        }), flush=True)
+    control_socket = os.environ.get('STABLE_SESSION_SOCKET', '')
+    if control_socket:
+        try:
+            serve_session(control_socket)
+        except Exception as exc:
+            print(json.dumps({'error_code': 'session_control_failed', 'reason': str(exc)}), file=sys.stderr, flush=True)
+            raise SystemExit(1)
+    else:
+        try:
+            request = json.load(sys.stdin)
+            print(json.dumps(handle(request), ensure_ascii=False), flush=True)
+        except Exception as exc:
+            print(json.dumps({
+                'protocol_version': 1,
+                'operation_id': request.get('operation_id', '') if 'request' in locals() else '',
+                'status': 'blocked', 'actual_artifact_id': '', 'evidence_paths': [],
+                'postcondition': {'reason': str(exc)}, 'error_code': 'computer_exception',
+            }), flush=True)
