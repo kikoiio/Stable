@@ -92,8 +92,20 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
+	if version < 7 {
+		if err = migrateV7(db); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	if version < 8 {
 		if err = migrateV8(db); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if version < 9 {
+		if err = migrateV9(db); err != nil {
 			db.Close()
 			return nil, err
 		}
@@ -121,6 +133,41 @@ func migrateV10(db *sql.DB) error {
 	return err
 }
 
+func migrateV9(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`ALTER TABLE actions RENAME TO actions_v8`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`CREATE TABLE actions (
+		id TEXT PRIMARY KEY,
+		decision_id TEXT NOT NULL REFERENCES decisions(id),
+		expected_artifact_id TEXT NOT NULL,
+		desired_postcondition_json TEXT NOT NULL,
+		status TEXT NOT NULL CHECK(status IN ('prepared','outcome_unknown','applied','verified','blocked','candidate_ready','awaiting_accept','awaiting_permission')),
+		result_artifact_id TEXT NOT NULL DEFAULT '',
+		reason TEXT NOT NULL DEFAULT ''
+	)`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO actions(id,decision_id,expected_artifact_id,desired_postcondition_json,status,result_artifact_id,reason) SELECT id,decision_id,expected_artifact_id,desired_postcondition_json,status,result_artifact_id,reason FROM actions_v8`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DROP TABLE actions_v8`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`CREATE INDEX actions_status ON actions(status)`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`PRAGMA user_version=9`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func migrateV8(db *sql.DB) error {
 	if !hasColumn(db, "approval_requests", "authority_json") {
 		if _, err := db.Exec(`ALTER TABLE approval_requests ADD COLUMN authority_json TEXT NOT NULL DEFAULT ''`); err != nil {
@@ -143,6 +190,41 @@ func migrateV6(db *sql.DB) error {
 	}
 	defer tx.Rollback()
 	if _, err = tx.Exec(`PRAGMA user_version=6`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateV7(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`ALTER TABLE actions RENAME TO actions_v6`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`CREATE TABLE actions (
+		id TEXT PRIMARY KEY,
+		decision_id TEXT NOT NULL REFERENCES decisions(id),
+		expected_artifact_id TEXT NOT NULL,
+		desired_postcondition_json TEXT NOT NULL,
+		status TEXT NOT NULL CHECK(status IN ('prepared','outcome_unknown','applied','verified','blocked','candidate_ready','awaiting_accept')),
+		result_artifact_id TEXT NOT NULL DEFAULT '',
+		reason TEXT NOT NULL DEFAULT ''
+	)`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO actions(id,decision_id,expected_artifact_id,desired_postcondition_json,status,result_artifact_id,reason) SELECT id,decision_id,expected_artifact_id,desired_postcondition_json,status,result_artifact_id,reason FROM actions_v6`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DROP TABLE actions_v6`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`CREATE INDEX actions_status ON actions(status)`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`PRAGMA user_version=7`); err != nil {
 		return err
 	}
 	return tx.Commit()

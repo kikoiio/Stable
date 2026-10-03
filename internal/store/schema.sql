@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS actions (
     decision_id TEXT NOT NULL REFERENCES decisions(id),
     expected_artifact_id TEXT NOT NULL,
     desired_postcondition_json TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('prepared','outcome_unknown','applied','verified','blocked')),
+    status TEXT NOT NULL CHECK(status IN ('prepared','outcome_unknown','applied','verified','blocked','candidate_ready','awaiting_accept','awaiting_permission')),
     result_artifact_id TEXT NOT NULL DEFAULT '',
     reason TEXT NOT NULL DEFAULT ''
 );
@@ -191,6 +191,65 @@ CREATE TABLE IF NOT EXISTS permission_decisions (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS permission_decisions_run_operation ON permission_decisions(run_id,operation_id,created_at);
+
+CREATE TABLE IF NOT EXISTS candidates (
+    id TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL UNIQUE,
+    goal_id TEXT NOT NULL,
+    formal_root TEXT NOT NULL,
+    candidate_root TEXT NOT NULL,
+    baseline_digest TEXT NOT NULL,
+    candidate_digest TEXT NOT NULL DEFAULT '',
+    root_mode INTEGER NOT NULL DEFAULT 448,
+    criteria_revision INTEGER NOT NULL,
+    dependency_revision INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('prepared','running','ready','reviewed','accepted','rejected','blocked')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS candidates_goal_status ON candidates(goal_id,status,created_at);
+
+CREATE TABLE IF NOT EXISTS candidate_reviews (
+    id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL REFERENCES candidates(id),
+    formal_digest TEXT NOT NULL,
+    candidate_digest TEXT NOT NULL,
+    preview_digest TEXT NOT NULL,
+    review_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS candidate_reviews_current ON candidate_reviews(candidate_id,created_at);
+
+CREATE TABLE IF NOT EXISTS acceptance_decisions (
+    id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL REFERENCES candidates(id),
+    user_id TEXT NOT NULL,
+    candidate_digest TEXT NOT NULL,
+    preview_digest TEXT NOT NULL,
+    formal_digest TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK(mode IN ('normal','force')),
+    confirmed_findings_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('prepared','applied','blocked')),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS acceptance_receipts (
+    id TEXT PRIMARY KEY,
+    decision_id TEXT NOT NULL UNIQUE REFERENCES acceptance_decisions(id),
+    candidate_id TEXT NOT NULL REFERENCES candidates(id),
+    formal_digest TEXT NOT NULL,
+    received_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS acceptance_apply_journal (
+    decision_id TEXT PRIMARY KEY REFERENCES acceptance_decisions(id),
+    candidate_id TEXT NOT NULL REFERENCES candidates(id),
+    phase TEXT NOT NULL CHECK(phase IN ('prepared','swapped','finalized','blocked')),
+    old_digest TEXT NOT NULL,
+    new_digest TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS criteria_proposals (
     id TEXT PRIMARY KEY,
