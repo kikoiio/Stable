@@ -15,10 +15,14 @@ import (
 	"syscall"
 	"time"
 
+	"stable/internal/agent"
 	"stable/internal/appconfig"
+	"stable/internal/candidate"
 	"stable/internal/conversation"
 	"stable/internal/decision"
 	"stable/internal/dependency"
+	"stable/internal/llm"
+	"stable/internal/sandbox"
 	"stable/internal/store"
 )
 
@@ -92,6 +96,19 @@ func Up(ctx context.Context, c appconfig.AppConfig, p Paths) (Status, error) {
 	}
 }
 
+// ReconcileBeforeDispatch settles candidate acceptances that were interrupted
+// before the last shutdown. It runs before Temporal or the worker start so no
+// new action is dispatched until every prepared/swapped acceptance is either
+// finalized, retried, or recorded as blocked.
+func ReconcileBeforeDispatch(ctx context.Context, dbPath string) error {
+	s, err := store.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	return s.ReconcileAcceptances(ctx)
+}
+
 func Supervise(c appconfig.AppConfig, p Paths) error {
 	if err := p.Prepare(); err != nil {
 		return err
@@ -119,6 +136,9 @@ func Supervise(c appconfig.AppConfig, p Paths) error {
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	if _, err := Control(p, "status"); err == nil {
 		return errors.New("runtime already running")
+	}
+	if err := ReconcileBeforeDispatch(context.Background(), p.Database); err != nil {
+		return fmt.Errorf("reconcile interrupted acceptances: %w", err)
 	}
 	_ = os.Remove(p.Socket)
 	address := "127.0.0.1:" + strconv.Itoa(c.TemporalPort)
@@ -156,7 +176,7 @@ func Supervise(c appconfig.AppConfig, p Paths) error {
 	if err = waitPort(address, temporal, 20*time.Second); err != nil {
 		return fmt.Errorf("Temporal startup: %w; see %s", err, p.TemporalLog)
 	}
-	worker := exec.Command(filepath.Join(p.Libexec, "agentworker"), "--app-config", "--db", p.Database, "--run-root", p.Goals, "--temporal", address, "--project-root", p.Share)
+	worker := exec.Command(filepath.Join(p.Libexec, "agentworker"), "--app-config", "--db", p.Database, "--run-root", p.Goals, "--temporal", address, "--project-root", p.Share, "--chat-socket", p.ChatSocket)
 	worker.Env = os.Environ()
 	worker.Stdout = workerLog
 	worker.Stderr = workerLog
@@ -258,9 +278,17 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 	if err != nil {
 		return err
 	}
+	var runner agent.Runner
+	var runnerError string
+	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
+		runner = agent.NewRunner(streamingProvider, agent.RunnerOptions{})
+	} else {
+		runnerError = streamErr.Error()
+	}
 	svc, err := conversation.Serve(ctx, conversation.Deps{
-		Store: s, Provider: provider, ChatProvider: chatProvider, Temporal: address, ProjectRoot: p.Share, RunRoot: p.Goals, SocketPath: p.ChatSocket,
-		Refresher: refresher,
+		Store: s, Provider: provider, ChatProvider: chatProvider, Runner: runner, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: address, ProjectRoot: p.Share, RunRoot: p.Goals, SocketPath: p.ChatSocket,
+		Refresher:         refresher,
+		CandidateCheckers: []candidate.Checker{candidate.KicadERCChecker{Sandbox: sandbox.LinuxManager{}, RunRoot: p.Goals}},
 	})
 	if err != nil {
 		return err

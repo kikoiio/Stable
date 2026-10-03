@@ -9,10 +9,14 @@ import (
 	"os/signal"
 	"syscall"
 
+	"stable/internal/agent"
 	"stable/internal/appconfig"
+	"stable/internal/candidate"
 	"stable/internal/conversation"
 	"stable/internal/decision"
 	"stable/internal/dependency"
+	"stable/internal/llm"
+	"stable/internal/sandbox"
 	"stable/internal/store"
 )
 
@@ -51,13 +55,24 @@ func chatserve(args []string) error {
 	defer s.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if err = chatserveRecovery(ctx, s); err != nil {
+		return fmt.Errorf("startup recovery: %w", err)
+	}
 	refresher, err := dependency.NewKiCadRefresher(s, *runRoot, *projectRoot, *temporal)
 	if err != nil {
 		return err
 	}
+	var runner agent.Runner
+	var runnerError string
+	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
+		runner = agent.NewRunner(streamingProvider, agent.RunnerOptions{})
+	} else {
+		runnerError = streamErr.Error()
+	}
 	svc, err := conversation.Serve(ctx, conversation.Deps{
-		Store: s, Provider: provider, ChatProvider: model.(decision.ChatProvider), Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket,
-		Refresher: refresher,
+		Store: s, Provider: provider, ChatProvider: model.(decision.ChatProvider), Runner: runner, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket,
+		Refresher:         refresher,
+		CandidateCheckers: chatCandidateCheckers(*runRoot),
 	})
 	if err != nil {
 		return err
@@ -65,4 +80,19 @@ func chatserve(args []string) error {
 	defer svc.Close()
 	<-ctx.Done()
 	return nil
+}
+
+// chatCandidateCheckers wires the independent candidate checkers the trusted
+// review entry runs inside the verified Linux sandbox. Without one every
+// preview would carry an unavailable finding and normal acceptance would be
+// blocked.
+func chatCandidateCheckers(runRoot string) []candidate.Checker {
+	return []candidate.Checker{candidate.KicadERCChecker{Sandbox: sandbox.LinuxManager{}, RunRoot: runRoot}}
+}
+
+// chatserveRecovery settles candidate acceptances that were interrupted before
+// the last shutdown so no trusted decision is served against stale journal
+// state.
+func chatserveRecovery(ctx context.Context, s *store.Store) error {
+	return s.ReconcileAcceptances(ctx)
 }

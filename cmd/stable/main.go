@@ -15,6 +15,7 @@ import (
 	"stable/internal/appconfig"
 	"stable/internal/prototype"
 	"stable/internal/runtime"
+	"stable/internal/sandbox"
 	"stable/internal/tui"
 )
 
@@ -48,6 +49,15 @@ Usage:
 }
 
 func run(args []string) error {
+	if len(args) >= 4 && args[0] == "--stable-sandbox-proxy" && args[2] == "--" {
+		// Trusted wrapper mounted read-only inside the sandbox: it forwards the
+		// wrapped process's network through the private proxy socket.
+		code, err := sandbox.RunProxyCommand(context.Background(), args[1], args[3:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "isolated proxy wrapper failed:", err)
+		}
+		os.Exit(code)
+	}
 	if len(args) == 0 {
 		stdinInfo, statErr := os.Stdin.Stat()
 		if statErr != nil || stdinInfo.Mode()&os.ModeCharDevice == 0 {

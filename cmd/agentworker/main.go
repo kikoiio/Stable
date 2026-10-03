@@ -17,32 +17,47 @@ import (
 	"go.temporal.io/sdk/worker"
 	"stable/internal/appconfig"
 	"stable/internal/artifact"
+	"stable/internal/conversation"
 	"stable/internal/core"
 	"stable/internal/decision"
 	"stable/internal/dependency"
 	"stable/internal/execution"
 	"stable/internal/goalrun"
 	"stable/internal/policy"
+	"stable/internal/sandbox"
 	"stable/internal/store"
 )
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "--stable-sandbox-proxy" {
+		if len(os.Args) < 5 || os.Args[3] != "--" {
+			log.Print("invalid isolated proxy wrapper arguments")
+			os.Exit(126)
+		}
+		code, err := sandbox.RunProxyCommand(context.Background(), os.Args[2], os.Args[4:])
+		if err != nil {
+			log.Printf("isolated proxy wrapper failed: %v", err)
+			os.Exit(code)
+		}
+		os.Exit(code)
+	}
 	dbPath := flag.String("db", "run/state.db", "business SQLite database")
 	runRoot := flag.String("run-root", "run", "authorized run root")
 	address := flag.String("temporal", "localhost:7233", "Temporal server address")
 	projectRoot := flag.String("project-root", ".", "project root containing workers and schemas")
+	chatSocket := flag.String("chat-socket", "", "Stable conversation service Unix socket")
 	appMode := flag.Bool("app-config", false, "use user model configuration instead of development Codex adapter")
 	flag.Parse()
-	if err := runConfigured(*dbPath, *runRoot, *address, *projectRoot, *appMode); err != nil {
+	if err := runConfigured(*dbPath, *runRoot, *address, *projectRoot, *appMode, *chatSocket); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func run(dbPath, runRoot, address, projectRoot string) error {
-	return runConfigured(dbPath, runRoot, address, projectRoot, false)
+	return runConfigured(dbPath, runRoot, address, projectRoot, false, "")
 }
 
-func runConfigured(dbPath, runRoot, address, projectRoot string, appMode bool) error {
+func runConfigured(dbPath, runRoot, address, projectRoot string, appMode bool, chatSocket string) error {
 	var err error
 	runRoot, err = filepath.Abs(runRoot)
 	if err != nil {
@@ -65,6 +80,11 @@ func runConfigured(dbPath, runRoot, address, projectRoot string, appMode bool) e
 			return err
 		}
 	}
+	// Settle interrupted candidate acceptances before any activity can
+	// dispatch new actions against the formal projects.
+	if err = state.ReconcileAcceptances(context.Background()); err != nil {
+		return fmt.Errorf("reconcile interrupted acceptances: %w", err)
+	}
 	artifacts, err := artifact.New(runRoot)
 	if err != nil {
 		return err
@@ -73,9 +93,15 @@ func runConfigured(dbPath, runRoot, address, projectRoot string, appMode bool) e
 		"kicad.repair_connection": {Name: "kicad.repair_connection", PostconditionKind: "sensor.connection_present"},
 		"computer.ensure_open":    {Name: "computer.ensure_open", PostconditionKind: "computer.open"},
 	}}
-	kicad := &execution.PythonBridge{Script: filepath.Join(projectRoot, "workers/kicad/bridge.py"), AllowedRoot: runRoot, Timeout: 90 * time.Second}
-	computer := &execution.PythonBridge{Script: filepath.Join(projectRoot, "workers/computer/bridge.py"), AllowedRoot: runRoot, Timeout: 90 * time.Second}
-	coordinator := &execution.Coordinator{Store: state, Artifacts: artifacts, Policy: policyEngine,
+	helperPath, helperErr := os.Executable()
+	if helperErr != nil {
+		return fmt.Errorf("find isolated proxy helper binary: %w", helperErr)
+	}
+	profileFor := execution.SandboxProfileFor(runRoot, helperPath)
+	isolator := sandbox.LinuxManager{}
+	kicad := &execution.PythonBridge{Script: filepath.Join(projectRoot, "workers/kicad/bridge.py"), AllowedRoot: runRoot, Sandbox: isolator, ProfileFor: profileFor, Timeout: 90 * time.Second}
+	computer := &execution.PythonBridge{Script: filepath.Join(projectRoot, "workers/computer/bridge.py"), AllowedRoot: runRoot, Sandbox: isolator, ProfileFor: profileFor, Timeout: 90 * time.Second}
+	coordinator := &execution.Coordinator{Store: state, Artifacts: artifacts, Policy: policyEngine, Permissions: execution.StorePermissionGate{Store: state},
 		Capabilities:   map[string]execution.Caller{"kicad.repair_connection": kicad},
 		Postconditions: map[string]json.RawMessage{"kicad.repair_connection": json.RawMessage(`{"sensor.connection_present":true}`)}}
 	if marker := os.Getenv("STABLE_CRASH_AFTER_REPAIR_MARKER"); marker != "" {
@@ -108,10 +134,13 @@ func runConfigured(dbPath, runRoot, address, projectRoot string, appMode bool) e
 	} else {
 		decider = &decision.Codex{SchemaPath: filepath.Join(projectRoot, "schemas/next_action.schema.json"), Workdir: projectRoot, Timeout: 90 * time.Second, Attempts: 2}
 	}
-	refresher := &dependency.Refresher{State: state, Collector: dependency.KiCadCollector{Kicad: kicad}, Wake: func(ctx context.Context, goalID, eventID string) error {
+	refresher := &dependency.Refresher{State: state, Collector: dependency.KiCadCollector{Kicad: kicad, RunRoot: runRoot}, Wake: func(ctx context.Context, goalID, eventID string) error {
 		return goalrun.WakeGoal(ctx, address, goalID, eventID)
 	}}
-	activities := &core.Activities{State: state, Artifacts: artifacts, Kicad: kicad, Computer: computer, Decider: decider, Policy: policyEngine, Executor: coordinator, Refresher: refresher}
+	activities := &core.Activities{State: state, Artifacts: artifacts, Kicad: kicad, Computer: computer, Decider: decider, Policy: policyEngine, Executor: coordinator, Refresher: refresher, RunRoot: runRoot}
+	if chatSocket != "" {
+		activities.GoalRunner = conversation.GoalSocketClient{Socket: chatSocket}
+	}
 	connection, err := client.Dial(client.Options{HostPort: address})
 	if err != nil {
 		return err
@@ -162,6 +191,12 @@ func runConfigured(dbPath, runRoot, address, projectRoot string, appMode bool) e
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	<-signals
 	return nil
+}
+
+// sandboxProfileFor is kept as a thin local alias so worker tests exercise the
+// same validator the entry point wires.
+func sandboxProfileFor(runRoot, helperPath string) func(core.CapabilityRequest) (sandbox.SandboxProfile, error) {
+	return execution.SandboxProfileFor(runRoot, helperPath)
 }
 
 // replayEvents re-delivers every unprocessed event through wake. Only a
