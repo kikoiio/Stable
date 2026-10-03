@@ -86,11 +86,66 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	if _, err = db.Exec(`PRAGMA user_version = 5`); err != nil {
+	if version < 6 {
+		if err = migrateV6(db); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if version < 8 {
+		if err = migrateV8(db); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if version < 10 {
+		if err = migrateV10(db); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if _, err = db.Exec(`PRAGMA user_version = 10`); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+func migrateV10(db *sql.DB) error {
+	if !hasColumn(db, "permission_decisions", "user_id") {
+		if _, err := db.Exec(`ALTER TABLE permission_decisions ADD COLUMN user_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	_, err := db.Exec(`PRAGMA user_version=10`)
+	return err
+}
+
+func migrateV8(db *sql.DB) error {
+	if !hasColumn(db, "approval_requests", "authority_json") {
+		if _, err := db.Exec(`ALTER TABLE approval_requests ADD COLUMN authority_json TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if !hasColumn(db, "approval_requests", "reason") {
+		if _, err := db.Exec(`ALTER TABLE approval_requests ADD COLUMN reason TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	_, err := db.Exec(`PRAGMA user_version=8`)
+	return err
+}
+
+func migrateV6(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`PRAGMA user_version=6`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func migrateV5(db *sql.DB) error {

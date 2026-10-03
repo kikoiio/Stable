@@ -142,6 +142,56 @@ CREATE TABLE IF NOT EXISTS session_messages (
 CREATE INDEX IF NOT EXISTS session_messages_goal_time ON session_messages(goal_id, created_at);
 CREATE INDEX IF NOT EXISTS session_messages_undelivered ON session_messages(delivered, goal_id);
 
+CREATE TABLE IF NOT EXISTS permission_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    effect TEXT NOT NULL CHECK(effect IN ('allow','deny','ask')),
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    target TEXT NOT NULL,
+    parameters_digest TEXT NOT NULL,
+    scope_digest TEXT NOT NULL,
+    protocol TEXT NOT NULL DEFAULT '',
+    host TEXT NOT NULL DEFAULT '',
+    port INTEGER NOT NULL DEFAULT 0 CHECK(port BETWEEN 0 AND 65535),
+    created_at TEXT NOT NULL,
+    UNIQUE(effect,kind,name,target,parameters_digest,scope_digest,protocol,host,port)
+);
+
+CREATE TABLE IF NOT EXISTS approval_requests (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    goal_id TEXT NOT NULL DEFAULT '',
+    work_item_id TEXT NOT NULL DEFAULT '',
+    operation_json TEXT NOT NULL,
+    authority_json TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    operation_digest TEXT NOT NULL,
+    scope_digest TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','allowed_once','saved','denied','cancelled','expired')),
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS approval_requests_session_status ON approval_requests(session_id,status,created_at);
+
+CREATE TABLE IF NOT EXISTS permission_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL DEFAULT '',
+    run_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    goal_id TEXT NOT NULL DEFAULT '',
+    work_item_id TEXT NOT NULL DEFAULT '',
+    operation_id TEXT NOT NULL,
+    operation_digest TEXT NOT NULL,
+    scope_digest TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK(decision IN ('allow','deny','ask')),
+    reason TEXT NOT NULL,
+    approval_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS permission_decisions_run_operation ON permission_decisions(run_id,operation_id,created_at);
+
 CREATE TABLE IF NOT EXISTS criteria_proposals (
     id TEXT PRIMARY KEY,
     goal_id TEXT REFERENCES goals(id),
