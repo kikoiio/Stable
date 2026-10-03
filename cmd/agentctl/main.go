@@ -99,6 +99,9 @@ func create(args []string) error {
 func notify(args []string) error {
 	fs := flag.NewFlagSet("notify", flag.ContinueOnError)
 	runRoot, dbPath, address := common(fs)
+	// stable goal forwards --project-root to every goal subcommand; notify only
+	// records and signals the event, dependency refresh happens on status/export.
+	_ = fs.String("project-root", ".", "project root containing fixtures")
 	goalID := fs.String("goal", "", "goal ID")
 	eventID := fs.String("event", "", "stable event ID")
 	kind := fs.String("kind", "", "design_changed or external_check_failed")
