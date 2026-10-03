@@ -6,30 +6,29 @@
 # confirm the new revision converges without stale evidence counting.
 set -euo pipefail
 
-project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+e2e_alloc criteria
 cd "$project_root"
-mkdir -p run
-run_root=${E2E_CRITERIA_ROOT:-$(mktemp -d "$project_root/run/criteria-XXXXXXXX")}
-port=${E2E_CRITERIA_PORT:-17339}
+
+run_root=$E2E_ROOT
+port=$E2E_PORT
 address="localhost:$port"
-goal_id="criteria-$(date +%s)"
+goal_id=$E2E_GOAL
 mock_pid=
 chat_pid=
 
 cleanup() {
   if [[ -n "$chat_pid" ]]; then kill "$chat_pid" 2>/dev/null || true; wait "$chat_pid" 2>/dev/null || true; fi
   if [[ -n "$mock_pid" ]]; then kill "$mock_pid" 2>/dev/null || true; wait "$mock_pid" 2>/dev/null || true; fi
-  # The runtime daemons (temporal/supervisor/worker) outlive the shell; stop
-  # them so the port is free for later runs.
-  if [[ -x "$run_root/dev-install/bin/stable" ]]; then
-    STABLE_STATE_DIR="$run_root" "$run_root/dev-install/bin/stable" down >/dev/null 2>&1 || true
-  fi
-  python3 "$project_root/tests/e2e/stop_sessions.py" "$run_root" 2>/dev/null || true
 }
-trap cleanup EXIT
+e2e_on_cleanup cleanup
+trap e2e_run_cleanups EXIT
 
 source "$project_root/tests/e2e/mock_model_env.sh"
-export STABLE_STATE_DIR="$run_root"
+source "$project_root/tests/e2e/candidate_accept.sh"
+# chatserve binds the repo as its trusted project root; session traffic must
+# address the same root (see trustedSessionRoot).
+E2E_SESSION_ROOT="$project_root"
 
 # Build the same dev-install layout the runtime supervisor expects: it derives
 # libexec/share from its own executable location, so stable must live in
@@ -41,9 +40,12 @@ go build -buildvcs=false -o "$dev_root/libexec/agentctl" ./cmd/agentctl
 go build -buildvcs=false -o "$dev_root/libexec/agentworker" ./cmd/agentworker
 temporal_bin=$(command -v temporal) || { echo 'temporal CLI required' >&2; exit 1; }
 ln -sfn "$temporal_bin" "$dev_root/libexec/temporal"
-ln -sfn "$project_root/fixtures" "$dev_root/share/fixtures"
-ln -sfn "$project_root/schemas" "$dev_root/share/schemas"
-ln -sfn "$project_root/workers" "$dev_root/share/workers"
+# The sandbox refuses mounts that cross symbolic links, so the share tree must
+# be real files (mirrors scripts/run_local.sh).
+rm -rf "$dev_root/share/fixtures" "$dev_root/share/schemas" "$dev_root/share/workers"
+cp -a "$project_root/fixtures" "$dev_root/share/fixtures"
+cp -a "$project_root/schemas" "$dev_root/share/schemas"
+cp -a "$project_root/workers" "$dev_root/share/workers"
 
 # stable up daemonizes temporal/supervisor/worker/chat and returns; readiness
 # is judged by fresh 'agent worker ready' lines (chatserve starts separately).
@@ -59,11 +61,13 @@ start_runner() {
   return 1
 }
 
-# chatserve is not part of the daemon stack; start it for the session.
-ensure_chat() {
-  for _ in $(seq 1 40); do [[ -S "$run_root/chat.sock" ]] && return 0; sleep 0.25; done
+# chatserve is not part of the daemon stack; start it for the session. It
+# rebinds the worker-owned chat socket, so start it unconditionally to keep the
+# protocol's project root deterministic.
+start_chat() {
+  if [[ -n "$chat_pid" ]]; then kill "$chat_pid" 2>/dev/null || true; wait "$chat_pid" 2>/dev/null || true; fi
   "$dev_root/bin/stable" chatserve --db "$run_root/state.db" --socket "$run_root/chat.sock" \
-    --temporal "$address" --project-root "$project_root" --run-root "$run_root" >"$run_root/chatserve.log" 2>&1 &
+    --temporal "$address" --project-root "$project_root" --run-root "$run_root/goals" >"$run_root/chatserve.log" 2>&1 &
   chat_pid=$!
   for _ in $(seq 1 40); do [[ -S "$run_root/chat.sock" ]] && return 0; sleep 0.25; done
   cat "$run_root/chatserve.log" >&2
@@ -78,9 +82,17 @@ stable_cli() { "$dev_root/bin/stable" "$@"; }
 status_file="$run_root/status.json"
 read_status() { "$dev_root/libexec/agentctl" status --run-root "$run_root" --goal "$goal_id" >"$status_file" 2>/dev/null; }
 export_delivery() { "$dev_root/libexec/agentctl" export --run-root "$run_root" --goal "$goal_id" --out "$run_root/$1" >/dev/null; }
-wait_status() { # python condition over status.json, then a hard assert
+proposal_from() { python3 -c 'import json,sys; ms=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]; print(next(m["proposal"]["id"] for m in ms if m.get("type")=="proposal"))' "$1"; }
+goal_update_field() { python3 -c 'import json,sys; ms=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]; g=next(m["goal"] for m in ms if m.get("type")=="goal_update"); print(g[sys.argv[2]])' "$1" "$2"; }
+accept_seq=0
+wait_status() { # python condition over status.json, driving approvals and candidate acceptance
   local probe=$1
   for _ in $(seq 1 900); do
+    e2e_allow_pending_approvals "$session_id" || true
+    if read_status && python3 -c 'import json,sys; s=json.load(open(sys.argv[1]))["snapshot"]; sys.exit(0 if any(a["status"] in ("candidate_ready","awaiting_accept") for a in (s.get("actions") or [])) else 1)' "$status_file"; then
+      accept_seq=$((accept_seq+1))
+      e2e_accept_ready_candidate "$session_id" "accept-$goal_id-$accept_seq" || true
+    fi
     if read_status && python3 -c "$probe" "$status_file"; then return 0; fi
     sleep 0.5
   done
@@ -90,27 +102,26 @@ wait_status() { # python condition over status.json, then a hard assert
 }
 
 start_runner
-ensure_chat
+start_chat
+session_id=$(e2e_new_session "$run_root/session.jsonl")
 
 # --- phase 1: create, confirm and fully verify under revision 0 ---
-create_out=$(stable_cli chat --create-goal "修复传感器连接，ERC 必须全过，J1 连接要恢复" --goal "$goal_id")
-proposal_v0=$(sed -n 's/^proposal \(prop-[0-9a-f]*\) status=proposed$/\1/p' <<<"$create_out")
-[[ -n "$proposal_v0" ]] || { echo "no v0 proposal in: $create_out" >&2; exit 1; }
-confirm_out=$(stable_cli chat --confirm "$proposal_v0" --goal "$goal_id")
-[[ "$confirm_out" == *"goal $goal_id status=active"* ]] || { echo "confirm did not create goal: $confirm_out" >&2; exit 1; }
+e2e_chat create_goal --session "$session_id" --goal "$goal_id" --text "修复传感器连接，ERC 必须全过，J1 连接要恢复" >"$run_root/create-v0.jsonl"
+proposal_v0=$(proposal_from "$run_root/create-v0.jsonl")
+[[ -n "$proposal_v0" ]] || { echo 'no v0 proposal' >&2; exit 1; }
+e2e_chat confirm --session "$session_id" --goal "$goal_id" --proposal "$proposal_v0" >"$run_root/confirm-v0.jsonl"
+[[ "$(goal_update_field "$run_root/confirm-v0.jsonl" status)" == "active" ]] || { echo "confirm did not create goal" >&2; exit 1; }
 wait_status 'import json,sys; x=json.load(open(sys.argv[1])); sys.exit(0 if x["verified"] else 1)'
 read_status
 python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); assert x["snapshot"]["goal"]["criteria_revision"]==0, x["snapshot"]["goal"]["criteria_revision"]' "$status_file"
 
 # --- phase 2: confirm relaxed criteria while checks are deferred (Temporal down) ---
 stop_runner
-create_out=$(stable_cli chat --create-goal "修复传感器连接，放宽 ERC 允许 2 个违规，J1 连接要恢复" --goal "$goal_id")
-proposal_v1=$(sed -n 's/^proposal \(prop-[0-9a-f]*\) status=proposed$/\1/p' <<<"$create_out")
-[[ -n "$proposal_v1" ]] || { echo "no v1 proposal in: $create_out" >&2; exit 1; }
-confirm_out=$(stable_cli chat --confirm "$proposal_v1" --goal "$goal_id")
-[[ "$confirm_out" == *"status=pending_reverification"* ]] || { echo "confirm did not defer to re-verification: $confirm_out" >&2; exit 1; }
-[[ "$confirm_out" == *"待复核"* ]] || { echo "pending status not annotated for terminal: $confirm_out" >&2; exit 1; }
-[[ "$confirm_out" == *"criteria_revision: 1"* ]] || { echo "pending status missing revision: $confirm_out" >&2; exit 1; }
+e2e_chat create_goal --session "$session_id" --goal "$goal_id" --text "修复传感器连接，放宽 ERC 允许 2 个违规，J1 连接要恢复" >"$run_root/create-v1.jsonl"
+proposal_v1=$(proposal_from "$run_root/create-v1.jsonl")
+[[ -n "$proposal_v1" ]] || { echo 'no v1 proposal' >&2; exit 1; }
+e2e_chat confirm --session "$session_id" --goal "$goal_id" --proposal "$proposal_v1" >"$run_root/confirm-v1.jsonl"
+[[ "$(goal_update_field "$run_root/confirm-v1.jsonl" status)" == "pending_reverification" ]] || { echo "confirm did not defer to re-verification" >&2; exit 1; }
 read_status
 python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); g=x["snapshot"]["goal"]; assert g["status"]=="pending_reverification" and g["criteria_revision"]==1, g' "$status_file"
 
@@ -133,7 +144,7 @@ PY
 
 # --- phase 3: restart; the pending wake replays and auto reverification passes ---
 start_runner
-ensure_chat
+start_chat
 wait_status 'import json,sys; x=json.load(open(sys.argv[1])); sys.exit(0 if x["verified"] and x["snapshot"]["goal"]["criteria_revision"]==1 else 1)'
 export_delivery delivery-p3
 python3 - "$run_root" <<'PY'
@@ -150,17 +161,17 @@ print('phase3 PASS: replayed wake re-verified under revision 1')
 PY
 
 # --- phase 4: confirm tightened criteria mid-run, controlled pause, converge ---
-create_out=$(stable_cli chat --create-goal "修复传感器连接，ERC 必须全过，J1 连接要恢复" --goal "$goal_id")
-proposal_v2=$(sed -n 's/^proposal \(prop-[0-9a-f]*\) status=proposed$/\1/p' <<<"$create_out")
-[[ -n "$proposal_v2" ]] || { echo "no v2 proposal in: $create_out" >&2; exit 1; }
-confirm_out=$(stable_cli chat --confirm "$proposal_v2" --goal "$goal_id")
-[[ "$confirm_out" == *"status=pending_reverification"* ]] || { echo "v2 confirm did not defer: $confirm_out" >&2; exit 1; }
+e2e_chat create_goal --session "$session_id" --goal "$goal_id" --text "修复传感器连接，ERC 必须全过，J1 连接要恢复" >"$run_root/create-v2.jsonl"
+proposal_v2=$(proposal_from "$run_root/create-v2.jsonl")
+[[ -n "$proposal_v2" ]] || { echo 'no v2 proposal' >&2; exit 1; }
+e2e_chat confirm --session "$session_id" --goal "$goal_id" --proposal "$proposal_v2" >"$run_root/confirm-v2.jsonl"
+[[ "$(goal_update_field "$run_root/confirm-v2.jsonl" status)" == "pending_reverification" ]] || { echo "v2 confirm did not defer" >&2; exit 1; }
 stop_runner
 sleep 2
 read_status
 python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); g=x["snapshot"]["goal"]; assert g["status"]=="pending_reverification" and g["criteria_revision"]==2, g' "$status_file"
 start_runner
-ensure_chat
+start_chat
 wait_status 'import json,sys; x=json.load(open(sys.argv[1])); sys.exit(0 if x["verified"] and x["snapshot"]["goal"]["criteria_revision"]==2 else 1)'
 export_delivery delivery-p4
 python3 - "$run_root" <<'PY'

@@ -28,7 +28,7 @@ if ! command -v codex >/dev/null 2>&1; then source "$project_root/tests/e2e/mock
 go build -buildvcs=false -o "$run_root/bin/agentctl" ./cmd/agentctl
 export STABLE_STATE_DIR="$run_root"
 mkdir -p "$run_root/goals"
-STABLE_TEMPORAL_PORT="$port" bash "$project_root/scripts/run_local.sh" "$run_root" >"$run_root/runner.log" 2>&1 &
+STABLE_RUN_LOCAL_UP=1 STABLE_TEMPORAL_PORT="$port" bash "$project_root/scripts/run_local.sh" "$run_root" >"$run_root/runner.log" 2>&1 &
 runner_pid=$!
 cleanup() {
   kill "$runner_pid" 2>/dev/null || true

@@ -3,7 +3,7 @@
 # $project_root and $run_root to be set; leaves $mock_pid for the caller's
 # cleanup trap.
 mock_pid=
-python3 "$project_root/tests/package/mock_model.py" > "$run_root/mock.port" &
+STABLE_MOCK_LOG="$run_root/mock.log" python3 "$project_root/tests/package/mock_model.py" > "$run_root/mock.port" 2>"$run_root/mock.stderr" &
 mock_pid=$!
 for _ in $(seq 1 50); do [[ -s "$run_root/mock.port" ]] && break; sleep 0.1; done
 [[ -s "$run_root/mock.port" ]] || { echo 'mock model did not start' >&2; exit 1; }

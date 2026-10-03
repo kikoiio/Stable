@@ -1,5 +1,5 @@
 # Stable — 统一入口。版本号唯一来源是 ./VERSION。
-.PHONY: check test e2e cases package test-package install-dev run clean
+.PHONY: check test e2e m03-e2e cases package test-package install-dev run clean
 
 check: ## 检查开发环境依赖
 	bash scripts/check_env.sh
@@ -13,6 +13,9 @@ e2e: ## 源码级端到端测试（含 V01 标准变化与 V02 工程依赖变�
 	bash tests/e2e/unsupported.sh
 	bash tests/e2e/criteria_change.sh
 	bash tests/e2e/dependency_change.sh
+
+m03-e2e: ## M03 权限、隔离、候选接收与恢复验证（低并发）
+	bash tests/e2e/m03_suite.sh
 
 cases: ## 场景用例（tests/cases，需要 kicad-cli）
 	@for c in tests/cases/cases/*/; do \

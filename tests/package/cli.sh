@@ -50,7 +50,7 @@ cd /tmp
 
 # --- AC5/F5 command surface: help lists all commands; bad input fails ---
 help_out=$(stable help)
-for c in doctor 'config check' up down 'runtime status' 'goal create' 'goal status' 'goal notify' 'goal export' chat logs version; do
+for c in doctor 'config check' up down 'runtime status' 'goal create' 'goal status' 'goal notify' 'goal export' demo logs version; do
   [[ "$help_out" == *"$c"* ]] || fail "help missing $c"
 done
 expect_fail stable frobnicate 2>/dev/null
@@ -122,7 +122,10 @@ stable down >/dev/null
 for _ in $(seq 1 40); do stable runtime status >/dev/null 2>&1 || break; sleep 0.25; done
 ! stable runtime status >/dev/null 2>&1 || fail 'runtime still running after down'
 kill -0 "$unrelated_pid" || fail 'down killed unrelated process'
-printf '/quit\n' | stable >/dev/null || fail 'bare stable did not start and enter chat'
+# M03: bare stable without a controlling terminal must refuse to start the TUI
+# instead of falling back to a non-interactive chat mode.
+out=$(printf '/quit\n' | stable 2>&1) && fail 'bare stable should refuse non-interactive stdin'
+[[ "$out" == *'interactive terminal'* ]] || fail "unexpected bare stable error: $out"
 stable goal status --goal cli-test >/dev/null || fail 'goal lost after restart'
 kill "$unrelated_pid" 2>/dev/null || true
 stable down >/dev/null

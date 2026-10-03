@@ -6,17 +6,25 @@ project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 src="$project_root/tests/cases/cases/$case_id"
 [[ -d $src ]] || { echo "no such case: $case_id" >&2; exit 2; }
 expect=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["expect"])' "$src/case.json")
-mkdir -p "$project_root/run"
-run_root=$(mktemp -d "$project_root/run/mytest-$case_id-XXXXXX")
-port=${MYTEST_PORT:-17340}
-goal_id="mytest-$(date +%s)"
+source "$project_root/tests/e2e/lib.sh"
+e2e_alloc "case-$case_id"
+run_root=$E2E_ROOT
+port=$E2E_PORT
+goal_id=$E2E_GOAL
+runner=
+mock_pid=
+cleanup() {
+  if [[ -n "$runner" ]]; then kill "$runner" 2>/dev/null || true; wait "$runner" 2>/dev/null || true; fi
+  if [[ -n "$mock_pid" ]]; then kill "$mock_pid" 2>/dev/null || true; wait "$mock_pid" 2>/dev/null || true; fi
+}
+e2e_on_cleanup cleanup
+trap e2e_run_cleanups EXIT
 mkdir -p "$run_root/$goal_id"
 cp "$src/sensor.kicad_sch" "$src/sensor.kicad_pro" "$run_root/$goal_id/"
 initial=$(sha256sum "$run_root/$goal_id/sensor.kicad_sch" | cut -d' ' -f1)
 if ! command -v codex >/dev/null 2>&1; then source "$project_root/tests/e2e/mock_model_env.sh"; fi
-STABLE_TEMPORAL_PORT="$port" bash "$project_root/scripts/run_local.sh" "$run_root" >"$run_root/runner.log" 2>&1 &
+STABLE_RUN_LOCAL_UP=1 STABLE_TEMPORAL_PORT="$port" bash "$project_root/scripts/run_local.sh" "$run_root" >"$run_root/runner.log" 2>&1 &
 runner=$!
-trap 'kill $runner 2>/dev/null || true; wait $runner 2>/dev/null || true; python3 "$project_root/tests/e2e/stop_sessions.py" "$run_root" 2>/dev/null || true' EXIT
 for _ in $(seq 1 120); do
   grep -q 'agent worker ready' "$run_root/worker.log" 2>/dev/null && break
   kill -0 $runner 2>/dev/null || { cat "$run_root/runner.log" >&2; exit 1; }
