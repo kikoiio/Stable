@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/mattn/go-sqlite3 v1.14.52
-	go.temporal.io/api v1.63.5
+	go.temporal.io/api v1.63.6
 	go.temporal.io/sdk v1.49.0
 )
 
@@ -60,7 +60,7 @@ require (
 	github.com/stretchr/testify v1.10.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.47.0
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
