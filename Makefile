@@ -1,5 +1,5 @@
 # Stable — 统一入口。版本号唯一来源是 ./VERSION。
-.PHONY: check test e2e m03-e2e m04-e2e cases package test-package install-dev run clean
+.PHONY: check test e2e m03-e2e m04-e2e m05-e2e cases package test-package install-dev run clean
 
 check: ## 检查开发环境依赖
 	bash scripts/check_env.sh
@@ -19,6 +19,9 @@ m03-e2e: ## M03 权限、隔离、候选接收与恢复验证（低并发）
 
 m04-e2e: ## M04 工具执行、隔离拒绝与可选 Linux 正例（串行）
 	bash tests/e2e/m04_tools.sh
+
+m05-e2e: ## M05 会话搜索恢复、压缩边界、快照 rewind 与问答边界（无需沙箱）
+	bash tests/e2e/m05_sessions.sh
 
 cases: ## 场景用例（tests/cases，需要 kicad-cli）
 	@for c in tests/cases/cases/*/; do \
