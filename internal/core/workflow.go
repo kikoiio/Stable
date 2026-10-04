@@ -46,10 +46,20 @@ func GoalWorkflow(ctx workflow.Context, goalID string) error {
 		}
 		cycle++
 		if waiting {
-			// An unanswered agent question must not re-trigger decisions on a
-			// timer; only an explicit human reply (signal) resumes the goal.
-			var next string
-			events.Receive(ctx, &next)
+			// An unanswered agent question parks the fast check timer: an
+			// explicit human reply (signal) resumes the goal immediately.
+			// But the question may come from a transient observation (e.g. a
+			// flaky probe under load), so re-evaluate on a long backoff
+			// instead of parking forever — a persistent question simply
+			// settles into the slow cadence.
+			next := ""
+			timerCtx, cancel := workflow.WithCancel(ctx)
+			timer := workflow.NewTimer(timerCtx, time.Duration(5*seconds)*time.Second)
+			selector := workflow.NewSelector(ctx)
+			selector.AddReceive(events, func(ch workflow.ReceiveChannel, _ bool) { ch.Receive(ctx, &next) })
+			selector.AddFuture(timer, func(workflow.Future) { next = fmt.Sprintf("timer-%s-%d", goalID, cycle) })
+			selector.Select(ctx)
+			cancel()
 			eventID = next
 			continue
 		}

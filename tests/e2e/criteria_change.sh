@@ -179,9 +179,10 @@ start_runner
 start_chat
 wait_status 'import json,sys; x=json.load(open(sys.argv[1])); sys.exit(0 if x["verified"] and x["snapshot"]["goal"]["criteria_revision"]==2 else 1)'
 # The goal keeps re-evaluating on its 30s interval after verification, and
-# each M04 tool-loop evaluation flips the status to active while it runs.
+# each M04 tool-loop evaluation flips the status to active while it runs; a
+# transient ask_human parks the goal until the long backoff re-evaluates it.
 # Re-export until the delivery catches a verified snapshot instead of racing it.
-for _ in $(seq 1 120); do
+for _ in $(seq 1 600); do
   rm -rf "$run_root/delivery-p4"
   export_delivery delivery-p4
   if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["verified"] else 1)' "$run_root/delivery-p4/delivery.json" 2>/dev/null; then break; fi
