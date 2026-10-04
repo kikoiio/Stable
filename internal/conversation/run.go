@@ -128,11 +128,30 @@ func sessionConversationMessages(root, sessionID string) []llm.Message {
 	if err != nil {
 		return nil
 	}
+	covered, boundarySeq := sessionlog.CoveredSeqs(transcript.Events)
 	var messages []llm.Message
 	runAssistant := map[string]int{}
 	pendingToolCalls := map[string]bool{}
 	for _, event := range transcript.Events {
+		if covered[event.Seq] {
+			continue
+		}
 		switch event.Type {
+		case sessionlog.EventBoundary:
+			// The latest effective boundary replaces its covered range with
+			// the summary; older boundaries are superseded. Post-compaction
+			// deltas of the same run start a fresh assistant message.
+			if event.Seq != boundarySeq {
+				continue
+			}
+			var b sessionlog.Boundary
+			if decodeSessionData(event.Data, &b) != nil {
+				continue
+			}
+			messages = append(messages, llm.Message{Role: "assistant", Content: "Earlier conversation summary: " + b.Summary})
+			if b.EffectiveScope() == sessionlog.BoundaryScopeRun {
+				delete(runAssistant, b.RunID)
+			}
 		case sessionlog.EventMessage:
 			var msg sessionlog.Message
 			if decodeSessionData(event.Data, &msg) == nil && (msg.Role == "user" || msg.Role == "assistant") && msg.Text != "" {
@@ -199,6 +218,20 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 		}
 		s.eventMu.Lock()
 		stored, err := sessionlog.Append(s.deps.ProjectRoot, request.Work.SessionID, sessionlog.EventRunEvent, persisted)
+		if err == nil && event.Kind == agent.EventCompactionBoundary {
+			// The conversation service is the only session log writer: the
+			// runner-issued boundary becomes a run-scope compaction boundary
+			// in stream order, right after its run event.
+			var boundary agent.ContextBoundary
+			if json.Unmarshal(event.Payload, &boundary) != nil {
+				err = errors.New("compaction boundary has invalid payload")
+			} else {
+				_, err = sessionlog.Append(s.deps.ProjectRoot, request.Work.SessionID, sessionlog.EventBoundary, sessionlog.Boundary{
+					FromSeq: boundary.FromSeq, ToSeq: boundary.ToSeq, Summary: boundary.Summary,
+					Scope: sessionlog.BoundaryScopeRun, RunID: boundary.RunID,
+				})
+			}
+		}
 		s.eventMu.Unlock()
 		if err != nil {
 			_ = s.deps.Runner.Cancel(request.RunID)

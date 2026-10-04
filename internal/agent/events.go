@@ -52,7 +52,39 @@ const (
 	EventRetry            EventKind = "retry"
 	EventError            EventKind = "error"
 	EventTerminal         EventKind = "terminal"
+	// EventCompactionBoundary records one persistent context compaction: the
+	// summary replaces the covered run sequence range. The conversation
+	// consumer turns it into a run-scope session log boundary.
+	EventCompactionBoundary EventKind = "compaction_boundary"
 )
+
+// ContextBoundary is the agent-stream form of a compaction boundary.
+type ContextBoundary struct {
+	RunID   string `json:"run_id"`
+	FromSeq uint64 `json:"from_seq"`
+	ToSeq   uint64 `json:"to_seq"`
+	Summary string `json:"summary"`
+}
+
+// ContextPreparer compacts run messages before a provider request.
+// msgSeqs[i] is the run sequence at which messages[i] was completed (0 for
+// messages that predate the run). A nil boundary in the result means no
+// compaction was needed. Any error aborts the turn visibly instead of
+// sending an unprocessed over-budget request.
+type ContextPreparer interface {
+	PrepareRun(ctx context.Context, runID string, messages []llm.Message, msgSeqs []uint64) (PreparedRun, error)
+}
+
+// PreparedRun carries the messages to send and, after a compaction, the
+// boundary to publish first. HeadKept counts leading messages retained
+// verbatim; TailStart is the index in the original slice where the retained
+// tail begins, so the caller can realign message sequence numbers.
+type PreparedRun struct {
+	Messages  []llm.Message
+	HeadKept  int
+	TailStart int
+	Boundary  *ContextBoundary
+}
 
 type ExecutionEvent struct {
 	ID        string          `json:"id"`

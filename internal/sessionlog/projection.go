@@ -136,8 +136,7 @@ func Project(t Transcript) Projection {
 // coveredSeqs returns the session sequence numbers replaced by the latest
 // effective compaction boundary, plus that boundary's own sequence number.
 // boundarySeq is zero when the log has no boundary.
-func coveredSeqs(events []Event) (map[uint64]bool, uint64) {
-	covered := map[uint64]bool{}
+func coveredSeqs(events []Event) (map[uint64]bool, uint64) {	covered := map[uint64]bool{}
 	latest := -1
 	var boundary Boundary
 	for i, e := range events {
@@ -174,4 +173,11 @@ func coveredSeqs(events []Event) (map[uint64]bool, uint64) {
 		}
 	}
 	return covered, events[latest].Seq
+}
+
+// CoveredSeqs exposes the coverage of the latest effective boundary so
+// consumers outside this package (run message rebuilds) apply exactly the
+// same substitution as the unified projection.
+func CoveredSeqs(events []Event) (map[uint64]bool, uint64) {
+	return coveredSeqs(events)
 }

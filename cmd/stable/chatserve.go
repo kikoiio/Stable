@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/sandbox"
+	"stable/internal/sessioncontext"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
 	"stable/internal/tools"
@@ -87,7 +89,11 @@ func chatserve(args []string) error {
 			ProviderCredential: c.Model.APIKey,
 		})
 		toolSchemas = chatserveToolSchemas()
-		runner = agent.NewRunner(streamingProvider, agent.RunnerOptions{ExecutorFactory: executorFactory, ToolSchemas: toolSchemas})
+		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, model.(decision.ChatProvider))
+		if fellBack {
+			log.Printf("invalid context_window_tokens %d; using default %d", c.Model.ContextWindowTokens, sessioncontext.DefaultWindowTokens)
+		}
+		runner = agent.NewRunner(streamingProvider, agent.RunnerOptions{ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, ContextManager: contextManager})
 	} else {
 		runnerError = streamErr.Error()
 	}

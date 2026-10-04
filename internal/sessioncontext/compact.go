@@ -46,26 +46,41 @@ func (m *Manager) summarize(ctx context.Context, covered []sessionlog.Item) (ses
 		total += cost
 	}
 	covered = covered[start:]
+	var text strings.Builder
+	for _, item := range covered {
+		text.WriteString(itemText(item))
+	}
+	answer, err := m.summarizeText(ctx, text.String())
+	if err != nil {
+		return sessionlog.Boundary{}, decision.ChatMessage{}, err
+	}
+	boundary := sessionlog.Boundary{
+		FromSeq: covered[0].Seq,
+		ToSeq:   covered[len(covered)-1].Seq,
+		Summary: answer,
+		Scope:   sessionlog.BoundaryScopeSession,
+	}
+	message := decision.ChatMessage{Role: "assistant", Content: "Earlier conversation summary: " + answer}
+	return boundary, message, nil
+}
+
+// summarizeText iteratively condenses text through the provider, folding
+// each bounded chunk into a running summary.
+func (m *Manager) summarizeText(ctx context.Context, text string) (string, error) {
 	var chunks []string
 	var chunk strings.Builder
-	for _, item := range covered {
-		line := itemText(item)
-		if line == "" {
-			continue
+	for _, r := range text {
+		if chunk.Len()+len(string(r)) > summaryChunkChars {
+			chunks = append(chunks, chunk.String())
+			chunk.Reset()
 		}
-		for _, r := range line {
-			if chunk.Len()+len(string(r)) > summaryChunkChars {
-				chunks = append(chunks, chunk.String())
-				chunk.Reset()
-			}
-			chunk.WriteRune(r)
-		}
+		chunk.WriteRune(r)
 	}
 	if chunk.Len() > 0 {
 		chunks = append(chunks, chunk.String())
 	}
 	if len(chunks) == 0 {
-		return sessionlog.Boundary{}, decision.ChatMessage{}, errors.New("no messages available to summarize")
+		return "", errors.New("no messages available to summarize")
 	}
 	answer := ""
 	var err error
@@ -76,20 +91,13 @@ func (m *Manager) summarize(ctx context.Context, covered []sessionlog.Item) (ses
 		}
 		answer, err = m.provider.GenerateChat(ctx, []decision.ChatMessage{{Role: "system", Content: summaryPrompt}, {Role: "user", Content: input}})
 		if err != nil {
-			return sessionlog.Boundary{}, decision.ChatMessage{}, fmt.Errorf("context summary failed: %w", err)
+			return "", fmt.Errorf("context summary failed: %w", err)
 		}
 		if answer == "" || len(answer) > summaryMaxChars {
-			return sessionlog.Boundary{}, decision.ChatMessage{}, errors.New("context summary was empty or exceeded its safe size")
+			return "", errors.New("context summary was empty or exceeded its safe size")
 		}
 	}
-	boundary := sessionlog.Boundary{
-		FromSeq: covered[0].Seq,
-		ToSeq:   covered[len(covered)-1].Seq,
-		Summary: answer,
-		Scope:   sessionlog.BoundaryScopeSession,
-	}
-	message := decision.ChatMessage{Role: "assistant", Content: "Earlier conversation summary: " + answer}
-	return boundary, message, nil
+	return answer, nil
 }
 
 // itemText renders one projection item as summarizer input.
