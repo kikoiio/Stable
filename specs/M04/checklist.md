@@ -54,7 +54,7 @@
 - [x] **C33 / AC1,F8**：普通任务完整流程为“提交 → 读/搜/列调查 → 写/编辑修改 → 受控命令 → TUI 事件 → 候选 ready → review → accept”，正式工程改变一次。（验证：`bash tests/e2e/m04_tools.sh` 普通任务段。）
 - [x] **C34 / AC7,F7**：目标工作项完整流程为“目标绑定会话 → 工具执行 → 候选 ready → review → accept”，接收后目标进入待独立复核。（验证：`bash tests/e2e/m04_tools.sh` 目标段。）
 - [x] **C35 / AC10,F9**：S01 案例运行器完成“会话绑定目标 → 工具调查/修复 → review → 受控接收”，退出码 0，正式工程仅改变一次，目标未被错误标记为已验证。（验证：可创建 namespace 的 Linux 环境运行案例。）
-- [ ] **C36 / 回归**：本里程碑每个提交均可独立编译。（验证：临时 worktree 中逐提交运行 `go build -buildvcs=false ./...`。）
+- [x] **C36 / 回归**：本里程碑每个提交均可独立编译。（验证：临时 worktree 中逐提交运行 `go build -buildvcs=false ./...`。）
 
 ## 覆盖与证据记录
 
@@ -66,8 +66,8 @@
 > - **C29**：`go build ./...`、`go vet ./...`、`go test -p 1 ./...` 均退出 0（日志 `/tmp/m04-final-go-test.log`）。
 > - **C30**：`run.sh`、`waiting_restart.sh`、`unsupported.sh`、`criteria_change.sh`、`dependency_change.sh` 全部退出 0（日志 `/tmp/m04-final-{run,waiting_restart,unsupported,criteria_change,dependency_change}.log`）。其中三个 goal 脚本为适配 M04「goal 评估走工具循环」补充了审批驱动与稳定收敛判定。
 > - **C31**：`make m03-e2e`、`make package`、`make test-package` 均退出 0（日志 `/tmp/m04-final-{m03,package,test-package}.log`；test-package 证据 `/tmp/stable-package-{cli-Iy9Bsslx,e2e-0K5GzclT,restart-ntkCkcTq}`）。
-> - **C36**：b6279bc、febbf63 已在独立 worktree 逐提交 `GOMAXPROCS=2 go build -p 1 -buildvcs=false ./...` 退出 0（Codex 侧执行）；本记录所属新增提交见下文提交清单，同法验证后勾选。
-> - 验收中修复的缺陷：执行器写/命令在权限门前创建候选（首次写不再被误拒）；取消审批中的运行补写配对 tool_result（修复 sessionlog 悬空 pending 导致的会话中毒）；runner 终态错误携带底层原因；候选 manifest/接收排除并回迁 `.stable` 服务目录。
+> - **C36**：里程碑六个提交全部在临时 worktree 逐提交 `go build -buildvcs=false ./...` 退出 0——`b6279bc`、`febbf63` 由 Codex 在独立 Orca worktree 验证（GOMAXPROCS=2 -p 1），`93a50fc`、`e4220dd`、`9492f89`、`2d71843` 由 Claude 在 `/tmp/stable-c36-verify` 临时 worktree 同法验证（已清理）。
+> - 验收中修复的缺陷：执行器写/命令在权限门前创建候选（首次写不再被误拒）；取消审批中的运行补写配对 tool_result（修复 sessionlog 悬空 pending 导致的会话中毒）；runner 终态错误携带底层原因；候选 manifest/接收排除并回迁 `.stable` 服务目录。另经 M05 回归定位、用户拍板在本里程碑收尾修复：WaitingForHuman 未答问题无限期停放改为 5×check_interval 长退避自愈（`2d71843`，人工信号即时恢复语义不变）。
 
 | 验收标准 | 对应检查 |
 | --- | --- |
