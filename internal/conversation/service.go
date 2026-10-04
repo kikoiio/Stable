@@ -37,8 +37,8 @@ type Deps struct {
 	// ContextWindowTokens overrides the model context window used for
 	// compaction; zero resolves to the sessioncontext default.
 	ContextWindowTokens int
-	Refresher          core.DependencyRefresher
-	PollEvery          time.Duration // goal status poll interval; 0 defaults to 2s
+	Refresher           core.DependencyRefresher
+	PollEvery           time.Duration // goal status poll interval; 0 defaults to 2s
 }
 
 // Service is the persistent chat session: it owns the unix socket, fans out
