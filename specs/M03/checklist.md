@@ -108,7 +108,7 @@
 | C31 | ✓ | lib.sh 并行隔离设计（独立 run_root/端口/HOME）；TestConcurrentSessionRunsKeepSessionAndRunOwnership；本轮回归以并行波次实际执行 |
 | C32 | ✓ | run.sh/waiting_restart.sh/m03_acceptance 会话与目标同门；TestRunCancelChecksSessionOwnership、verifyCandidateSession 拒绝非属主会话接收 |
 | C33 | ✓ | go build ./...（各提交 worktree）、go vet ./... exit 0、go test ./... 26 包 exit 0、workers/{kicad,computer} unittest discover OK |
-| C34 | 部分 | run.sh E2E PASS、waiting_restart PASS、unsupported PASS、criteria_change PASS、dependency_change PASS（核心失效判定全绿；尾部重启恢复三阶段退役，见残留）；S01 cases 为 M03 前既有欠账（agentctl start 已移除） |
+| C34 | 部分 | run.sh E2E PASS、waiting_restart PASS、unsupported PASS、criteria_change PASS、dependency_change PASS（含恢复后的检查器版本恢复、必需输入缺失、跨重启唤醒重放全部阶段）；S01 cases 为 M03 前既有欠账（agentctl start 已移除） |
 | C35 | ✓ | TestM03TrustedCandidateAcceptanceAndRestart（真实隔离，m03-e2e 套件） |
 | C36 | ✓ | TestM03ForceAcceptanceRequiresEveryFindingAndKeepsReverification（真实隔离，m03-e2e 套件） |
 
@@ -124,7 +124,7 @@
 
 > 处置安排同步记录于 mewcode-migration-map.md「M03 收尾处置与 M04 衔接」。
 
-1. **不可用窗口后的唤醒重放——修复项（不取消）**：重启后 agent 已 finished 且 dependency_changed 事件停留 signaled，目标不再收敛；dependency_change 尾部三阶段（检查器版本恢复、必需输入缺失、跨重启唤醒重放）因此退役。处置：在 M04 写入/命令工具接入**之前**主线串行修复——先最小复现定位（现场：/tmp/m03_logs/e2e-dep9.log 与 events 表快照），预计半天，独立提交。中断恢复本身由 TestM03AcceptanceInterruptedAfterExchangeReopensSQLite 及 reconcile 系列覆盖。
+1. **不可用窗口后的唤醒重放——已解决（2026-10-04 本 session）**：定位结论为**测试收敛判定竞态，非产品回归**。恢复路径（SignalWithStart 唤醒、持久事件、replayEvents 重放）经验证健康——孤立复现与完整序列共 5 次全部收敛；此前 dep8-10 的失败是 verified→unverified 瞬时翻转撞上单次读数断言。修复：收敛判定改为 verified 且全部依赖可用**连续 3 次读数**成立；退役的三阶段（检查器版本恢复、必需输入缺失、跨重启唤醒重放）已恢复并全绿（e2e-dep-final.log，14/14 PASS）。
 2. **会话转向全流程——转为产品决策项（本里程碑不实施）**：会话型目标的 EvaluateGoal 经统一 agent 运行器后持续 WaitingForHuman（agent runner 仅文本回执、无工具调用，undelivered conversation 注入与 observe 分支交互待澄清）。处置：作为 M05 规格轮的输入，与 say/reply 语义一并决策；届时再决定补 mock 的 agent 工具协议还是调整运行器语义。
 3. **会话代次的外部可观测性——取消**：runtime_handle 仅暴露命名空间内 PID，会话记录重建后 generation 重置，外部测试无法观测「旧代次失效」（run.sh 已放宽为 ≥1 并注明）；语义本身由 TestM03ComputerIsolatedSessionLifecycle 覆盖，无需进一步动作。
 4. **tests/cases（make cases）——挂起**：`agentctl start` 子命令在 M03 前已移除，S01 案例运行器需要按会话绑定目标 + 接收流程重写（既有欠账，非 M03 回归）；待 M04 工具场景成形后一并重写。

@@ -278,10 +278,88 @@ assert not s['verified'] and not conn['available'] and 'version unavailable' in 
 assert any(e['criterion_id']=='erc-clean' and e['current'] for e in s['evidence']), s['evidence']
 print('V02 UNKNOWN CONNECTION CHECKER VERSION PASS')
 PY
-# M03 re-baseline: the tail phases (checker-version recovery after an
-# unavailable window, required-input removal and wake replay across restarts)
-# are retired from this scenario; the wake-replay-after-unavailable path is
-# recorded as a residual item in specs/M03/checklist.md. The directional
-# invalidation core above is fully covered.
+# Retired-phase restoration (2026-10-04 wake-replay residual): the recovery
+# path is healthy; earlier failures were a verified->unverified transient flip
+# racing single-read assertions. Convergence therefore requires verified AND
+# every dependency available on three consecutive reads before asserting.
 "$dev_root/bin/stable" down >/dev/null 2>&1 || true
+python3 - "$dev_root/share/workers/kicad/schematic.py" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]); source=p.read_text()
+old="CONNECTION_CHECKER_VERSION = ''"
+assert old in source, source
+p.write_text(source.replace(old,"CONNECTION_CHECKER_VERSION = 'v02-test'",1))
+PY
+start_runner
+converged() {
+  read_status && python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); sys.exit(0 if s["verified"] and all(d["available"] for d in s["snapshot"]["dependencies"]) else 1)' "$status_file"
+}
+stable_hits=0
+for _ in $(seq 1 900); do
+  if converged; then
+    stable_hits=$((stable_hits+1))
+    [[ $stable_hits -ge 3 ]] && break
+    sleep 3
+  else
+    stable_hits=0
+    sleep 0.5
+  fi
+done
+read_status
+python3 - "$status_file" <<'PY'
+import json,sys
+s=json.load(open(sys.argv[1])); assert s['verified'] and all(d['available'] for d in s['snapshot']['dependencies']), s
+print('V02 CHECKER VERSION RECOVERY PASS')
+PY
+
+# A required input disappearing keeps the target pending and explains the
+# missing source. Stop the worker before restoring it so the durable wake is
+# replayed after restart rather than relying on another user command.
+project_file="$goal_dir/sensor.kicad_pro"
+cp "$project_file" "$run_root/sensor.kicad_pro.saved"
+rm "$project_file"
+read_status
+python3 - "$status_file" <<'PY'
+import json,sys
+s=json.load(open(sys.argv[1])); g=s['snapshot']['goal']
+erc=next(d for d in s['snapshot']['dependencies'] if d['family']=='kicad.erc')
+assert not s['verified'] and not erc['available'] and 'missing' in erc['reason'].lower(), s
+assert g['status']=='pending_reverification', g
+assert not any(e['criterion_id']=='erc-clean' and e['current'] for e in s['evidence']), s['evidence']
+print('V02 MISSING REQUIRED INPUT PASS')
+PY
+"$dev_root/libexec/agentctl" export --run-root "$run_root/goals" --db "$run_root/state.db" \
+  --project-root "$dev_root/share" --temporal "$temporal_address" --goal "$goal_id" --out "$run_root/delivery-unavailable" >/dev/null
+python3 - "$run_root/delivery-unavailable/delivery.json" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1])); assert not d['verified'] and d['snapshot']['goal']['status']=='pending_reverification', d
+assert not any(e['criterion_id']=='erc-clean' and e['current'] for e in d['evidence']), d['evidence']
+PY
+"$dev_root/bin/stable" down >/dev/null 2>&1 || true
+cp "$run_root/sensor.kicad_pro.saved" "$project_file"
+read_status
+python3 - "$run_root/state.db" <<'PY'
+import sqlite3,sys
+c=sqlite3.connect(sys.argv[1]); rows=c.execute("select id from events where kind='dependency_changed'").fetchall()
+assert len(rows) >= 1, rows
+PY
+"$dev_root/bin/stable" down >/dev/null 2>&1 || true
+start_runner
+stable_hits=0
+for _ in $(seq 1 900); do
+  if converged; then
+    stable_hits=$((stable_hits+1))
+    [[ $stable_hits -ge 3 ]] && break
+    sleep 3
+  else
+    stable_hits=0
+    sleep 0.5
+  fi
+done
+read_status
+python3 - "$status_file" <<'PY'
+import json,sys
+s=json.load(open(sys.argv[1])); assert s['verified'] and all(d['available'] for d in s['snapshot']['dependencies']), s
+print('V02 WAKE REPLAY AND RECOVERY PASS')
+PY
 printf 'E2E DEPENDENCY PASS %s\nEvidence: %s\n' "$goal_id" "$run_root"
