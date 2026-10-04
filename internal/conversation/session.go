@@ -144,6 +144,9 @@ func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) 
 		}
 		return s.chat(ctx, c)
 	case "reply":
+		if c.QuestionID != "" {
+			return s.replyQuestion(ctx, c)
+		}
 		return s.say(ctx, c, core.MessageKindReply, core.EventKindHumanReply)
 	case "create_goal":
 		return s.createGoal(ctx, c)

@@ -78,14 +78,15 @@ func chatserve(args []string) error {
 	var executorFactory agent.ExecutorFactory
 	var toolSchemas []llm.ToolSchema
 	var runnerError string
+	var snapshotStore *candidate.SnapshotStore
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
 		var credentials []string
 		if c.Model.APIKey != "" {
 			credentials = []string{c.Model.APIKey}
 		}
-		snapshotStore, snapErr := candidate.NewSnapshotStore(*projectRoot, c.Snapshots.ProjectBytes(), c.Snapshots.ManifestsPerCandidate(), credentials)
-		if snapErr != nil {
-			return fmt.Errorf("candidate snapshot store: %w", snapErr)
+		snapshotStore, err = candidate.NewSnapshotStore(*projectRoot, c.Snapshots.ProjectBytes(), c.Snapshots.ManifestsPerCandidate(), credentials)
+		if err != nil {
+			return fmt.Errorf("candidate snapshot store: %w", err)
 		}
 		executorFactory = execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
 			Sandbox:            sandbox.LinuxManager{},
@@ -112,6 +113,7 @@ func chatserve(args []string) error {
 		Refresher:           refresher,
 		CandidateCheckers:   chatCandidateCheckers(*runRoot),
 		ContextWindowTokens: c.Model.ContextWindowTokens,
+		Snapshots:           snapshotStore,
 	})
 	if err != nil {
 		return err

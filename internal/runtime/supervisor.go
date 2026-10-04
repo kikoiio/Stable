@@ -327,10 +327,11 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 	var runnerError string
 	var executorFactory agent.ExecutorFactory
 	var toolSchemas []llm.ToolSchema
+	var snapshotStore *candidate.SnapshotStore
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
-		snapshotStore, snapErr := candidate.NewSnapshotStore(p.Share, c.Snapshots.ProjectBytes(), c.Snapshots.ManifestsPerCandidate(), snapshotCredentials(c.Model.APIKey))
-		if snapErr != nil {
-			return fmt.Errorf("candidate snapshot store: %w", snapErr)
+		snapshotStore, err = candidate.NewSnapshotStore(p.Share, c.Snapshots.ProjectBytes(), c.Snapshots.ManifestsPerCandidate(), snapshotCredentials(c.Model.APIKey))
+		if err != nil {
+			return fmt.Errorf("candidate snapshot store: %w", err)
 		}
 		executorFactory = execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
 			Sandbox:            sandbox.LinuxManager{},
@@ -357,6 +358,7 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 		Refresher:           refresher,
 		CandidateCheckers:   []candidate.Checker{candidate.KicadERCChecker{Sandbox: sandbox.LinuxManager{}, RunRoot: p.Goals}},
 		ContextWindowTokens: c.Model.ContextWindowTokens,
+		Snapshots:           snapshotStore,
 	})
 	if err != nil {
 		return err

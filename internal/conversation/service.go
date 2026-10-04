@@ -37,8 +37,11 @@ type Deps struct {
 	// ContextWindowTokens overrides the model context window used for
 	// compaction; zero resolves to the sessioncontext default.
 	ContextWindowTokens int
-	Refresher           core.DependencyRefresher
-	PollEvery           time.Duration // goal status poll interval; 0 defaults to 2s
+	// Snapshots is the candidate snapshot store used by snapshot_list and
+	// snapshot_rewind; nil makes both report snapshots as unavailable.
+	Snapshots *candidate.SnapshotStore
+	Refresher core.DependencyRefresher
+	PollEvery time.Duration // goal status poll interval; 0 defaults to 2s
 }
 
 // Service is the persistent chat session: it owns the unix socket, fans out
@@ -204,6 +207,42 @@ func (s *Service) readLoop(ctx context.Context, conn net.Conn, updates chan Serv
 				updates <- ServerMsg{Type: "error", Error: err.Error()}
 			} else {
 				updates <- ServerMsg{Type: "approval_cancelled", RunID: c.RunID}
+			}
+			updates <- ServerMsg{Type: "done"}
+			continue
+		case "session_search":
+			result, err := s.searchSessions(c)
+			if err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			} else {
+				updates <- ServerMsg{Type: "search", Search: &result}
+			}
+			updates <- ServerMsg{Type: "done"}
+			continue
+		case "snapshot_list":
+			snapshots, err := s.listSnapshots(c)
+			if err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			} else {
+				updates <- ServerMsg{Type: "snapshots", Snapshots: snapshots}
+			}
+			updates <- ServerMsg{Type: "done"}
+			continue
+		case "snapshot_rewind":
+			record, err := s.rewindSnapshot(ctx, c)
+			if err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			} else {
+				updates <- ServerMsg{Type: "rewind", Rewind: &record}
+			}
+			updates <- ServerMsg{Type: "done"}
+			continue
+		case "question_list":
+			questions, err := s.listQuestions(c)
+			if err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			} else {
+				updates <- ServerMsg{Type: "questions", Questions: questions}
 			}
 			updates <- ServerMsg{Type: "done"}
 			continue
