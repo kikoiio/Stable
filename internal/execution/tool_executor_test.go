@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,5 +149,48 @@ func TestToolExecutorSandboxUnavailableIsDenied(t *testing.T) {
 	}
 	if gate.seen.Kind != permission.OpCommand || gate.seen.Name != "Command" {
 		t.Fatalf("permission operation = %#v", gate.seen)
+	}
+}
+
+func TestToolExecutorEnforcesReadBeforeWrite(t *testing.T) {
+	formal := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formal, "a.txt"), []byte("old\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	candidateRoot := filepath.Join(t.TempDir(), "cand")
+	gate := &executorTestGate{decision: permission.PermissionDecision{Kind: permission.DecisionAllow}}
+	sandboxFake := &executorTestSandbox{result: sandbox.SandboxResult{Stdout: []byte(`{"output":"done"}`), ExitCode: 0}}
+	factory := NewToolExecutorFactory(ToolExecutorDeps{Gate: gate, Sandbox: sandboxFake, HelperPath: "helper", Now: time.Now})
+	runner, err := factory.ForRun(executorRequest(t, formal, candidateRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The candidate copy exists but was never read in this run: refuse.
+	blind, err := runner.Execute(context.Background(), llm.ToolUse{ID: "w1", Name: "write_file", Arguments: json.RawMessage(`{"file_path":"a.txt","content":"new\n"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !blind.IsError || !strings.Contains(blind.Content, "has not been read") {
+		t.Fatalf("blind overwrite outcome = %#v", blind)
+	}
+	if sandboxFake.argv != nil {
+		t.Fatalf("blind overwrite reached the sandbox: %v", sandboxFake.argv)
+	}
+	// After a successful read the same write is dispatched.
+	read, err := runner.Execute(context.Background(), llm.ToolUse{ID: "r1", Name: "read_file", Arguments: json.RawMessage(`{"file_path":"a.txt"}`)})
+	if err != nil || read.IsError {
+		t.Fatalf("read = %#v, err=%v", read, err)
+	}
+	write, err := runner.Execute(context.Background(), llm.ToolUse{ID: "w2", Name: "write_file", Arguments: json.RawMessage(`{"file_path":"a.txt","content":"new\n"}`)})
+	if err != nil || write.IsError {
+		t.Fatalf("write after read = %#v, err=%v", write, err)
+	}
+	if sandboxFake.argv == nil {
+		t.Fatal("write after read was not dispatched to the sandbox")
+	}
+	// Writing a brand-new path does not require a prior read.
+	fresh, err := runner.Execute(context.Background(), llm.ToolUse{ID: "w3", Name: "write_file", Arguments: json.RawMessage(`{"file_path":"new.txt","content":"x\n"}`)})
+	if err != nil || fresh.IsError {
+		t.Fatalf("fresh write = %#v, err=%v", fresh, err)
 	}
 }

@@ -237,3 +237,93 @@ func TestSessionConversationMessagesRebuildsAssistantStream(t *testing.T) {
 		t.Fatalf("rebuilt history=%+v", messages)
 	}
 }
+
+// C23: after a disconnect, run_subscribe with after_seq replays tool
+// execution, approval-wait and terminal events in order, and cancelling a
+// finished run neither re-executes tools nor touches the runner.
+func TestSubscribeRunRestoresToolEventsByCursor(t *testing.T) {
+	root := t.TempDir()
+	session, err := sessionlog.Create(root, "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := make(chan agent.ExecutionEvent, 4)
+	done := make(chan agent.RunOutcome, 1)
+	started := time.Now().UTC()
+	payloads := []agent.EventKind{agent.EventToolExecStart, agent.EventAwaitingApproval, agent.EventToolExecResult}
+	for i, kind := range payloads {
+		events <- agent.ExecutionEvent{ID: "evt-" + string(rune('a'+i)), RunID: "run-1", SessionID: session.ID, RunSeq: uint64(i + 1), At: started.Add(time.Duration(i) * time.Millisecond), Kind: kind, Payload: json.RawMessage(`{"tool":"read_file"}`)}
+	}
+	events <- agent.ExecutionEvent{ID: "evt-end", RunID: "run-1", SessionID: session.ID, RunSeq: 4, At: started.Add(4 * time.Millisecond), Kind: agent.EventTerminal, Payload: json.RawMessage(`{"status":"completed"}`)}
+	close(events)
+	done <- agent.RunOutcome{RunID: "run-1", Status: agent.RunCompleted}
+	close(done)
+	runner := &fixedRunner{handle: &agent.RunHandle{Events: events, Done: done}}
+	updates := make(chan ServerMsg, 16)
+	svc := &Service{deps: Deps{Runner: runner, ProjectRoot: root, ProviderName: "openai-compatible", Model: "mock"}, clients: map[chan ServerMsg]*clientSubscription{updates: {ch: updates}}}
+	request := agent.ExecutionRequest{RunID: "run-1", Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: session.ID}, Intent: "investigate", Messages: []llm.Message{{Role: "user", Content: "look"}}}
+	if err := svc.startRun(context.Background(), ClientMsg{SessionID: session.ID, Run: &request}, updates); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(2 * time.Second)
+	draining := true
+	for draining {
+		select {
+		case msg := <-updates:
+			if msg.Type == "run_outcome" {
+				draining = false
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for run outcome")
+		}
+	}
+	// Reconnect from just after the first tool event (seq 4): the approval wait,
+	// tool result and terminal events must replay in order.
+	resume := make(chan ServerMsg, 16)
+	svc.mu.Lock()
+	svc.clients[resume] = &clientSubscription{ch: resume}
+	svc.mu.Unlock()
+	if err := svc.subscribeRun(context.Background(), ClientMsg{SessionID: session.ID, RunID: "run-1", AfterSeq: 4}, resume); err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	var cursors []uint64
+	sawOutcome := false
+	for i := 0; i < 4; i++ {
+		msg := <-resume
+		if msg.Type == "run_event" && msg.RunEvent != nil {
+			kinds = append(kinds, msg.RunEvent.Kind)
+			cursors = append(cursors, msg.Cursor)
+		}
+		if msg.Type == "run_outcome" && msg.Outcome != nil && msg.Outcome.Status == agent.RunCompleted {
+			sawOutcome = true
+		}
+	}
+	if len(kinds) != 3 || kinds[0] != string(agent.EventAwaitingApproval) || kinds[1] != string(agent.EventToolExecResult) || kinds[2] != string(agent.EventTerminal) {
+		t.Fatalf("replayed kinds=%v", kinds)
+	}
+	if cursors[0] >= cursors[1] || cursors[1] >= cursors[2] {
+		t.Fatalf("replay cursors not increasing: %v", cursors)
+	}
+	if !sawOutcome {
+		t.Fatal("terminal outcome missing from replay")
+	}
+	// Cancelling the finished run is a no-op: nothing is re-executed.
+	before, err := sessionlog.Replay(root, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.cancelRun(ClientMsg{RunID: "run-1", SessionID: session.ID}, make(chan ServerMsg, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if runner.cancelled != "" {
+		t.Fatalf("finished run was cancelled again: %q", runner.cancelled)
+	}
+	after, err := sessionlog.Replay(root, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Events) != len(before.Events) {
+		t.Fatalf("cancel appended events: before=%d after=%d", len(before.Events), len(after.Events))
+	}
+}

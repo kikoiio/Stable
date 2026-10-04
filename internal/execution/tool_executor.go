@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"stable/internal/agent"
@@ -105,6 +106,27 @@ type toolRunExecutor struct {
 	runRoot          string
 	candidate        *candidate.Candidate
 	approvalObserver func()
+	readsMu          sync.Mutex
+	reads            map[string]bool
+}
+
+// markRead records a workspace-relative path whose formal content the model
+// has successfully read (or whose candidate content it has written) during
+// this run.
+func (e *toolRunExecutor) markRead(rel string) {
+	e.readsMu.Lock()
+	defer e.readsMu.Unlock()
+	if e.reads == nil {
+		e.reads = map[string]bool{}
+	}
+	e.reads[rel] = true
+}
+
+// hasRead reports whether the path was read (or written) earlier in this run.
+func (e *toolRunExecutor) hasRead(rel string) bool {
+	e.readsMu.Lock()
+	defer e.readsMu.Unlock()
+	return e.reads[rel]
 }
 
 func (e *toolRunExecutor) SetApprovalObserver(observer func()) {
@@ -187,13 +209,22 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 			outcome.Content = "Error: " + err.Error()
 			return e.finish(outcome, started), nil
 		}
+		// Read-before-write discipline lives here because helper processes are
+		// per-call: overwriting a file that exists in the candidate copy
+		// requires a successful read (or write) earlier in the same run.
+		if !e.hasRead(rel) {
+			if _, statErr := os.Lstat(filepath.Join(e.authority.CandidateRoot, rel)); statErr == nil {
+				outcome.Content = "Error: file has not been read yet. Read it first before editing."
+				return e.finish(outcome, started), nil
+			}
+		}
 	}
 	var response string
 	var diff *agent.DiffSummary
 	if call.Name == "command" {
 		response, err = e.executeCommand(ctx, args)
 	} else {
-		response, diff, err = e.executeHelper(ctx, tool, args, rel)
+		response, diff, err = e.executeHelper(ctx, call.Name, tool, args, rel)
 	}
 	if err != nil {
 		if errors.Is(err, sandbox.ErrUnavailable) {
@@ -211,6 +242,9 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 			outcome.Status, outcome.IsError = agent.ToolFailed, true
 		}
 		outcome.Diff = diff
+		if !outcome.IsError && (call.Name == "read_file" || call.Name == "write_file" || call.Name == "edit_file") {
+			e.markRead(rel)
+		}
 	}
 	return e.finish(outcome, started), nil
 }
@@ -328,7 +362,7 @@ func (e *toolRunExecutor) ensureCandidate(ctx context.Context) error {
 	return nil
 }
 
-func (e *toolRunExecutor) executeHelper(ctx context.Context, helper string, args map[string]any, rel string) (string, *agent.DiffSummary, error) {
+func (e *toolRunExecutor) executeHelper(ctx context.Context, modelName, helper string, args map[string]any, rel string) (string, *agent.DiffSummary, error) {
 	if e.deps.HelperPath == "" {
 		return "", nil, errors.New("tool helper is unavailable")
 	}
@@ -339,11 +373,24 @@ func (e *toolRunExecutor) executeHelper(ctx context.Context, helper string, args
 	if helper == "WriteFile" || helper == "EditFile" {
 		workspace = "/workspace/candidate"
 	}
-	request, err := json.Marshal(HelperRequest{Tool: helper, Args: args, Workspace: workspace})
+	request, err := json.Marshal(HelperRequest{Tool: modelName, Args: args, Workspace: workspace})
 	if err != nil {
 		return "", nil, err
 	}
-	profile := sandbox.SandboxProfile{ProjectRoot: e.authority.AllowedRoot, CandidateRoot: e.authority.CandidateRoot, RunRoot: e.runRoot, Timeout: toolRunTimeout, OutputLimit: 1 << 20}
+	// Read-only helpers must work before any candidate exists (pure investigation
+	// runs never create one), so the candidate mount slot is filled by a
+	// per-call scratch directory the sandbox probe can write to. Read tools only
+	// touch /workspace/project; nothing in the scratch survives the call.
+	candidateMount := e.authority.CandidateRoot
+	if helper == "ReadFile" || helper == "Glob" || helper == "Grep" {
+		scratch, scratchErr := os.MkdirTemp(filepath.Dir(e.runRoot), "scratch-")
+		if scratchErr != nil {
+			return "", nil, scratchErr
+		}
+		defer os.RemoveAll(scratch)
+		candidateMount = scratch
+	}
+	profile := sandbox.SandboxProfile{ProjectRoot: e.authority.AllowedRoot, CandidateRoot: candidateMount, RunRoot: e.runRoot, Timeout: toolRunTimeout, OutputLimit: 1 << 20}
 	helperAbs, err := filepath.Abs(e.deps.HelperPath)
 	if err != nil {
 		return "", nil, err

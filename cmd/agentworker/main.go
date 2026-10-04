@@ -112,7 +112,17 @@ func runStableToolExec(input *os.File, output *os.File) {
 }
 
 func executionToolRegistry() *tools.Registry {
-	return tools.CreateDefaultTools().Registry
+	// Each helper invocation is a fresh process, so an in-memory read-before-
+	// write cache cannot span the read and write calls of a run. That
+	// discipline is enforced per run by the controlled executor in
+	// internal/execution; the tools here run with no cache.
+	reg := tools.NewRegistry()
+	reg.Register(&tools.ReadFileTool{})
+	reg.Register(&tools.WriteFileTool{})
+	reg.Register(&tools.EditFileTool{})
+	reg.Register(&tools.GlobTool{})
+	reg.Register(&tools.GrepTool{})
+	return reg
 }
 
 func run(dbPath, runRoot, address, projectRoot string) error {
