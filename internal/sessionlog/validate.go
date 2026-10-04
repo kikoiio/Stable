@@ -1,0 +1,221 @@
+package sessionlog
+
+import (
+	"errors"
+	"fmt"
+)
+
+// scanState summarizes validated history so a newly observed event can be
+// checked for ownership and ordering without re-decoding every caller side.
+type scanState struct {
+	openCalls  map[string]uint64            // call ID -> session seq of the call
+	runs       map[string]RunStarted        // run ID -> start record
+	runSeq     map[string]uint64            // run ID -> last observed run seq
+	runEventAt map[string]map[uint64]uint64 // run ID -> run seq -> session seq
+	snapshots  map[string]SnapshotRef       // snapshot ID -> recorded ref
+	questions  map[string]string            // question ID -> current status
+}
+
+func scanEvents(events []Event) scanState {
+	st := scanState{
+		openCalls:  map[string]uint64{},
+		runs:       map[string]RunStarted{},
+		runSeq:     map[string]uint64{},
+		runEventAt: map[string]map[uint64]uint64{},
+		snapshots:  map[string]SnapshotRef{},
+		questions:  map[string]string{},
+	}
+	for _, e := range events {
+		switch e.Type {
+		case EventToolCall:
+			var call ToolCall
+			if decodeData(e.Data, &call) == nil && call.CallID != "" {
+				st.openCalls[call.CallID] = e.Seq
+			}
+		case EventToolResult:
+			var result ToolResult
+			if decodeData(e.Data, &result) == nil {
+				delete(st.openCalls, result.CallID)
+			}
+		case EventRunStarted:
+			var started RunStarted
+			if decodeData(e.Data, &started) == nil {
+				st.runs[started.RunID] = started
+			}
+		case EventRunEvent:
+			var runEvent RunEvent
+			if decodeData(e.Data, &runEvent) == nil {
+				st.runSeq[runEvent.RunID] = runEvent.RunSeq
+				m := st.runEventAt[runEvent.RunID]
+				if m == nil {
+					m = map[uint64]uint64{}
+					st.runEventAt[runEvent.RunID] = m
+				}
+				m[runEvent.RunSeq] = e.Seq
+			}
+		case EventSnapshot:
+			var snap SnapshotRef
+			if decodeData(e.Data, &snap) == nil {
+				st.snapshots[snap.SnapshotID] = snap
+			}
+		case EventQuestion:
+			var question PendingQuestion
+			if decodeData(e.Data, &question) == nil {
+				st.questions[question.QuestionID] = question.Status
+			}
+		case EventReply:
+			var reply QuestionReply
+			if decodeData(e.Data, &reply) == nil {
+				st.questions[reply.QuestionID] = QuestionReplied
+			}
+		}
+	}
+	return st
+}
+
+// checkBoundary validates a compaction boundary against history. selfSeq is
+// the sequence number the boundary event itself will occupy.
+func checkBoundary(b Boundary, st scanState, selfSeq uint64) error {
+	if b.FromSeq == 0 || b.ToSeq < b.FromSeq || b.Summary == "" {
+		return errors.New("boundary requires a valid range and summary")
+	}
+	var cutoff uint64 // session seq of the last covered event
+	switch b.EffectiveScope() {
+	case BoundaryScopeSession:
+		if b.RunID != "" {
+			return errors.New("session scope boundary must not name a run")
+		}
+		cutoff = b.ToSeq
+	case BoundaryScopeRun:
+		if b.RunID == "" {
+			return errors.New("run scope boundary requires run_id")
+		}
+		if st.runs[b.RunID].RunID == "" {
+			return errors.New("boundary run does not exist in session")
+		}
+		at, ok := st.runEventAt[b.RunID][b.ToSeq]
+		if !ok || b.ToSeq > st.runSeq[b.RunID] {
+			return errors.New("boundary range exceeds observed run events")
+		}
+		cutoff = at
+	default:
+		return fmt.Errorf("boundary has invalid scope %q", b.Scope)
+	}
+	if cutoff >= selfSeq {
+		return errors.New("boundary range covers the boundary itself")
+	}
+	for _, seq := range st.openCalls {
+		if seq <= cutoff {
+			return errors.New("boundary splits a tool call and its result")
+		}
+	}
+	return nil
+}
+
+func checkSnapshot(sessionID string, s SnapshotRef, st scanState) error {
+	if s.SnapshotID == "" || s.CandidateID == "" || s.Digest == "" || s.CreatedAt.IsZero() {
+		return errors.New("snapshot event requires snapshot_id, candidate_id, digest, and created_at")
+	}
+	if s.SessionID != sessionID {
+		return errors.New("snapshot session does not match log")
+	}
+	if s.RunID != "" && st.runs[s.RunID].RunID == "" {
+		return errors.New("snapshot run does not exist in session")
+	}
+	if _, dup := st.snapshots[s.SnapshotID]; dup {
+		return errors.New("snapshot ID already recorded in session")
+	}
+	return nil
+}
+
+func checkRewind(r RewindRecord, st scanState) error {
+	if r.SnapshotID == "" || r.CandidateID == "" || r.CreatedAt.IsZero() {
+		return errors.New("rewind event requires snapshot_id, candidate_id, and created_at")
+	}
+	switch r.Status {
+	case RewindPending, RewindCompleted, RewindFailed:
+	default:
+		return fmt.Errorf("rewind has invalid status %q", r.Status)
+	}
+	snap, ok := st.snapshots[r.SnapshotID]
+	if !ok {
+		return errors.New("rewind targets an unknown snapshot")
+	}
+	if snap.CandidateID != r.CandidateID {
+		return errors.New("rewind candidate does not match snapshot owner")
+	}
+	return nil
+}
+
+func checkQuestion(sessionID string, q PendingQuestion, st scanState) error {
+	if q.QuestionID == "" || q.WorkRef == "" || q.RunID == "" || q.Prompt == "" || q.CreatedAt.IsZero() {
+		return errors.New("question event requires question_id, work_ref, run_id, prompt, and created_at")
+	}
+	if q.SessionID != sessionID {
+		return errors.New("question session does not match log")
+	}
+	if q.Status != QuestionPending {
+		return errors.New("question must start pending")
+	}
+	if st.runs[q.RunID].RunID == "" {
+		return errors.New("question run does not exist in session")
+	}
+	if _, dup := st.questions[q.QuestionID]; dup {
+		return errors.New("question ID already exists in session")
+	}
+	return nil
+}
+
+func checkReply(r QuestionReply, st scanState) error {
+	if r.QuestionID == "" || r.ReplyText == "" || r.RepliedAt.IsZero() {
+		return errors.New("reply event requires question_id, reply_text, and replied_at")
+	}
+	status, ok := st.questions[r.QuestionID]
+	if !ok {
+		return errors.New("reply targets an unknown question")
+	}
+	if status != QuestionPending {
+		return errors.New("question is already answered")
+	}
+	return nil
+}
+
+// validateOwnedAppend checks boundary, snapshot, rewind, question, and reply
+// events before they are appended. selfSeq is the sequence number the new
+// event will occupy.
+func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSeq uint64) error {
+	st := scanEvents(events)
+	switch typ {
+	case EventBoundary:
+		var b Boundary
+		if err := decodeData(data, &b); err != nil {
+			return errors.New("compaction boundary has invalid shape")
+		}
+		return checkBoundary(b, st, selfSeq)
+	case EventSnapshot:
+		var s SnapshotRef
+		if err := decodeData(data, &s); err != nil {
+			return errors.New("snapshot event has invalid shape")
+		}
+		return checkSnapshot(sessionID, s, st)
+	case EventRewind:
+		var r RewindRecord
+		if err := decodeData(data, &r); err != nil {
+			return errors.New("rewind event has invalid shape")
+		}
+		return checkRewind(r, st)
+	case EventQuestion:
+		var q PendingQuestion
+		if err := decodeData(data, &q); err != nil {
+			return errors.New("question event has invalid shape")
+		}
+		return checkQuestion(sessionID, q, st)
+	case EventReply:
+		var r QuestionReply
+		if err := decodeData(data, &r); err != nil {
+			return errors.New("reply event has invalid shape")
+		}
+		return checkReply(r, st)
+	}
+	return nil
+}

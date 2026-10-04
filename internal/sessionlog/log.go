@@ -37,7 +37,7 @@ func Append(root, id, typ string, data any) (Event, error) {
 		return Event{}, errors.New("event type is required")
 	}
 	switch typ {
-	case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent:
+	case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply:
 	default:
 		return Event{}, fmt.Errorf("unknown event type %q", typ)
 	}
@@ -74,6 +74,12 @@ func Append(root, id, typ string, data any) (Event, error) {
 		}
 		if typ == EventRunStarted || typ == EventRunEvent {
 			if err := validateRunAppend(id, typ, data, replay.Events); err != nil {
+				return Event{}, err
+			}
+		}
+		switch typ {
+		case EventBoundary, EventSnapshot, EventRewind, EventQuestion, EventReply:
+			if err := validateOwnedAppend(id, typ, data, replay.Events, seq+1); err != nil {
 				return Event{}, err
 			}
 		}
@@ -313,7 +319,7 @@ func replayFile(path, id string) (Transcript, error) {
 			return out, fmt.Errorf("session log invalid envelope at seq %d", expected)
 		}
 		switch e.Type {
-		case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent:
+		case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply:
 		default:
 			return out, fmt.Errorf("session log has unknown event type %q at seq %d", e.Type, e.Seq)
 		}
@@ -335,8 +341,43 @@ func replayFile(path, id string) (Transcript, error) {
 		case EventBoundary:
 			var boundary Boundary
 			raw, _ := json.Marshal(e.Data)
-			if json.Unmarshal(raw, &boundary) != nil || boundary.FromSeq == 0 || boundary.ToSeq < boundary.FromSeq || boundary.Summary == "" {
+			if json.Unmarshal(raw, &boundary) != nil {
 				return out, fmt.Errorf("session log has invalid compaction boundary at seq %d", e.Seq)
+			}
+			if err := checkBoundary(boundary, scanEvents(out.Events), e.Seq); err != nil {
+				return out, fmt.Errorf("session log has invalid compaction boundary at seq %d: %v", e.Seq, err)
+			}
+		case EventSnapshot:
+			var snap SnapshotRef
+			if decodeData(e.Data, &snap) != nil {
+				return out, fmt.Errorf("session log has invalid snapshot event at seq %d", e.Seq)
+			}
+			if err := checkSnapshot(id, snap, scanEvents(out.Events)); err != nil {
+				return out, fmt.Errorf("session log has invalid snapshot event at seq %d: %v", e.Seq, err)
+			}
+		case EventRewind:
+			var rewind RewindRecord
+			if decodeData(e.Data, &rewind) != nil {
+				return out, fmt.Errorf("session log has invalid rewind event at seq %d", e.Seq)
+			}
+			if err := checkRewind(rewind, scanEvents(out.Events)); err != nil {
+				return out, fmt.Errorf("session log has invalid rewind event at seq %d: %v", e.Seq, err)
+			}
+		case EventQuestion:
+			var question PendingQuestion
+			if decodeData(e.Data, &question) != nil {
+				return out, fmt.Errorf("session log has invalid question event at seq %d", e.Seq)
+			}
+			if err := checkQuestion(id, question, scanEvents(out.Events)); err != nil {
+				return out, fmt.Errorf("session log has invalid question event at seq %d: %v", e.Seq, err)
+			}
+		case EventReply:
+			var reply QuestionReply
+			if decodeData(e.Data, &reply) != nil {
+				return out, fmt.Errorf("session log has invalid reply event at seq %d", e.Seq)
+			}
+			if err := checkReply(reply, scanEvents(out.Events)); err != nil {
+				return out, fmt.Errorf("session log has invalid reply event at seq %d: %v", e.Seq, err)
 			}
 		case EventRunStarted:
 			var started RunStarted
