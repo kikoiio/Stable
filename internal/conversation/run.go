@@ -232,6 +232,24 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 				})
 			}
 		}
+		if err == nil && event.Kind == agent.EventToolExecResult {
+			// Snapshots created at tool write boundaries ride the tool result
+			// payload; each becomes a session snapshot event, bound to its
+			// run and candidate, in stream order.
+			var outcome agent.ToolOutcome
+			if json.Unmarshal(event.Payload, &outcome) != nil {
+				err = errors.New("tool result has invalid payload")
+			} else {
+				for _, snap := range outcome.Snapshots {
+					if _, err = sessionlog.Append(s.deps.ProjectRoot, request.Work.SessionID, sessionlog.EventSnapshot, sessionlog.SnapshotRef{
+						SnapshotID: snap.SnapshotID, SessionID: request.Work.SessionID, CandidateID: snap.CandidateID,
+						RunID: snap.RunID, Label: snap.Label, Digest: snap.Digest, CreatedAt: snap.CreatedAt,
+					}); err != nil {
+						break
+					}
+				}
+			}
+		}
 		s.eventMu.Unlock()
 		if err != nil {
 			_ = s.deps.Runner.Cancel(request.RunID)
@@ -289,6 +307,12 @@ func (s *Service) finalizeRunCandidate(ctx context.Context, request agent.Execut
 			return errors.New("candidate ownership does not match run")
 		}
 		formalRoot = record.Candidate.FormalRoot
+	}
+	if record != nil && record.Candidate.Status == "blocked" {
+		// A failed snapshot checkpoint blocked this candidate during the
+		// run. Keep it blocked: it must not be frozen ready, accepted, or
+		// silently cleaned up.
+		return nil
 	}
 	_, candidateDigest, err := candidate.BuildManifest(candidateRoot)
 	if err != nil {

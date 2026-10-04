@@ -79,6 +79,14 @@ func chatserve(args []string) error {
 	var toolSchemas []llm.ToolSchema
 	var runnerError string
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
+		var credentials []string
+		if c.Model.APIKey != "" {
+			credentials = []string{c.Model.APIKey}
+		}
+		snapshotStore, snapErr := candidate.NewSnapshotStore(*projectRoot, c.Snapshots.ProjectBytes(), c.Snapshots.ManifestsPerCandidate(), credentials)
+		if snapErr != nil {
+			return fmt.Errorf("candidate snapshot store: %w", snapErr)
+		}
 		executorFactory = execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
 			Sandbox:            sandbox.LinuxManager{},
 			Gate:               execution.StorePermissionGate{Store: s},
@@ -87,6 +95,7 @@ func chatserve(args []string) error {
 			HelperPath:         helperPath,
 			SessionRoot:        *projectRoot,
 			ProviderCredential: c.Model.APIKey,
+			Snapshots:          snapshotStore,
 		})
 		toolSchemas = chatserveToolSchemas()
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, model.(decision.ChatProvider))

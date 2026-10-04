@@ -34,6 +34,12 @@ type CandidateLifecycle interface {
 	TransitionCandidate(context.Context, string, string, string, string) error
 }
 
+// SnapshotCreator is the checkpoint surface used at tool write boundaries;
+// *candidate.SnapshotStore implements it.
+type SnapshotCreator interface {
+	Create(sessionID, candidateID, runID, label, candidateRoot string) (candidate.FileSnapshot, error)
+}
+
 type ToolExecutorDeps struct {
 	Sandbox            sandbox.SandboxManager
 	Gate               PermissionGate
@@ -44,6 +50,9 @@ type ToolExecutorDeps struct {
 	PollEvery          time.Duration
 	Candidates         CandidateLifecycle
 	ProviderCredential string
+	// Snapshots checkpoints the candidate around every file-changing tool
+	// call. Nil disables checkpointing (tests and read-only tooling).
+	Snapshots SnapshotCreator
 }
 
 type ToolExecutorFactory struct{ deps ToolExecutorDeps }
@@ -108,6 +117,12 @@ type toolRunExecutor struct {
 	approvalObserver func()
 	readsMu          sync.Mutex
 	reads            map[string]bool
+	// snapshotDigest is the candidate digest covered by the latest
+	// checkpoint; an unchanged candidate reuses it instead of writing a
+	// duplicate manifest. snapshotBlocked, once set, refuses every later
+	// mutation in this run because a required checkpoint failed.
+	snapshotDigest  string
+	snapshotBlocked string
 }
 
 // markRead records a workspace-relative path whose formal content the model
@@ -224,6 +239,23 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 			}
 		}
 	}
+	// Checkpoint the candidate before any file-changing call. A blocked
+	// candidate refuses further mutations, and a failed pre-state snapshot
+	// blocks it instead of letting an uncheckpointed change through.
+	mutating := kind == permission.OpWrite || kind == permission.OpCommand
+	preDigest := ""
+	if mutating {
+		if e.snapshotBlocked != "" {
+			outcome.Status, outcome.Content = agent.ToolDenied, "Error: candidate is blocked: "+e.snapshotBlocked
+			return e.finish(outcome, started), nil
+		}
+		if e.deps.Snapshots != nil {
+			if preDigest, err = e.preSnapshot(ctx, call.Name, &outcome); err != nil {
+				outcome.Status, outcome.Content = agent.ToolFailed, "Error: pre-change snapshot failed; candidate is blocked from further writes and acceptance"
+				return e.finish(outcome, started), nil
+			}
+		}
+	}
 	var response string
 	var diff *agent.DiffSummary
 	if call.Name == "command" {
@@ -251,8 +283,76 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		if !outcome.IsError && (call.Name == "read_file" || call.Name == "write_file" || call.Name == "edit_file") {
 			e.markRead(rel)
 		}
+		// After a successful mutation compare the manifest and checkpoint the
+		// new state; a confirmed no-change call reuses the pre-state digest
+		// and writes nothing. A failed post-state snapshot blocks the
+		// candidate rather than faking a checkpoint.
+		if mutating && !outcome.IsError && e.deps.Snapshots != nil {
+			if postErr := e.postSnapshot(ctx, call.Name, preDigest, &outcome); postErr != nil {
+				outcome.Status, outcome.IsError = agent.ToolFailed, true
+				outcome.Content += "\nError: post-change snapshot failed; candidate is blocked from further writes and acceptance"
+			}
+		}
 	}
 	return e.finish(outcome, started), nil
+}
+
+// preSnapshot checkpoints the candidate before a file-changing tool call. A
+// candidate unchanged since the latest checkpoint reuses that manifest
+// instead of writing a duplicate, so only real state transitions consume the
+// per-candidate manifest quota.
+func (e *toolRunExecutor) preSnapshot(ctx context.Context, tool string, outcome *agent.ToolOutcome) (string, error) {
+	_, digest, err := candidate.BuildManifest(e.candidate.CandidateRoot)
+	if err != nil {
+		e.blockCandidate(ctx, "pre-change snapshot failed")
+		return "", err
+	}
+	if digest == e.snapshotDigest {
+		return digest, nil
+	}
+	snap, err := e.deps.Snapshots.Create(e.request.Work.SessionID, e.candidate.ID, e.request.RunID, "pre:"+tool, e.candidate.CandidateRoot)
+	if err != nil {
+		e.blockCandidate(ctx, "pre-change snapshot failed")
+		return "", err
+	}
+	e.snapshotDigest = snap.Digest
+	outcome.Snapshots = append(outcome.Snapshots, snapshotMeta(snap))
+	return digest, nil
+}
+
+// postSnapshot checkpoints the candidate after a successful file-changing
+// call when its digest moved away from the pre-call state.
+func (e *toolRunExecutor) postSnapshot(ctx context.Context, tool, preDigest string, outcome *agent.ToolOutcome) error {
+	_, digest, err := candidate.BuildManifest(e.candidate.CandidateRoot)
+	if err != nil {
+		e.blockCandidate(ctx, "post-change snapshot failed")
+		return err
+	}
+	if digest == preDigest {
+		return nil
+	}
+	snap, err := e.deps.Snapshots.Create(e.request.Work.SessionID, e.candidate.ID, e.request.RunID, "post:"+tool, e.candidate.CandidateRoot)
+	if err != nil {
+		e.blockCandidate(ctx, "post-change snapshot failed")
+		return err
+	}
+	e.snapshotDigest = snap.Digest
+	outcome.Snapshots = append(outcome.Snapshots, snapshotMeta(snap))
+	return nil
+}
+
+// blockCandidate refuses every later mutation in this run and flips the
+// persisted candidate to blocked so it can neither be recreated by a later
+// run nor frozen ready and accepted.
+func (e *toolRunExecutor) blockCandidate(ctx context.Context, reason string) {
+	e.snapshotBlocked = reason
+	if e.deps.Candidates != nil && e.candidate != nil {
+		_ = e.deps.Candidates.TransitionCandidate(ctx, e.candidate.ID, "running", "blocked", "")
+	}
+}
+
+func snapshotMeta(snap candidate.FileSnapshot) agent.SnapshotMeta {
+	return agent.SnapshotMeta{SnapshotID: snap.SnapshotID, CandidateID: snap.CandidateID, RunID: snap.RunID, Label: snap.Label, Digest: snap.Digest, CreatedAt: snap.CreatedAt}
 }
 
 func (e *toolRunExecutor) mapTool(name string, args map[string]any) (helperName string, kind permission.OperationKind, opName, relative string, err error) {

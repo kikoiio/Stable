@@ -251,6 +251,15 @@ func Supervise(c appconfig.AppConfig, p Paths) error {
 	}
 }
 
+// snapshotCredentials lists the configured secrets that must never reach
+// snapshot metadata. Empty entries are dropped.
+func snapshotCredentials(apiKey string) []string {
+	if apiKey == "" {
+		return nil
+	}
+	return []string{apiKey}
+}
+
 func runtimeToolSchemas() []llm.ToolSchema {
 	nameMap := map[string]string{
 		"read_file":  "read_file",
@@ -319,6 +328,10 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 	var executorFactory agent.ExecutorFactory
 	var toolSchemas []llm.ToolSchema
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
+		snapshotStore, snapErr := candidate.NewSnapshotStore(p.Share, c.Snapshots.ProjectBytes(), c.Snapshots.ManifestsPerCandidate(), snapshotCredentials(c.Model.APIKey))
+		if snapErr != nil {
+			return fmt.Errorf("candidate snapshot store: %w", snapErr)
+		}
 		executorFactory = execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
 			Sandbox:            sandbox.LinuxManager{},
 			Gate:               execution.StorePermissionGate{Store: s},
@@ -327,6 +340,7 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 			HelperPath:         filepath.Join(p.Libexec, "agentworker"),
 			SessionRoot:        p.Share,
 			ProviderCredential: c.Model.APIKey,
+			Snapshots:          snapshotStore,
 		})
 		toolSchemas = runtimeToolSchemas()
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, chatProvider)
