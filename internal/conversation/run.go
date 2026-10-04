@@ -2,16 +2,21 @@ package conversation
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"stable/internal/agent"
+	"stable/internal/candidate"
 	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/sessionlog"
+	"stable/internal/store"
 )
 
 func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan ServerMsg) error {
@@ -61,7 +66,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	s.eventMu.Lock()
 	if request.Work.Kind == agent.WorkSession {
 		history := sessionConversationMessages(s.deps.ProjectRoot, msg.SessionID)
-		request.Messages = append([]llm.Message{{Role: "system", Content: "你是 Stable 的通用 agent。直接响应用户请求；工具调用会由后续受控执行流程处理，当前阶段不要声称已执行任何工具或修改。"}}, append(history, request.Messages...)...)
+		request.Messages = append([]llm.Message{{Role: "system", Content: "你是 Stable 的通用 agent。读、搜、列只能访问正式工程只读视图；写、编辑只能写入本次运行的候选区。工具路径使用工作区相对路径。工具结果代表真实受控执行结果。"}}, append(history, request.Messages...)...)
 		for i := range request.Messages {
 			request.Messages[i].Content = redactRunCredential(request.Messages[i].Content, s.deps.ProviderCredential)
 		}
@@ -125,6 +130,7 @@ func sessionConversationMessages(root, sessionID string) []llm.Message {
 	}
 	var messages []llm.Message
 	runAssistant := map[string]int{}
+	pendingToolCalls := map[string]bool{}
 	for _, event := range transcript.Events {
 		switch event.Type {
 		case sessionlog.EventMessage:
@@ -132,22 +138,50 @@ func sessionConversationMessages(root, sessionID string) []llm.Message {
 			if decodeSessionData(event.Data, &msg) == nil && (msg.Role == "user" || msg.Role == "assistant") && msg.Text != "" {
 				messages = append(messages, llm.Message{Role: msg.Role, Content: msg.Text})
 			}
+		case sessionlog.EventToolCall:
+			var call sessionlog.ToolCall
+			if decodeSessionData(event.Data, &call) == nil && call.CallID != "" && call.Name != "" && !pendingToolCalls[call.CallID] {
+				input, inputErr := json.Marshal(call.Input)
+				tool := llm.ToolUse{ID: call.CallID, Name: call.Name}
+				if inputErr == nil && string(input) != "null" {
+					tool.Arguments = input
+				}
+				messages = append(messages, llm.Message{Role: "assistant", ToolUses: []llm.ToolUse{tool}})
+				pendingToolCalls[call.CallID] = true
+			}
+		case sessionlog.EventToolResult:
+			var result sessionlog.ToolResult
+			if decodeSessionData(event.Data, &result) == nil && result.CallID != "" && pendingToolCalls[result.CallID] {
+				content, ok := result.Result.(string)
+				if !ok {
+					encoded, encodeErr := json.Marshal(result.Result)
+					if encodeErr != nil {
+						continue
+					}
+					content = string(encoded)
+				}
+				messages = append(messages, llm.Message{Role: "user", ToolResults: []llm.ToolResultPart{{ToolUseID: result.CallID, Content: content, IsError: result.Error != ""}}})
+				delete(pendingToolCalls, result.CallID)
+			}
 		case sessionlog.EventRunEvent:
 			var runEvent sessionlog.RunEvent
-			if decodeSessionData(event.Data, &runEvent) != nil || runEvent.Kind != "text_delta" {
+			if decodeSessionData(event.Data, &runEvent) != nil {
 				continue
 			}
-			var payload struct {
-				Text string `json:"text"`
-			}
-			if decodeSessionData(runEvent.Payload, &payload) != nil || payload.Text == "" {
-				continue
-			}
-			if index, ok := runAssistant[runEvent.RunID]; ok {
-				messages[index].Content += payload.Text
-			} else {
-				runAssistant[runEvent.RunID] = len(messages)
-				messages = append(messages, llm.Message{Role: "assistant", Content: payload.Text})
+			switch runEvent.Kind {
+			case "text_delta":
+				var payload struct {
+					Text string `json:"text"`
+				}
+				if decodeSessionData(runEvent.Payload, &payload) != nil || payload.Text == "" {
+					continue
+				}
+				if index, ok := runAssistant[runEvent.RunID]; ok {
+					messages[index].Content += payload.Text
+				} else {
+					runAssistant[runEvent.RunID] = len(messages)
+					messages = append(messages, llm.Message{Role: "assistant", Content: payload.Text})
+				}
 			}
 		}
 	}
@@ -176,10 +210,88 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 		s.broadcastRun(ServerMsg{Type: "run_event", RunID: request.RunID, RunEvent: &persisted, Cursor: stored.Seq}, request.Work.SessionID, request.RunID, stored.Seq)
 	}
 	outcome := <-handle.Done
+	if err := s.finalizeRunCandidate(context.Background(), request); err != nil {
+		s.broadcastRun(ServerMsg{Type: "error", RunID: request.RunID, Error: "could not finalize candidate: " + err.Error()}, request.Work.SessionID, request.RunID, 0)
+	}
 	s.broadcastRun(ServerMsg{Type: "run_outcome", RunID: request.RunID, Outcome: &outcome}, request.Work.SessionID, request.RunID, 0)
 	s.mu.Lock()
 	delete(s.activeRuns, request.RunID)
 	s.mu.Unlock()
+}
+
+func (s *Service) finalizeRunCandidate(ctx context.Context, request agent.ExecutionRequest) error {
+	var authority permission.Authority
+	if err := json.Unmarshal(request.PermissionBounds, &authority); err != nil || authority.CandidateRoot == "" {
+		return nil
+	}
+	candidateRoot, err := filepath.Abs(authority.CandidateRoot)
+	if err != nil {
+		return err
+	}
+	if _, err = os.Lstat(candidateRoot); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	formalRoot := authority.FormalRoot
+	if formalRoot == "" {
+		formalRoot = authority.AllowedRoot
+	}
+	candidateID := filepath.Base(candidateRoot)
+	var record *store.CandidateRecord
+	if s.deps.Store != nil {
+		loaded, getErr := s.deps.Store.GetCandidate(ctx, candidateID)
+		if getErr == nil {
+			record = &loaded
+		} else if !errors.Is(getErr, sql.ErrNoRows) {
+			return getErr
+		}
+	}
+	expectedGoalID := request.Work.GoalID
+	if expectedGoalID == "" {
+		expectedGoalID = "session-" + request.Work.SessionID
+	}
+	if record != nil {
+		if record.GoalID != expectedGoalID || record.ActionID != "tool-run-"+request.RunID || filepath.Clean(record.Candidate.FormalRoot) != filepath.Clean(formalRoot) || filepath.Clean(record.Candidate.CandidateRoot) != filepath.Clean(candidateRoot) {
+			return errors.New("candidate ownership does not match run")
+		}
+		formalRoot = record.Candidate.FormalRoot
+	}
+	_, candidateDigest, err := candidate.BuildManifest(candidateRoot)
+	if err != nil {
+		return err
+	}
+	baselineDigest := ""
+	if record != nil {
+		baselineDigest = record.Candidate.BaselineDigest
+	} else {
+		_, baselineDigest, err = candidate.BuildManifest(formalRoot)
+		if err != nil {
+			return err
+		}
+	}
+	if candidateDigest == baselineDigest {
+		if record != nil {
+			if _, execErr := s.deps.Store.DB().ExecContext(ctx, "DELETE FROM candidate_reviews WHERE candidate_id=?", candidateID); execErr != nil {
+				return execErr
+			}
+			if _, execErr := s.deps.Store.DB().ExecContext(ctx, "DELETE FROM candidates WHERE id=?", candidateID); execErr != nil {
+				return execErr
+			}
+		}
+		return os.RemoveAll(candidateRoot)
+	}
+	if record == nil {
+		return errors.New("changed candidate is not registered")
+	}
+	frozen, err := candidate.FreezeCandidate(record.Candidate, nil, ctx)
+	if err != nil {
+		return err
+	}
+	if frozen.CandidateDigest != candidateDigest {
+		return errors.New("candidate changed while finalizing")
+	}
+	return s.deps.Store.TransitionCandidate(ctx, candidateID, "running", "ready", frozen.CandidateDigest)
 }
 
 func (s *Service) subscribeRun(ctx context.Context, msg ClientMsg, updates chan ServerMsg) error {

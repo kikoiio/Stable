@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"stable/internal/artifact"
@@ -301,15 +302,17 @@ func (s *Store) blockAcceptance(ctx context.Context, item AcceptanceRecovery, ca
 // reverification in one SQLite transaction after the directory exchange.
 func (s *Store) FinalizeAcceptance(ctx context.Context, d candidate.AcceptanceDecision, r candidate.Receipt, goalID, actionID string) error {
 	artifactID := r.FormalDigest
-	var artifactPath string
-	if err := s.db.QueryRowContext(ctx, `SELECT artifact_path FROM goals WHERE id=?`, goalID).Scan(&artifactPath); err != nil {
-		return err
-	}
-	if artifactPath != "" {
-		var err error
-		artifactID, err = artifact.Digest(ctx, artifactPath)
-		if err != nil {
+	if !strings.HasPrefix(goalID, "session-") {
+		var artifactPath string
+		if err := s.db.QueryRowContext(ctx, `SELECT artifact_path FROM goals WHERE id=?`, goalID).Scan(&artifactPath); err != nil {
 			return err
+		}
+		if artifactPath != "" {
+			var err error
+			artifactID, err = artifact.Digest(ctx, artifactPath)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -343,25 +346,27 @@ func (s *Store) FinalizeAcceptance(ctx context.Context, d candidate.AcceptanceDe
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE goals SET current_artifact_id=?,status='pending_reverification',reason='candidate accepted; independent reverification required',revision=revision+1 WHERE id=?`, artifactID, goalID)
-	if err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, `UPDATE agents SET status=? WHERE goal_id=?`, agentStatusFor("pending_reverification"), goalID)
-	if err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, `UPDATE evidence SET result='stale',invalidated_reason='formal project changed by accepted candidate' WHERE goal_id=? AND result='pass'`, goalID); err != nil {
-		return err
-	}
-	var n int
-	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM events WHERE id=?`, "accept-"+d.ID).Scan(&n); err != nil {
-		return err
-	}
-	if n == 0 {
-		payload, _ := json.Marshal(map[string]string{"decision_id": d.ID, "candidate_id": d.CandidateID})
-		if _, err = tx.ExecContext(ctx, `INSERT INTO events(id,goal_id,kind,payload_json,received_at,status) VALUES(?,?,?,?,?,'pending')`, "accept-"+d.ID, goalID, "candidate_accepted", string(payload), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if !strings.HasPrefix(goalID, "session-") {
+		_, err = tx.ExecContext(ctx, `UPDATE goals SET current_artifact_id=?,status='pending_reverification',reason='candidate accepted; independent reverification required',revision=revision+1 WHERE id=?`, artifactID, goalID)
+		if err != nil {
 			return err
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE agents SET status=? WHERE goal_id=?`, agentStatusFor("pending_reverification"), goalID)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE evidence SET result='stale',invalidated_reason='formal project changed by accepted candidate' WHERE goal_id=? AND result='pass'`, goalID); err != nil {
+			return err
+		}
+		var n int
+		if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM events WHERE id=?`, "accept-"+d.ID).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			payload, _ := json.Marshal(map[string]string{"decision_id": d.ID, "candidate_id": d.CandidateID})
+			if _, err = tx.ExecContext(ctx, `INSERT INTO events(id,goal_id,kind,payload_json,received_at,status) VALUES(?,?,?,?,?,'pending')`, "accept-"+d.ID, goalID, "candidate_accepted", string(payload), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+				return err
+			}
 		}
 	}
 	if actionID != "" {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,9 +28,14 @@ import (
 	"stable/internal/policy"
 	"stable/internal/sandbox"
 	"stable/internal/store"
+	"stable/internal/tools"
 )
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "--stable-tool-exec" {
+		runStableToolExec(os.Stdin, os.Stdout)
+		return
+	}
 	if len(os.Args) >= 2 && os.Args[1] == "--stable-sandbox-proxy" {
 		if len(os.Args) < 5 || os.Args[3] != "--" {
 			log.Print("invalid isolated proxy wrapper arguments")
@@ -51,6 +58,61 @@ func main() {
 	if err := runConfigured(*dbPath, *runRoot, *address, *projectRoot, *appMode, *chatSocket); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func runStableToolExec(input *os.File, output *os.File) {
+	response := func(value execution.HelperResponse) {
+		_ = json.NewEncoder(output).Encode(value)
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			response(execution.HelperResponse{Output: fmt.Sprintf("Error: %v", recovered), IsError: true})
+		}
+	}()
+	var request execution.HelperRequest
+	if err := json.NewDecoder(bufio.NewReader(input)).Decode(&request); err != nil {
+		response(execution.HelperResponse{Output: "Error: invalid helper request", IsError: true})
+		return
+	}
+	if request.Workspace == "" || filepath.Clean(request.Workspace) != request.Workspace || request.Workspace == "." || request.Workspace == ".." || strings.Contains(request.Workspace, ".."+string(filepath.Separator)) {
+		response(execution.HelperResponse{Output: "Error: invalid workspace", IsError: true})
+		return
+	}
+	workspace := request.Workspace
+	var err error
+	if !filepath.IsAbs(workspace) {
+		workspace, err = filepath.Abs(workspace)
+		if err != nil {
+			response(execution.HelperResponse{Output: "Error: invalid workspace", IsError: true})
+			return
+		}
+	}
+	info, err := os.Stat(workspace)
+	if err != nil || !info.IsDir() {
+		response(execution.HelperResponse{Output: "Error: workspace is not a directory", IsError: true})
+		return
+	}
+	if err = os.Chdir(workspace); err != nil {
+		response(execution.HelperResponse{Output: "Error: could not enter workspace", IsError: true})
+		return
+	}
+	tools := executionToolRegistry()
+	toolName := map[string]string{"read_file": "ReadFile", "glob": "Glob", "grep": "Grep", "write_file": "WriteFile", "edit_file": "EditFile"}[request.Tool]
+	if toolName == "" {
+		response(execution.HelperResponse{Output: "Error: unknown tool", IsError: true})
+		return
+	}
+	tool := tools.Get(toolName)
+	if tool == nil {
+		response(execution.HelperResponse{Output: "Error: tool unavailable", IsError: true})
+		return
+	}
+	result := tool.Execute(context.Background(), request.Args)
+	response(execution.HelperResponse{Output: result.Output, IsError: result.IsError, Additions: result.Additions, Removals: result.Removals, DiffText: result.DiffText})
+}
+
+func executionToolRegistry() *tools.Registry {
+	return tools.CreateDefaultTools().Registry
 }
 
 func run(dbPath, runRoot, address, projectRoot string) error {

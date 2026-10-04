@@ -12,6 +12,7 @@ import (
 	"stable/internal/candidate"
 	"stable/internal/core"
 	"stable/internal/decision"
+	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/store"
 )
@@ -21,6 +22,8 @@ type Deps struct {
 	Provider           decision.StructuredProvider
 	ChatProvider       decision.ChatProvider
 	Runner             agent.Runner
+	ExecutorFactory    agent.ExecutorFactory
+	ToolSchemas        []llm.ToolSchema
 	ProviderName       string
 	Model              string
 	RunnerError        string

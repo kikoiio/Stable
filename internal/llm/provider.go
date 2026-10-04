@@ -14,15 +14,36 @@ import (
 	"stable/internal/appconfig"
 )
 
+type ToolSchema struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	InputSchema map[string]any `json:"input_schema"`
+}
+
+type ToolUse struct {
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+}
+
+type ToolResultPart struct {
+	ToolUseID string `json:"tool_use_id"`
+	Content   string `json:"content"`
+	IsError   bool   `json:"is_error,omitempty"`
+}
+
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role        string           `json:"role"`
+	Content     string           `json:"content"`
+	ToolUses    []ToolUse        `json:"tool_uses,omitempty"`
+	ToolResults []ToolResultPart `json:"tool_results,omitempty"`
 }
 
 type Request struct {
-	Model     string    `json:"model"`
-	Messages  []Message `json:"messages"`
-	MaxTokens int       `json:"max_tokens,omitempty"`
+	Model     string       `json:"model"`
+	Messages  []Message    `json:"messages"`
+	Tools     []ToolSchema `json:"tools,omitempty"`
+	MaxTokens int          `json:"max_tokens,omitempty"`
 }
 
 type EventKind string

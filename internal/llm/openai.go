@@ -12,12 +12,24 @@ func newOpenAI(c Config) Provider { return openAIProvider{config: c} }
 
 func (p openAIProvider) Stream(ctx context.Context, request Request) (<-chan Event, <-chan error) {
 	return streamChannels(ctx, func(send func(Event) error) error {
-		input := make([]map[string]string, 0, len(request.Messages))
+		input := make([]map[string]any, 0, len(request.Messages))
 		for _, message := range request.Messages {
 			if message.Role != "system" && message.Role != "user" && message.Role != "assistant" {
 				return errors.New("unsupported message role")
 			}
-			input = append(input, map[string]string{"role": message.Role, "content": message.Content})
+			if message.Content != "" || (len(message.ToolUses) == 0 && len(message.ToolResults) == 0) {
+				input = append(input, map[string]any{"role": message.Role, "content": message.Content})
+			}
+			for _, tool := range message.ToolUses {
+				arguments := string(tool.Arguments)
+				if arguments == "" {
+					arguments = "{}"
+				}
+				input = append(input, map[string]any{"type": "function_call", "call_id": tool.ID, "name": tool.Name, "arguments": arguments})
+			}
+			for _, result := range message.ToolResults {
+				input = append(input, map[string]any{"type": "function_call_output", "call_id": result.ToolUseID, "output": result.Content})
+			}
 		}
 		maxTokens := request.MaxTokens
 		if maxTokens <= 0 {
@@ -27,6 +39,13 @@ func (p openAIProvider) Stream(ctx context.Context, request Request) (<-chan Eve
 			maxTokens = 4096
 		}
 		body := map[string]any{"model": chooseModel(request.Model, p.config.Model.Model), "input": input, "stream": true, "store": false, "max_output_tokens": maxTokens}
+		if len(request.Tools) > 0 {
+			tools := make([]map[string]any, 0, len(request.Tools))
+			for _, tool := range request.Tools {
+				tools = append(tools, map[string]any{"type": "function", "name": tool.Name, "description": tool.Description, "parameters": tool.InputSchema})
+			}
+			body["tools"] = tools
+		}
 		key := p.config.Model.APIKey
 		if key == "" {
 			return &ProviderError{Class: ErrorAuth, Message: "OpenAI API key is missing"}

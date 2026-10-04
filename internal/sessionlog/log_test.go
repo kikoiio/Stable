@@ -204,6 +204,99 @@ func TestRunEventsEnforcePerRunSequenceAndReplayCursor(t *testing.T) {
 	}
 }
 
+func TestRunEventBudgetTerminalAppendAndReplay(t *testing.T) {
+	root := t.TempDir()
+	s, err := Create(root, "budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventRunStarted, RunStarted{RunID: "r1", WorkKind: "session", Intent: "budgeted work"}); err != nil {
+		t.Fatal(err)
+	}
+	terminal := RunEvent{
+		ID:        "e1",
+		RunID:     "r1",
+		SessionID: s.ID,
+		RunSeq:    1,
+		At:        time.Now().UTC(),
+		Kind:      "terminal",
+		Payload:   map[string]string{"status": "budget_exhausted"},
+	}
+	if _, err = Append(root, s.ID, EventRunEvent, terminal); err != nil {
+		t.Fatalf("append budget terminal: %v", err)
+	}
+	replayed, err := Replay(root, s.ID)
+	if err != nil {
+		t.Fatalf("replay budget terminal: %v", err)
+	}
+	if len(replayed.Events) != 3 {
+		t.Fatalf("replayed event count = %d, want 3", len(replayed.Events))
+	}
+	var got RunEvent
+	if err = decodeData(replayed.Events[2].Data, &got); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Status string `json:"status"`
+	}
+	if err = decodeData(got.Payload, &payload); err != nil || payload.Status != "budget_exhausted" {
+		t.Fatalf("replayed terminal payload = %+v, want budget_exhausted", got.Payload)
+	}
+}
+
+func TestRunEventTerminalStatusValidation(t *testing.T) {
+	root := t.TempDir()
+	s, err := Create(root, "invalid-status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventRunStarted, RunStarted{RunID: "r1", WorkKind: "session", Intent: "validate status"}); err != nil {
+		t.Fatal(err)
+	}
+	invalid := RunEvent{
+		ID:        "e1",
+		RunID:     "r1",
+		SessionID: s.ID,
+		RunSeq:    1,
+		At:        time.Now().UTC(),
+		Kind:      "terminal",
+		Payload:   map[string]string{"status": "not_a_terminal_status"},
+	}
+	if _, err = Append(root, s.ID, EventRunEvent, invalid); err == nil {
+		t.Fatal("append accepted invalid terminal status")
+	}
+
+	path, err := SessionPath(root, s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventRunEvent, RunEvent{
+		ID:        "e1",
+		RunID:     "r1",
+		SessionID: s.ID,
+		RunSeq:    1,
+		At:        time.Now().UTC(),
+		Kind:      "terminal",
+		Payload:   map[string]string{"status": "completed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corrupted := strings.Replace(string(raw), `"status":"completed"`, `"status":"not_a_terminal_status"`, 1)
+	if corrupted == string(raw) {
+		t.Fatal("failed to corrupt terminal status")
+	}
+	if err = os.WriteFile(path, []byte(corrupted), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Replay(root, s.ID); err == nil || !strings.Contains(err.Error(), "invalid terminal status") {
+		t.Fatalf("replay accepted invalid terminal status: %v", err)
+	}
+}
+
 func TestRunEventsRejectMissingStartOrWrongSession(t *testing.T) {
 	root := t.TempDir()
 	s, err := Create(root, "stream")

@@ -14,7 +14,7 @@ func newAnthropic(c Config) Provider { return anthropicProvider{config: c} }
 
 func (p anthropicProvider) Stream(ctx context.Context, request Request) (<-chan Event, <-chan error) {
 	return streamChannels(ctx, func(send func(Event) error) error {
-		messages := make([]map[string]string, 0, len(request.Messages))
+		messages := make([]map[string]any, 0, len(request.Messages))
 		var system string
 		for _, message := range request.Messages {
 			if message.Role == "system" {
@@ -24,7 +24,29 @@ func (p anthropicProvider) Stream(ctx context.Context, request Request) (<-chan 
 			if message.Role != "user" && message.Role != "assistant" {
 				return errors.New("unsupported message role")
 			}
-			messages = append(messages, map[string]string{"role": message.Role, "content": message.Content})
+			if len(message.ToolUses) == 0 && len(message.ToolResults) == 0 {
+				messages = append(messages, map[string]any{"role": message.Role, "content": message.Content})
+				continue
+			}
+			blocks := make([]map[string]any, 0, 1+len(message.ToolUses)+len(message.ToolResults))
+			if message.Content != "" {
+				blocks = append(blocks, map[string]any{"type": "text", "text": message.Content})
+			}
+			for _, tool := range message.ToolUses {
+				input := json.RawMessage(tool.Arguments)
+				if len(input) == 0 {
+					input = json.RawMessage(`{}`)
+				}
+				blocks = append(blocks, map[string]any{"type": "tool_use", "id": tool.ID, "name": tool.Name, "input": input})
+			}
+			for _, result := range message.ToolResults {
+				block := map[string]any{"type": "tool_result", "tool_use_id": result.ToolUseID, "content": result.Content}
+				if result.IsError {
+					block["is_error"] = true
+				}
+				blocks = append(blocks, block)
+			}
+			messages = append(messages, map[string]any{"role": message.Role, "content": blocks})
 		}
 		maxTokens := request.MaxTokens
 		if maxTokens <= 0 {
@@ -36,6 +58,9 @@ func (p anthropicProvider) Stream(ctx context.Context, request Request) (<-chan 
 		body := map[string]any{"model": chooseModel(request.Model, p.config.Model.Model), "max_tokens": maxTokens, "stream": true, "messages": messages}
 		if system != "" {
 			body["system"] = system
+		}
+		if len(request.Tools) > 0 {
+			body["tools"] = request.Tools
 		}
 		url := "https://api.anthropic.com/v1/messages"
 		key := p.config.Model.APIKey

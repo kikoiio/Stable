@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
 	"syscall"
 
 	"stable/internal/agent"
@@ -15,9 +17,13 @@ import (
 	"stable/internal/conversation"
 	"stable/internal/decision"
 	"stable/internal/dependency"
+	"stable/internal/execution"
 	"stable/internal/llm"
+	"stable/internal/permission"
 	"stable/internal/sandbox"
+	"stable/internal/sessionlog"
 	"stable/internal/store"
+	"stable/internal/tools"
 )
 
 // chatserve runs the persistent conversation service standalone. It is a
@@ -62,15 +68,32 @@ func chatserve(args []string) error {
 	if err != nil {
 		return err
 	}
+	helperPath, err := chatserveHelperPath()
+	if err != nil {
+		return err
+	}
 	var runner agent.Runner
+	var executorFactory agent.ExecutorFactory
+	var toolSchemas []llm.ToolSchema
 	var runnerError string
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
-		runner = agent.NewRunner(streamingProvider, agent.RunnerOptions{})
+		executorFactory = execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
+			Sandbox:            sandbox.LinuxManager{},
+			Gate:               execution.StorePermissionGate{Store: s},
+			Approvals:          s,
+			Candidates:         s,
+			HelperPath:         helperPath,
+			SessionRoot:        *projectRoot,
+			ProviderCredential: c.Model.APIKey,
+		})
+		toolSchemas = chatserveToolSchemas()
+		runner = agent.NewRunner(streamingProvider, agent.RunnerOptions{ExecutorFactory: executorFactory, ToolSchemas: toolSchemas})
 	} else {
 		runnerError = streamErr.Error()
 	}
+	permissionService := &permission.PermissionService{Repository: s, NewID: func() string { id, _ := sessionlog.NewID(); return id }}
 	svc, err := conversation.Serve(ctx, conversation.Deps{
-		Store: s, Provider: provider, ChatProvider: model.(decision.ChatProvider), Runner: runner, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket,
+		Store: s, Provider: provider, ChatProvider: model.(decision.ChatProvider), Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket,
 		Refresher:         refresher,
 		CandidateCheckers: chatCandidateCheckers(*runRoot),
 	})
@@ -80,6 +103,62 @@ func chatserve(args []string) error {
 	defer svc.Close()
 	<-ctx.Done()
 	return nil
+}
+
+func chatserveHelperPath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("find chatserve executable: %w", err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "", fmt.Errorf("resolve chatserve executable: %w", err)
+	}
+	exe, err = filepath.Abs(exe)
+	if err != nil {
+		return "", fmt.Errorf("resolve chatserve executable path: %w", err)
+	}
+	root := filepath.Dir(filepath.Dir(exe))
+	candidates := []string{
+		filepath.Join(root, "libexec", "agentworker"),
+		filepath.Join(root, "dev-install", "libexec", "agentworker"),
+		filepath.Join(filepath.Dir(exe), "agentworker"),
+	}
+	for _, candidate := range candidates {
+		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return candidates[0], nil
+}
+
+func chatserveToolSchemas() []llm.ToolSchema {
+	nameMap := map[string]string{
+		"read_file":  "read_file",
+		"write_file": "write_file",
+		"edit_file":  "edit_file",
+		"glob":       "glob",
+		"grep":       "grep",
+	}
+	registry := tools.CreateDefaultTools().Registry
+	schemas := make([]llm.ToolSchema, 0, len(nameMap)+1)
+	for _, schema := range registry.GetAllSchemas() {
+		internalName, _ := schema["name"].(string)
+		name, ok := nameMap[internalName]
+		if !ok {
+			continue
+		}
+		description, _ := schema["description"].(string)
+		input, _ := schema["input_schema"].(map[string]any)
+		schemas = append(schemas, llm.ToolSchema{Name: name, Description: description, InputSchema: input})
+	}
+	schemas = append(schemas, llm.ToolSchema{
+		Name:        "command",
+		Description: tools.BashDescription,
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"command": map[string]any{"type": "string", "description": "Shell command to execute"}, "timeout": map[string]any{"type": "integer", "minimum": 1, "maximum": 600, "description": "Timeout in seconds"}}, "required": []string{"command"}},
+	})
+	sort.Slice(schemas, func(i, j int) bool { return schemas[i].Name < schemas[j].Name })
+	return schemas
 }
 
 // chatCandidateCheckers wires the independent candidate checkers the trusted

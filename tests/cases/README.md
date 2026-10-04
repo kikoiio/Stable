@@ -15,7 +15,7 @@
 
 | ID | 内容 | 预期 | 初始 ERC |
 |----|------|------|----------|
-| S01_missing_wire | 原始夹具，缺一根连线 | 自动补线，ERC 为 0，状态 verified | 2×pin_not_connected + 1×unconnected_wire_endpoint |
+| S01_missing_wire | 原始夹具，缺一根连线 | 会话绑定目标，经共享工具写入候选区，评审并接受后进入 pending_reverification | 2×pin_not_connected + 1×unconnected_wire_endpoint |
 | S02_already_connected | 连线已存在 | 不修改设计，ERC 通过，verified | 无 |
 | U01_top_wire_shifted | 上方连线端点被移动 | needs_human，设计文件不变 | 6 条 |
 | U02_connector_replaced | 接头引用未定义的库符号 | needs_human，设计文件不变 | KiCad 无法加载 |
@@ -31,11 +31,16 @@ python3 tests/cases/make_cases.py            # 重新生成 cases/（需要 kica
 tests/cases/run_case.sh S01_missing_wire     # 跑单个用例，输出 PASS/FAIL
 ```
 
-`run_case.sh` 使用独立端口 17340 和 `run/mytest-*` 目录，不影响 `scripts/run_local.sh`
-启动的 7233 服务；没有 `codex` 时自动使用 `tests/e2e/mock_model_env.sh` 的模拟模型。
+`run_case.sh` 使用 `tests/e2e/lib.sh` 分配独立端口、HOME、TMPDIR 和运行目录，不影响其他
+本地服务；没有 `codex` 时自动使用 `tests/e2e/mock_model_env.sh` 的模拟模型。S01 的流程是：
+创建会话，提出并确认目标，使用共享 `read_file`/`edit_file` 工具生成候选，读取正式评审，
+正常接受候选，最后断言会话归属、一次正式目录交换和 `pending_reverification`。独立复核由
+后续 worker 处理，不在接受命令中提前宣称 verified。
 输出请重定向到文件，不要接 `| tail`：残留的子进程会占着管道导致命令不返回。
 
-以上 6 个用例均已实际跑过，全部 PASS（使用模拟模型，未测真实模型服务）。
+目前只有 S01 已迁移到 M04 会话/候选流程；S02 和 U01-U04 仍保留用例素材，但旧的
+`agentctl start` 入口已移除，因此这些用例会明确报告 legacy runner unavailable，而不是
+伪装成已经完成迁移。
 
 ## 未覆盖（现在测了也没意义）
 

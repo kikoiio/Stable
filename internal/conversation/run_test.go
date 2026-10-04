@@ -4,13 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"stable/internal/agent"
+	"stable/internal/candidate"
 	"stable/internal/llm"
+	"stable/internal/permission"
 	"stable/internal/sessionlog"
+	"stable/internal/store"
 )
 
 type fixedRunner struct {
@@ -133,6 +138,79 @@ func TestBroadcastRunSignalsBackpressureWithCursor(t *testing.T) {
 	resync := <-ch
 	if resync.Type != "resync" || resync.Cursor != 5 {
 		t.Fatalf("resync=%+v", resync)
+	}
+}
+
+func TestSessionConversationMessagesProjectsToolCallAndResult(t *testing.T) {
+	root := t.TempDir()
+	session, err := sessionlog.Create(root, "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sessionlog.Append(root, session.ID, sessionlog.EventToolCall, sessionlog.ToolCall{CallID: "call-1", Name: "read_file", Input: map[string]any{"file_path": "a.txt"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sessionlog.Append(root, session.ID, sessionlog.EventToolResult, sessionlog.ToolResult{CallID: "call-1", Result: "1: hello"}); err != nil {
+		t.Fatal(err)
+	}
+	messages := sessionConversationMessages(root, session.ID)
+	if len(messages) != 2 || messages[0].Role != "assistant" || len(messages[0].ToolUses) != 1 || messages[0].ToolUses[0].Name != "read_file" || messages[1].Role != "user" || len(messages[1].ToolResults) != 1 || messages[1].ToolResults[0].Content != "1: hello" {
+		t.Fatalf("tool history=%+v", messages)
+	}
+}
+
+func TestFinalizeRunCandidateCleansUnchangedAndReadiesChanged(t *testing.T) {
+	root := t.TempDir()
+	formal := filepath.Join(root, "project")
+	if err := os.Mkdir(formal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formal, "a.txt"), []byte("before"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	makeRequest := func(runID string, candidateRoot string) agent.ExecutionRequest {
+		authority := permission.Authority{RunID: runID, SessionID: "session", AllowedRoot: formal, FormalRoot: formal, CandidateRoot: candidateRoot}
+		raw, _ := json.Marshal(authority)
+		return agent.ExecutionRequest{RunID: runID, Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: "session"}, PermissionBounds: raw}
+	}
+	unchanged := filepath.Join(root, "candidate-unchanged")
+	if _, err = candidate.CreateCandidate(filepath.Base(unchanged), formal, filepath.Dir(unchanged)); err != nil {
+		t.Fatal(err)
+	}
+	if err = (&Service{deps: Deps{Store: db}}).finalizeRunCandidate(context.Background(), makeRequest("run-unchanged", unchanged)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(unchanged); !os.IsNotExist(err) {
+		t.Fatalf("unchanged candidate still exists: %v", err)
+	}
+	changed := filepath.Join(root, "candidate-changed")
+	created, err := candidate.CreateCandidate(filepath.Base(changed), formal, filepath.Dir(changed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.SaveCandidate(context.Background(), store.CandidateRecord{Candidate: created, ActionID: "tool-run-run-changed", GoalID: "session-session"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.TransitionCandidate(context.Background(), created.ID, "prepared", "running", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(changed, "a.txt"), []byte("after"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = (&Service{deps: Deps{Store: db}}).finalizeRunCandidate(context.Background(), makeRequest("run-changed", changed)); err != nil {
+		t.Fatal(err)
+	}
+	record, err := db.GetCandidate(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Candidate.Status != "ready" || record.Candidate.CandidateDigest == record.Candidate.BaselineDigest {
+		t.Fatalf("candidate was not readied: %+v", record)
 	}
 }
 

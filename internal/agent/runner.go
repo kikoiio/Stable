@@ -20,8 +20,11 @@ const (
 )
 
 type RunnerOptions struct {
-	MaxRetries int
-	Sleep      func(context.Context, time.Duration) error
+	MaxRetries      int
+	Sleep           func(context.Context, time.Duration) error
+	ExecutorFactory ExecutorFactory
+	ToolSchemas     []llm.ToolSchema
+	Budget          ResourceBounds
 }
 
 type runEntry struct{ cancel context.CancelFunc }
@@ -31,6 +34,13 @@ type StreamingRunner struct {
 	options  RunnerOptions
 	mu       sync.Mutex
 	runs     map[string]runEntry
+}
+
+func (r *StreamingRunner) SetTooling(factory ExecutorFactory, schemas []llm.ToolSchema) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.options.ExecutorFactory = factory
+	r.options.ToolSchemas = append([]llm.ToolSchema(nil), schemas...)
 }
 
 func NewRunner(provider llm.Provider, options RunnerOptions) *StreamingRunner {
@@ -111,98 +121,202 @@ func ValidateRequest(request ExecutionRequest) error {
 
 func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest, output chan<- ExecutionEvent) RunOutcome {
 	var seq uint64
-	var emittedContent bool
-	var hasToolCall bool
-	var streamErr error
-	for attempt := 0; attempt <= r.options.MaxRetries; attempt++ {
+	messages := append([]llm.Message(nil), request.Messages...)
+	budget := r.runBudget(request)
+	startedAt := time.Now()
+	toolRounds := 0
+	var executor RunExecutor
+
+	for {
 		if ctx.Err() != nil {
 			return r.terminal(request, output, &seq, RunCancelled, nil)
 		}
-		events, errs := r.provider.Stream(ctx, llm.Request{Model: request.Model, Messages: request.Messages})
-		streamErr = nil
-		ended := false
-		usageSeen := false
-		for events != nil || errs != nil {
-			select {
-			case <-ctx.Done():
-				events, errs = nil, nil
-			case event, ok := <-events:
-				if !ok {
-					events = nil
-					continue
+		if budget.MaxTotalDuration > 0 && time.Since(startedAt) >= budget.MaxTotalDuration {
+			return r.budgetExhausted(request, output, &seq, "max_total_duration")
+		}
+
+		var (
+			streamErr error
+			ended     bool
+		)
+		var responseText string
+		var toolCalls []llm.ToolUse
+		pendingCalls := map[string]llm.ToolUse{}
+		completedCalls := map[string]bool{}
+
+		for attempt := 0; attempt <= r.options.MaxRetries; attempt++ {
+			if ctx.Err() != nil {
+				return r.terminal(request, output, &seq, RunCancelled, nil)
+			}
+			streamErr = nil
+			ended = false
+			responseText = ""
+			toolCalls = nil
+			pendingCalls = map[string]llm.ToolUse{}
+			completedCalls = map[string]bool{}
+			emittedContent := false
+			usageSeen := false
+			events, errs := r.provider.Stream(ctx, llm.Request{Model: request.Model, Messages: messages, Tools: r.options.ToolSchemas})
+			for events != nil || errs != nil {
+				select {
+				case <-ctx.Done():
+					events, errs = nil, nil
+				case event, ok := <-events:
+					if !ok {
+						events = nil
+						continue
+					}
+					if event.Kind == llm.StreamEnd {
+						ended = true
+						if !usageSeen {
+							usage := event.Usage
+							if usage == nil {
+								usage = &llm.UsageInfo{}
+							}
+							payload, _ := json.Marshal(llm.Event{Kind: llm.Usage, Usage: usage})
+							if err := r.publish(request, output, &seq, ExecutionEvent{Kind: EventUsage, Payload: payload}); err != nil {
+								return r.terminal(request, output, &seq, RunFailed, &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish usage event"})
+							}
+						}
+						continue
+					}
+					if event.Kind == llm.Usage {
+						usageSeen = true
+					}
+					switch event.Kind {
+					case llm.TextDelta:
+						responseText += event.Text
+						emittedContent = true
+					case llm.ThinkingDelta:
+						emittedContent = true
+					case llm.ToolCallStart, llm.ToolCallDelta, llm.ToolCallComplete:
+						emittedContent = true
+						if event.Tool != nil && event.Tool.ID != "" {
+							call := llm.ToolUse{ID: event.Tool.ID, Name: event.Tool.Name, Arguments: append(json.RawMessage(nil), event.Tool.Arguments...)}
+							pendingCalls[call.ID] = call
+							if event.Kind == llm.ToolCallComplete || event.Tool.Complete {
+								if !completedCalls[call.ID] {
+									toolCalls = append(toolCalls, call)
+									completedCalls[call.ID] = true
+								}
+							}
+						}
+					}
+					mapped := mapLLMEvent(event)
+					if mapped.Kind == "" {
+						continue
+					}
+					if err := r.publish(request, output, &seq, mapped); err != nil {
+						return r.terminal(request, output, &seq, RunFailed, &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish run event"})
+					}
+				case err, ok := <-errs:
+					if !ok {
+						errs = nil
+						continue
+					}
+					if err != nil {
+						streamErr = sanitizeError(err)
+					}
 				}
-				if event.Kind == llm.StreamEnd {
-					ended = true
-					if !usageSeen {
-						usage := event.Usage
-						if usage == nil {
-							usage = &llm.UsageInfo{}
-						}
-						payload, _ := json.Marshal(llm.Event{Kind: llm.Usage, Usage: usage})
-						if err := r.publish(request, output, &seq, ExecutionEvent{Kind: EventUsage, Payload: payload}); err != nil {
-							return r.terminal(request, output, &seq, RunFailed, &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish usage event"})
-						}
+			}
+			if ctx.Err() != nil {
+				return r.terminal(request, output, &seq, RunCancelled, nil)
+			}
+			if streamErr == nil && !ended {
+				streamErr = &llm.ProviderError{Class: llm.ErrorProvider, Message: "provider stream ended without a terminal event"}
+			}
+			if streamErr == nil {
+				break
+			}
+			providerErr := sanitizeError(streamErr)
+			if providerErr.Retryable && !emittedContent && attempt < r.options.MaxRetries {
+				delay := retryDelay(attempt, providerErr.RetryAfter)
+				if delay <= maxTotalRetryWait {
+					payload, _ := json.Marshal(map[string]any{"attempt": attempt + 1, "delay_ms": delay.Milliseconds(), "class": providerErr.Class})
+					if err := r.publish(request, output, &seq, ExecutionEvent{Kind: EventRetry, Payload: payload}); err != nil {
+						return r.terminal(request, output, &seq, RunFailed, providerErr)
+					}
+					if err := r.options.Sleep(ctx, delay); err != nil {
+						return r.terminal(request, output, &seq, RunCancelled, nil)
 					}
 					continue
 				}
-				if event.Kind == llm.Usage {
-					usageSeen = true
-				}
-				if event.Kind == llm.TextDelta || event.Kind == llm.ThinkingDelta || event.Kind == llm.ToolCallStart || event.Kind == llm.ToolCallDelta || event.Kind == llm.ToolCallComplete {
-					emittedContent = true
-				}
-				if event.Kind == llm.ToolCallStart || event.Kind == llm.ToolCallComplete {
-					hasToolCall = true
-				}
-				mapped := mapLLMEvent(event)
-				if mapped.Kind == "" {
-					continue
-				}
-				if err := r.publish(request, output, &seq, mapped); err != nil {
-					return r.terminal(request, output, &seq, RunFailed, &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish run event"})
-				}
-			case err, ok := <-errs:
-				if !ok {
-					errs = nil
-					continue
-				}
-				if err != nil {
-					streamErr = sanitizeError(err)
-				}
+			}
+			payload, _ := json.Marshal(providerErr)
+			_ = r.publish(request, output, &seq, ExecutionEvent{Kind: EventError, Payload: payload})
+			return r.terminal(request, output, &seq, RunFailed, providerErr)
+		}
+
+		assistant := llm.Message{Role: "assistant", Content: responseText}
+		if len(toolCalls) == 0 {
+			messages = append(messages, assistant)
+			return r.terminal(request, output, &seq, RunCompleted, nil)
+		}
+		assistant.ToolUses = toolCalls
+		messages = append(messages, assistant)
+		toolRounds++
+		if budget.MaxToolRounds > 0 && toolRounds > budget.MaxToolRounds {
+			return r.budgetExhausted(request, output, &seq, "max_tool_rounds")
+		}
+		if budget.MaxTotalDuration > 0 && time.Since(startedAt) >= budget.MaxTotalDuration {
+			return r.budgetExhausted(request, output, &seq, "max_total_duration")
+		}
+		if r.options.ExecutorFactory == nil {
+			return r.terminal(request, output, &seq, RunAwaitingTools, nil)
+		}
+		if executor == nil {
+			var err error
+			executor, err = r.options.ExecutorFactory.ForRun(request)
+			if err != nil || executor == nil {
+				providerErr := &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not initialize tool executor"}
+				payload, _ := json.Marshal(providerErr)
+				_ = r.publish(request, output, &seq, ExecutionEvent{Kind: EventError, Payload: payload})
+				return r.terminal(request, output, &seq, RunFailed, providerErr)
 			}
 		}
-		if ctx.Err() != nil {
-			return r.terminal(request, output, &seq, RunCancelled, nil)
+		if observer, ok := executor.(ApprovalObserver); ok {
+			observer.SetApprovalObserver(func() {
+				payload, _ := json.Marshal(map[string]any{"status": "awaiting_approval"})
+				_ = r.publish(request, output, &seq, ExecutionEvent{Kind: EventAwaitingApproval, Payload: payload})
+			})
 		}
-		if streamErr == nil && !ended {
-			streamErr = &llm.ProviderError{Class: llm.ErrorProvider, Message: "provider stream ended without a terminal event"}
-		}
-		if streamErr == nil {
-			status := RunCompleted
-			if hasToolCall {
-				status = RunAwaitingTools
+		results := make([]llm.ToolResultPart, 0, len(toolCalls))
+		for _, call := range toolCalls {
+			if ctx.Err() != nil {
+				return r.terminal(request, output, &seq, RunCancelled, nil)
 			}
-			return r.terminal(request, output, &seq, status, nil)
-		}
-		providerErr := sanitizeError(streamErr)
-		if providerErr.Retryable && !emittedContent && attempt < r.options.MaxRetries {
-			delay := retryDelay(attempt, providerErr.RetryAfter)
-			if delay <= maxTotalRetryWait {
-				payload, _ := json.Marshal(map[string]any{"attempt": attempt + 1, "delay_ms": delay.Milliseconds(), "class": providerErr.Class})
-				if err := r.publish(request, output, &seq, ExecutionEvent{Kind: EventRetry, Payload: payload}); err != nil {
-					return r.terminal(request, output, &seq, RunFailed, providerErr)
-				}
-				if err := r.options.Sleep(ctx, delay); err != nil {
+			startPayload, _ := json.Marshal(map[string]any{"call_id": call.ID, "tool_name": call.Name, "seq": seq + 1})
+			if err := r.publish(request, output, &seq, ExecutionEvent{Kind: EventToolExecStart, Payload: startPayload}); err != nil {
+				return r.terminal(request, output, &seq, RunFailed, &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish tool start event"})
+			}
+			outcome, err := executor.Execute(ctx, call)
+			if err != nil {
+				if ctx.Err() != nil {
 					return r.terminal(request, output, &seq, RunCancelled, nil)
 				}
-				continue
+				providerErr := &llm.ProviderError{Class: llm.ErrorProvider, Message: "tool executor failed"}
+				payload, _ := json.Marshal(providerErr)
+				_ = r.publish(request, output, &seq, ExecutionEvent{Kind: EventError, Payload: payload})
+				return r.terminal(request, output, &seq, RunFailed, providerErr)
 			}
+			resultPayload, _ := json.Marshal(outcome)
+			if err := r.publish(request, output, &seq, ExecutionEvent{Kind: EventToolExecResult, Payload: resultPayload}); err != nil {
+				return r.terminal(request, output, &seq, RunFailed, &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish tool result event"})
+			}
+			results = append(results, llm.ToolResultPart{ToolUseID: call.ID, Content: outcome.Content, IsError: outcome.IsError})
 		}
-		payload, _ := json.Marshal(providerErr)
-		_ = r.publish(request, output, &seq, ExecutionEvent{Kind: EventError, Payload: payload})
-		return r.terminal(request, output, &seq, RunFailed, providerErr)
+		messages = append(messages, llm.Message{Role: "user", ToolResults: results})
 	}
-	return r.terminal(request, output, &seq, RunFailed, &llm.ProviderError{Class: llm.ErrorProvider, Message: "provider retries exhausted"})
+}
+
+func (r *StreamingRunner) runBudget(request ExecutionRequest) ResourceBounds {
+	return parseResourceBounds(request.ResourceBounds, r.options.Budget)
+}
+
+func (r *StreamingRunner) budgetExhausted(request ExecutionRequest, output chan<- ExecutionEvent, seq *uint64, reason string) RunOutcome {
+	payload, _ := json.Marshal(map[string]string{"reason": reason})
+	_ = r.publish(request, output, seq, ExecutionEvent{Kind: EventBudgetExhausted, Payload: payload})
+	return r.terminal(request, output, seq, RunBudgetExhausted, nil)
 }
 
 func (r *StreamingRunner) publish(request ExecutionRequest, output chan<- ExecutionEvent, seq *uint64, event ExecutionEvent) error {

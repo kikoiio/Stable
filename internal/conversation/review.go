@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"stable/internal/candidate"
@@ -91,6 +92,12 @@ func (s *Service) verifyCandidateSession(ctx context.Context, goalID, sessionID 
 	}
 	if _, err := sessionlog.SessionPath(s.deps.ProjectRoot, sessionID); err != nil {
 		return err
+	}
+	if strings.HasPrefix(goalID, "session-") {
+		if goalID != "session-"+sessionID {
+			return errors.New("candidate does not belong to this session")
+		}
+		return nil
 	}
 	goal, err := s.deps.Store.GetGoalSnapshot(ctx, goalID)
 	if err != nil {

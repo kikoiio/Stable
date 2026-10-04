@@ -260,7 +260,7 @@ func validateRunAppend(sessionID, typ string, data any, events []Event) error {
 			return errors.New("terminal event has invalid payload")
 		}
 		switch result.Status {
-		case "completed", "cancelled", "failed", "awaiting_tools":
+		case "completed", "cancelled", "failed", "budget_exhausted", "awaiting_tools":
 		default:
 			return errors.New("terminal event has invalid status")
 		}
@@ -372,7 +372,7 @@ func replayFile(path, id string) (Transcript, error) {
 					return out, fmt.Errorf("session log has invalid terminal at seq %d", e.Seq)
 				}
 				switch result.Status {
-				case "completed", "cancelled", "failed", "awaiting_tools":
+				case "completed", "cancelled", "failed", "budget_exhausted", "awaiting_tools":
 				default:
 					return out, fmt.Errorf("session log has invalid terminal status at seq %d", e.Seq)
 				}

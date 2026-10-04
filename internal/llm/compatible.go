@@ -17,14 +17,38 @@ func (p compatibleProvider) Stream(ctx context.Context, request Request) (<-chan
 		if p.config.Model.BaseURL == "" {
 			return &ProviderError{Class: ErrorProvider, Message: "OpenAI-compatible base URL is missing"}
 		}
-		messages := make([]map[string]string, 0, len(request.Messages))
+		messages := make([]map[string]any, 0, len(request.Messages))
 		for _, message := range request.Messages {
 			if message.Role != "system" && message.Role != "user" && message.Role != "assistant" {
 				return errors.New("unsupported message role")
 			}
-			messages = append(messages, map[string]string{"role": message.Role, "content": message.Content})
+			if message.Content != "" || len(message.ToolUses) > 0 || len(message.ToolResults) == 0 {
+				entry := map[string]any{"role": message.Role, "content": message.Content}
+				if len(message.ToolUses) > 0 {
+					calls := make([]map[string]any, 0, len(message.ToolUses))
+					for _, tool := range message.ToolUses {
+						arguments := string(tool.Arguments)
+						if arguments == "" {
+							arguments = "{}"
+						}
+						calls = append(calls, map[string]any{"id": tool.ID, "type": "function", "function": map[string]any{"name": tool.Name, "arguments": arguments}})
+					}
+					entry["tool_calls"] = calls
+				}
+				messages = append(messages, entry)
+			}
+			for _, result := range message.ToolResults {
+				messages = append(messages, map[string]any{"role": "tool", "tool_call_id": result.ToolUseID, "content": result.Content})
+			}
 		}
 		body := map[string]any{"model": chooseModel(request.Model, p.config.Model.Model), "messages": messages, "stream": true, "stream_options": map[string]bool{"include_usage": true}}
+		if len(request.Tools) > 0 {
+			tools := make([]map[string]any, 0, len(request.Tools))
+			for _, tool := range request.Tools {
+				tools = append(tools, map[string]any{"type": "function", "function": map[string]any{"name": tool.Name, "description": tool.Description, "parameters": tool.InputSchema}})
+			}
+			body["tools"] = tools
+		}
 		calls := map[int]ToolCall{}
 		started := map[int]bool{}
 		finishReason := ""

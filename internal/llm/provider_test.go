@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,146 @@ import (
 
 	"stable/internal/appconfig"
 )
+
+func TestToolMessagesZeroValueAndJSONShape(t *testing.T) {
+	zero := Request{Model: "model", Messages: []Message{{Role: "user", Content: "hello"}}}
+	encoded, err := json.Marshal(zero)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(encoded), `{"model":"model","messages":[{"role":"user","content":"hello"}]}`; got != want {
+		t.Fatalf("zero-value request JSON=%s want %s", got, want)
+	}
+
+	request := Request{
+		Model: "model",
+		Messages: []Message{
+			{Role: "assistant", ToolUses: []ToolUse{{ID: "call-1", Name: "read", Arguments: json.RawMessage(`{"path":"README.md"}`)}}},
+			{Role: "user", ToolResults: []ToolResultPart{{ToolUseID: "call-1", Content: "result"}, {ToolUseID: "call-2", Content: "failed", IsError: true}}},
+		},
+		Tools: []ToolSchema{{Name: "read", Description: "Read a file", InputSchema: map[string]any{"type": "object"}}},
+	}
+	encoded, err = json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["tools"]; !ok {
+		t.Fatalf("tool schemas missing from JSON: %s", encoded)
+	}
+	messages, ok := got["messages"].([]any)
+	if !ok || len(messages) != 2 {
+		t.Fatalf("messages=%v", got["messages"])
+	}
+	assistant := messages[0].(map[string]any)
+	if _, ok := assistant["tool_uses"]; !ok {
+		t.Fatalf("tool uses missing from assistant message: %v", assistant)
+	}
+	results := messages[1].(map[string]any)["tool_results"].([]any)
+	if _, present := results[0].(map[string]any)["is_error"]; present {
+		t.Fatalf("false is_error should be omitted: %v", results[0])
+	}
+	if got := results[1].(map[string]any)["is_error"]; got != true {
+		t.Fatalf("true is_error=%v", got)
+	}
+}
+
+func TestAnthropicToolRequestJSON(t *testing.T) {
+	var requestBody []byte
+	client := captureClient(t, "https://api.anthropic.com/v1/messages", "x-api-key", "test-secret", &requestBody)
+	provider := anthropicProvider{config: Config{Model: appconfig.ModelConfig{Model: "claude-test", APIKey: "test-secret"}, HTTPClient: client}}
+	_, err := collect(t, provider, Request{
+		Messages: []Message{
+			{Role: "assistant", Content: "reading", ToolUses: []ToolUse{{ID: "call-1", Name: "read", Arguments: json.RawMessage(`{"path":"a.txt"}`)}}},
+			{Role: "user", ToolResults: []ToolResultPart{{ToolUseID: "call-1", Content: "no access", IsError: true}}},
+		},
+		Tools: []ToolSchema{{Name: "read", Description: "Read a file", InputSchema: map[string]any{"type": "object"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(requestBody, &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["tools"]; !ok {
+		t.Fatalf("tools missing: %s", requestBody)
+	}
+	messages := body["messages"].([]any)
+	assistant := messages[0].(map[string]any)["content"].([]any)
+	if got := assistant[1].(map[string]any)["type"]; got != "tool_use" {
+		t.Fatalf("assistant tool block=%v", assistant[1])
+	}
+	result := messages[1].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if result["is_error"] != true || result["tool_use_id"] != "call-1" {
+		t.Fatalf("tool result=%v", result)
+	}
+}
+
+func TestOpenAIResponsesToolRequestJSON(t *testing.T) {
+	var requestBody []byte
+	client := captureClient(t, "https://api.openai.com/v1/responses", "Authorization", "Bearer key", &requestBody)
+	provider := openAIProvider{config: Config{Model: appconfig.ModelConfig{Model: "gpt-test", APIKey: "key"}, HTTPClient: client}}
+	_, err := collect(t, provider, Request{
+		Messages: []Message{
+			{Role: "assistant", ToolUses: []ToolUse{{ID: "call-1", Name: "read", Arguments: json.RawMessage(`{"path":"a.txt"}`)}}},
+			{Role: "user", ToolResults: []ToolResultPart{{ToolUseID: "call-1", Content: "no access", IsError: true}}},
+		},
+		Tools: []ToolSchema{{Name: "read", Description: "Read a file", InputSchema: map[string]any{"type": "object"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(requestBody, &body); err != nil {
+		t.Fatal(err)
+	}
+	items := body["input"].([]any)
+	if items[0].(map[string]any)["type"] != "function_call" || items[0].(map[string]any)["call_id"] != "call-1" {
+		t.Fatalf("function call=%v", items[0])
+	}
+	if items[1].(map[string]any)["type"] != "function_call_output" || items[1].(map[string]any)["call_id"] != "call-1" {
+		t.Fatalf("function output=%v", items[1])
+	}
+	if body["tools"].([]any)[0].(map[string]any)["type"] != "function" {
+		t.Fatalf("tools=%v", body["tools"])
+	}
+}
+
+func TestCompatibleChatToolRequestJSON(t *testing.T) {
+	var requestBody []byte
+	client := captureClient(t, "http://127.0.0.1:1234/v1/chat/completions", "Authorization", "Bearer key", &requestBody)
+	provider := compatibleProvider{config: Config{Model: appconfig.ModelConfig{Model: "mock", BaseURL: "http://127.0.0.1:1234/v1", APIKey: "key"}, HTTPClient: client}}
+	_, err := collect(t, provider, Request{
+		Messages: []Message{
+			{Role: "assistant", ToolUses: []ToolUse{{ID: "call-1", Name: "read", Arguments: json.RawMessage(`{"path":"a.txt"}`)}}},
+			{Role: "user", ToolResults: []ToolResultPart{{ToolUseID: "call-1", Content: "no access", IsError: true}}},
+		},
+		Tools: []ToolSchema{{Name: "read", Description: "Read a file", InputSchema: map[string]any{"type": "object"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(requestBody, &body); err != nil {
+		t.Fatal(err)
+	}
+	messages := body["messages"].([]any)
+	assistant := messages[0].(map[string]any)
+	if assistant["tool_calls"].([]any)[0].(map[string]any)["id"] != "call-1" {
+		t.Fatalf("assistant=%v", assistant)
+	}
+	toolResult := messages[1].(map[string]any)
+	if toolResult["role"] != "tool" || toolResult["tool_call_id"] != "call-1" {
+		t.Fatalf("tool result=%v", toolResult)
+	}
+	if body["tools"].([]any)[0].(map[string]any)["type"] != "function" {
+		t.Fatalf("tools=%v", body["tools"])
+	}
+}
 
 func TestNewProviderFactory(t *testing.T) {
 	tests := []struct {
@@ -208,6 +349,24 @@ func equalKinds(a, b []EventKind) bool {
 		}
 	}
 	return true
+}
+
+func captureClient(t *testing.T, wantURL, header, wantHeader string, requestBody *[]byte) *http.Client {
+	t.Helper()
+	return &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != wantURL {
+			t.Errorf("URL=%s want %s", req.URL, wantURL)
+		}
+		if got := req.Header.Get(header); got != wantHeader {
+			t.Errorf("%s=%s want %s", header, got, wantHeader)
+		}
+		data, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		*requestBody = data
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("data: [DONE]\n\n")), Request: req}, nil
+	})}
 }
 
 func fixtureClient(t *testing.T, wantURL, header, wantHeader, sse string) *http.Client {

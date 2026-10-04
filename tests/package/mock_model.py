@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TRANSLATE_MARKER = "Translate the user's acceptance requirements"
 ASK_MARKER = "请停下来问我"
+MISSING_WIRE = '(wire (pts (xy 114.3 102.87) (xy 121.92 102.87))\n        (stroke (width 0) (type solid)) (uuid "81110618-6579-58c6-8f1f-78d9234e76d6"))'
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -31,16 +32,18 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as error:
             self.log_request_failure(error)
             raise
+        tool_call = self.goal_tool_call(request)
         if prompt.startswith(TRANSLATE_MARKER):
             content = self.transpile(prompt)
         elif 'Context: ' in prompt:
             content = json.dumps(self.decide(prompt))
         else:
-            # Goal agent runs stream a short narrative with the intent as the
-            # prompt (no decision Context); the text itself is unused.
+            # Goal runs use the shared tool executor. The fixture deliberately
+            # performs one formal read followed by one candidate edit, then
+            # stops so the surrounding workflow owns review and acceptance.
             content = '收到，我会基于当前事实继续推进目标。'
         if request.get('stream'):
-            self.respond_sse(request, content)
+            self.respond_sse(request, content, tool_call)
             return
         response = dict(id='mock-001', choices=[dict(finish_reason='stop', message=dict(role='assistant', content=content))])
         body = json.dumps(response).encode()
@@ -50,12 +53,34 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def respond_sse(self, request, content):
-        frames = [
-            dict(id='mock-001', choices=[dict(index=0, delta=dict(role='assistant', content=content), finish_reason=None)]),
-            dict(id='mock-001', choices=[dict(index=0, delta=dict(), finish_reason='stop')],
-                 usage=dict(prompt_tokens=1, completion_tokens=1)),
-        ]
+    def goal_tool_call(self, request):
+        if not request.get('tools'):
+            return None
+        messages = request.get('messages') or []
+        if not messages:
+            return None
+        if messages[-1].get('role') == 'tool':
+            tool_results = [m for m in messages if m.get('role') == 'tool']
+            if len(tool_results) == 1:
+                return dict(id='mock-edit-1', name='edit_file', arguments=json.dumps({
+                    'file_path': 'sensor.kicad_sch',
+                    'old_string': '\\t(wire (pts (xy 114.3 105.41) (xy 114.3 102.87))\\n        (stroke (width 0) (type solid)) (uuid "ddd57af5-2125-566a-bcf5-c11ca6ff8a52"))',
+                    'new_string': '\\t(wire (pts (xy 114.3 105.41) (xy 114.3 102.87))\\n        (stroke (width 0) (type solid)) (uuid "ddd57af5-2125-566a-bcf5-c11ca6ff8a52"))\\n\\t' + MISSING_WIRE,
+                }))
+            return None
+        return dict(id='mock-read-1', name='read_file', arguments=json.dumps({'file_path': 'sensor.kicad_sch', 'limit': 2000}))
+
+    def respond_sse(self, request, content, tool_call=None):
+        if tool_call:
+            frames = [
+                dict(id='mock-001', choices=[dict(index=0, delta=dict(role='assistant', tool_calls=[dict(index=0, id=tool_call['id'], type='function', function=dict(name=tool_call['name'], arguments=tool_call['arguments']))]), finish_reason=None)]),
+                dict(id='mock-001', choices=[dict(index=0, delta=dict(), finish_reason='tool_calls')], usage=dict(prompt_tokens=1, completion_tokens=1)),
+            ]
+        else:
+            frames = [
+                dict(id='mock-001', choices=[dict(index=0, delta=dict(role='assistant', content=content), finish_reason=None)]),
+                dict(id='mock-001', choices=[dict(index=0, delta=dict(), finish_reason='stop')], usage=dict(prompt_tokens=1, completion_tokens=1)),
+            ]
         body = ''.join('data: ' + json.dumps(frame) + '\n\n' for frame in frames) + 'data: [DONE]\n\n'
         raw = body.encode()
         self.send_response(200)

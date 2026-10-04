@@ -61,8 +61,8 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 				if json.Unmarshal(pb, &payload) == nil {
 					part.text.WriteString(payload.Text)
 				}
-			} else if run.Kind == "tool_call_start" || run.Kind == "tool_call_delta" || run.Kind == "tool_call_complete" || run.Kind == "usage" || run.Kind == "retry" || run.Kind == "error" || run.Kind == "terminal" {
-				label := map[string]string{"tool_call_start": "工具调用", "tool_call_delta": "工具参数", "tool_call_complete": "工具调用完成", "usage": "用量", "retry": "重试", "error": "模型错误", "terminal": "运行状态"}[run.Kind]
+			} else if run.Kind == "tool_call_start" || run.Kind == "tool_call_delta" || run.Kind == "tool_call_complete" || run.Kind == "tool_exec_start" || run.Kind == "tool_exec_result" || run.Kind == "awaiting_approval" || run.Kind == "budget_exhausted" || run.Kind == "usage" || run.Kind == "retry" || run.Kind == "error" || run.Kind == "terminal" {
+				label := map[string]string{"tool_call_start": "工具调用", "tool_call_delta": "工具参数", "tool_call_complete": "工具调用完成", "tool_exec_start": "工具执行", "tool_exec_result": "工具结果", "awaiting_approval": "等待授权", "budget_exhausted": "预算耗尽", "usage": "用量", "retry": "重试", "error": "模型错误", "terminal": "运行状态"}[run.Kind]
 				payload, _ := json.Marshal(run.Payload)
 				if run.Kind == "usage" {
 					payload = []byte(formatUsage(payload))
@@ -71,7 +71,7 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 						Status string `json:"status"`
 					}
 					_ = json.Unmarshal(payload, &terminal)
-					status := map[string]string{"completed": "completed", "cancelled": "cancelled", "failed": "failed", "awaiting_tools": "awaiting tools"}[terminal.Status]
+					status := map[string]string{"completed": "completed", "cancelled": "cancelled", "failed": "failed", "awaiting_tools": "awaiting tools", "budget_exhausted": "budget exhausted"}[terminal.Status]
 					if status != "" {
 						payload = []byte(status)
 					}
@@ -88,7 +88,7 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 		if text == "" {
 			continue
 		}
-		if part.role == "思考（仅供查看）" || strings.HasPrefix(part.role, "工具") || part.role == "用量" || part.role == "重试" || part.role == "模型错误" || part.role == "运行状态" {
+		if part.role == "思考（仅供查看）" || strings.HasPrefix(part.role, "工具") || part.role == "等待授权" || part.role == "预算耗尽" || part.role == "用量" || part.role == "重试" || part.role == "模型错误" || part.role == "运行状态" {
 			out = append(out, part.role+"\n"+text)
 		} else {
 			out = append(out, part.role+"\n"+renderMarkdown(text, max(1, width-10), color))

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,9 +22,13 @@ import (
 	"stable/internal/conversation"
 	"stable/internal/decision"
 	"stable/internal/dependency"
+	"stable/internal/execution"
 	"stable/internal/llm"
+	"stable/internal/permission"
 	"stable/internal/sandbox"
+	"stable/internal/sessionlog"
 	"stable/internal/store"
+	"stable/internal/tools"
 )
 
 type Status struct {
@@ -244,6 +249,35 @@ func Supervise(c appconfig.AppConfig, p Paths) error {
 	}
 }
 
+func runtimeToolSchemas() []llm.ToolSchema {
+	nameMap := map[string]string{
+		"read_file":  "read_file",
+		"write_file": "write_file",
+		"edit_file":  "edit_file",
+		"glob":       "glob",
+		"grep":       "grep",
+	}
+	registry := tools.CreateDefaultTools().Registry
+	schemas := make([]llm.ToolSchema, 0, len(nameMap)+1)
+	for _, schema := range registry.GetAllSchemas() {
+		internalName, _ := schema["name"].(string)
+		name, ok := nameMap[internalName]
+		if !ok {
+			continue
+		}
+		description, _ := schema["description"].(string)
+		input, _ := schema["input_schema"].(map[string]any)
+		schemas = append(schemas, llm.ToolSchema{Name: name, Description: description, InputSchema: input})
+	}
+	schemas = append(schemas, llm.ToolSchema{
+		Name:        "command",
+		Description: tools.BashDescription,
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"command": map[string]any{"type": "string", "description": "Shell command to execute"}, "timeout": map[string]any{"type": "integer", "minimum": 1, "maximum": 600, "description": "Timeout in seconds"}}, "required": []string{"command"}},
+	})
+	sort.Slice(schemas, func(i, j int) bool { return schemas[i].Name < schemas[j].Name })
+	return schemas
+}
+
 // startChatService runs the persistent conversation service inside the
 // supervisor process. It returns a channel that closes when the service stops.
 func startChatService(c appconfig.AppConfig, p Paths, address string) <-chan struct{} {
@@ -280,13 +314,26 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 	}
 	var runner agent.Runner
 	var runnerError string
+	var executorFactory agent.ExecutorFactory
+	var toolSchemas []llm.ToolSchema
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
-		runner = agent.NewRunner(streamingProvider, agent.RunnerOptions{})
+		executorFactory = execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
+			Sandbox:            sandbox.LinuxManager{},
+			Gate:               execution.StorePermissionGate{Store: s},
+			Approvals:          s,
+			Candidates:         s,
+			HelperPath:         filepath.Join(p.Libexec, "agentworker"),
+			SessionRoot:        p.Share,
+			ProviderCredential: c.Model.APIKey,
+		})
+		toolSchemas = runtimeToolSchemas()
+		runner = agent.NewRunner(streamingProvider, agent.RunnerOptions{ExecutorFactory: executorFactory, ToolSchemas: toolSchemas})
 	} else {
 		runnerError = streamErr.Error()
 	}
+	permissionService := &permission.PermissionService{Repository: s, NewID: func() string { id, _ := sessionlog.NewID(); return id }}
 	svc, err := conversation.Serve(ctx, conversation.Deps{
-		Store: s, Provider: provider, ChatProvider: chatProvider, Runner: runner, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: address, ProjectRoot: p.Share, RunRoot: p.Goals, SocketPath: p.ChatSocket,
+		Store: s, Provider: provider, ChatProvider: chatProvider, Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: address, ProjectRoot: p.Share, RunRoot: p.Goals, SocketPath: p.ChatSocket,
 		Refresher:         refresher,
 		CandidateCheckers: []candidate.Checker{candidate.KicadERCChecker{Sandbox: sandbox.LinuxManager{}, RunRoot: p.Goals}},
 	})

@@ -213,3 +213,198 @@ func TestValidateRequestWorkOwnership(t *testing.T) {
 func sessionRequest(id string) ExecutionRequest {
 	return ExecutionRequest{RunID: id, Work: WorkRef{Kind: WorkSession, SessionID: "session-1"}, Intent: "question", Messages: []llm.Message{{Role: "user", Content: "hello"}}, ProviderName: "openai-compatible", Model: "mock"}
 }
+
+func TestRunnerToolLoopConvergesAcrossTwoRounds(t *testing.T) {
+	var requests []llm.Request
+	provider := providerFunc(func(_ context.Context, request llm.Request) (<-chan llm.Event, <-chan error) {
+		requests = append(requests, request)
+		events := make(chan llm.Event, 2)
+		errs := make(chan error)
+		if len(requests) == 1 {
+			call := &llm.ToolCall{ID: "call-1", Name: "read", Arguments: json.RawMessage(`{"path":"README"}`), Complete: true}
+			events <- llm.Event{Kind: llm.ToolCallStart, Tool: call}
+			events <- llm.Event{Kind: llm.StreamEnd, StopReason: "tool_use"}
+		} else {
+			events <- llm.Event{Kind: llm.TextDelta, Text: "done"}
+			events <- llm.Event{Kind: llm.StreamEnd, StopReason: "completed"}
+		}
+		close(events)
+		close(errs)
+		return events, errs
+	})
+	executor := &FakeExecutor{Script: []ToolOutcome{{Content: "file contents"}}}
+	runner := NewRunner(provider, RunnerOptions{
+		MaxRetries:      -1,
+		ExecutorFactory: FakeExecutorFactory{Executor: executor},
+		ToolSchemas:     []llm.ToolSchema{{Name: "read"}},
+	})
+	handle, err := runner.Start(context.Background(), sessionRequest("run-two-rounds"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range handle.Events {
+	}
+	if outcome := <-handle.Done; outcome.Status != RunCompleted {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("provider requests=%d want 2", len(requests))
+	}
+	if got := requests[0].Tools; len(got) != 1 || got[0].Name != "read" {
+		t.Fatalf("first request tools=%+v", got)
+	}
+	if len(requests[1].Messages) != 3 {
+		t.Fatalf("second request messages=%+v", requests[1].Messages)
+	}
+	assistant := requests[1].Messages[1]
+	if assistant.Role != "assistant" || len(assistant.ToolUses) != 1 || assistant.ToolUses[0].ID != "call-1" {
+		t.Fatalf("assistant tool message=%+v", assistant)
+	}
+	results := requests[1].Messages[2]
+	if results.Role != "user" || len(results.ToolResults) != 1 || results.ToolResults[0].ToolUseID != "call-1" || results.ToolResults[0].Content != "file contents" {
+		t.Fatalf("tool result message=%+v", results)
+	}
+}
+
+func TestRunnerExecutesToolCallsSeriallyAndPublishesPairs(t *testing.T) {
+	var requests []llm.Request
+	provider := providerFunc(func(_ context.Context, request llm.Request) (<-chan llm.Event, <-chan error) {
+		requests = append(requests, request)
+		events := make(chan llm.Event, 5)
+		errs := make(chan error)
+		if len(requests) > 1 {
+			events <- llm.Event{Kind: llm.TextDelta, Text: "done"}
+			events <- llm.Event{Kind: llm.StreamEnd, StopReason: "completed"}
+			close(events)
+			close(errs)
+			return events, errs
+		}
+		for _, call := range []*llm.ToolCall{
+			{ID: "call-a", Name: "first", Arguments: json.RawMessage(`{}`), Complete: true},
+			{ID: "call-b", Name: "second", Arguments: json.RawMessage(`{}`), Complete: true},
+		} {
+			events <- llm.Event{Kind: llm.ToolCallStart, Tool: call}
+		}
+		events <- llm.Event{Kind: llm.StreamEnd, StopReason: "tool_use"}
+		close(events)
+		close(errs)
+		return events, errs
+	})
+	executor := &FakeExecutor{Script: []ToolOutcome{{Content: "one"}, {Content: "two"}}}
+	runner := NewRunner(provider, RunnerOptions{MaxRetries: -1, ExecutorFactory: FakeExecutorFactory{Executor: executor}})
+	handle, err := runner.Start(context.Background(), sessionRequest("run-serial"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []ExecutionEvent
+	for event := range handle.Events {
+		got = append(got, event)
+	}
+	if outcome := <-handle.Done; outcome.Status != RunCompleted {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	calls := executor.Calls()
+	if len(calls) != 2 || calls[0].ID != "call-a" || calls[1].ID != "call-b" {
+		t.Fatalf("executor calls=%+v", calls)
+	}
+	if len(requests) != 2 || len(requests[1].Messages) != 3 {
+		t.Fatalf("provider requests=%+v", requests)
+	}
+	results := requests[1].Messages[2]
+	if results.Role != "user" || len(results.ToolResults) != 2 || results.ToolResults[0].ToolUseID != "call-a" || results.ToolResults[0].Content != "one" || results.ToolResults[1].ToolUseID != "call-b" || results.ToolResults[1].Content != "two" {
+		t.Fatalf("tool result message=%+v", results)
+	}
+	var toolEvents []EventKind
+	for _, event := range got {
+		if event.Kind == EventToolExecStart || event.Kind == EventToolExecResult {
+			toolEvents = append(toolEvents, event.Kind)
+		}
+	}
+	want := []EventKind{EventToolExecStart, EventToolExecResult, EventToolExecStart, EventToolExecResult}
+	if len(toolEvents) != len(want) {
+		t.Fatalf("tool events=%v want %v", toolEvents, want)
+	}
+	for i := range want {
+		if toolEvents[i] != want[i] {
+			t.Fatalf("tool events=%v want %v", toolEvents, want)
+		}
+	}
+}
+
+func TestRunnerStopsWhenToolRoundBudgetIsExhausted(t *testing.T) {
+	var calls int
+	provider := providerFunc(func(context.Context, llm.Request) (<-chan llm.Event, <-chan error) {
+		calls++
+		events := make(chan llm.Event, 2)
+		errs := make(chan error)
+		call := &llm.ToolCall{ID: "call-loop", Name: "loop", Arguments: json.RawMessage(`{}`), Complete: true}
+		events <- llm.Event{Kind: llm.ToolCallStart, Tool: call}
+		events <- llm.Event{Kind: llm.StreamEnd, StopReason: "tool_use"}
+		close(events)
+		close(errs)
+		return events, errs
+	})
+	executor := &FakeExecutor{Script: []ToolOutcome{{Content: "ok"}}}
+	runner := NewRunner(provider, RunnerOptions{
+		MaxRetries:      -1,
+		ExecutorFactory: FakeExecutorFactory{Executor: executor},
+		Budget:          ResourceBounds{MaxToolRounds: 1},
+	})
+	handle, err := runner.Start(context.Background(), sessionRequest("run-budget"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var budgetEvents int
+	for event := range handle.Events {
+		if event.Kind == EventBudgetExhausted {
+			budgetEvents++
+		}
+	}
+	if outcome := <-handle.Done; outcome.Status != RunBudgetExhausted {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	if calls != 2 || len(executor.Calls()) != 1 || budgetEvents != 1 {
+		t.Fatalf("provider calls=%d executor calls=%d budget events=%d", calls, len(executor.Calls()), budgetEvents)
+	}
+}
+
+func TestRunnerCancellationStopsToolExecution(t *testing.T) {
+	started := make(chan struct{})
+	executor := &blockingExecutor{started: started}
+	provider := providerFunc(func(context.Context, llm.Request) (<-chan llm.Event, <-chan error) {
+		events := make(chan llm.Event, 2)
+		errs := make(chan error)
+		call := &llm.ToolCall{ID: "call-cancel", Name: "wait", Arguments: json.RawMessage(`{}`), Complete: true}
+		events <- llm.Event{Kind: llm.ToolCallStart, Tool: call}
+		events <- llm.Event{Kind: llm.StreamEnd, StopReason: "tool_use"}
+		close(events)
+		close(errs)
+		return events, errs
+	})
+	runner := NewRunner(provider, RunnerOptions{MaxRetries: -1, ExecutorFactory: executorFactoryFunc(func(ExecutionRequest) (RunExecutor, error) { return executor, nil })})
+	handle, err := runner.Start(context.Background(), sessionRequest("run-tool-cancel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := runner.Cancel("run-tool-cancel"); err != nil {
+		t.Fatal(err)
+	}
+	for range handle.Events {
+	}
+	if outcome := <-handle.Done; outcome.Status != RunCancelled {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+}
+
+type executorFactoryFunc func(ExecutionRequest) (RunExecutor, error)
+
+func (f executorFactoryFunc) ForRun(request ExecutionRequest) (RunExecutor, error) { return f(request) }
+
+type blockingExecutor struct{ started chan<- struct{} }
+
+func (e *blockingExecutor) Execute(ctx context.Context, call llm.ToolUse) (ToolOutcome, error) {
+	close(e.started)
+	<-ctx.Done()
+	return ToolOutcome{}, ctx.Err()
+}

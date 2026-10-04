@@ -44,6 +44,10 @@ const (
 	EventToolCallStart    EventKind = "tool_call_start"
 	EventToolCallDelta    EventKind = "tool_call_delta"
 	EventToolCallComplete EventKind = "tool_call_complete"
+	EventToolExecStart    EventKind = "tool_exec_start"
+	EventToolExecResult   EventKind = "tool_exec_result"
+	EventAwaitingApproval EventKind = "awaiting_approval"
+	EventBudgetExhausted  EventKind = "budget_exhausted"
 	EventUsage            EventKind = "usage"
 	EventRetry            EventKind = "retry"
 	EventError            EventKind = "error"
@@ -63,10 +67,11 @@ type ExecutionEvent struct {
 type RunStatus string
 
 const (
-	RunCompleted     RunStatus = "completed"
-	RunCancelled     RunStatus = "cancelled"
-	RunFailed        RunStatus = "failed"
-	RunAwaitingTools RunStatus = "awaiting_tools"
+	RunCompleted       RunStatus = "completed"
+	RunCancelled       RunStatus = "cancelled"
+	RunFailed          RunStatus = "failed"
+	RunAwaitingTools   RunStatus = "awaiting_tools"
+	RunBudgetExhausted RunStatus = "budget_exhausted"
 )
 
 type RunOutcome struct {
