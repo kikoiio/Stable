@@ -208,7 +208,9 @@ func (pendingApprovals) GetApprovalForOperation(context.Context, string, string,
 func (pendingApprovals) ResolveApproval(context.Context, string, permission.ApprovalStatus, string, string, *permission.ExactRule) error {
 	return errors.New("unused")
 }
-func (pendingApprovals) CancelApproval(context.Context, string, string) error { return errors.New("unused") }
+func (pendingApprovals) CancelApproval(context.Context, string, string) error {
+	return errors.New("unused")
+}
 func (pendingApprovals) ConsumeApproval(context.Context, string, string, string) error {
 	return errors.New("unused")
 }
