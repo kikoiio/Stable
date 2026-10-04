@@ -154,8 +154,19 @@ func coveredSeqs(events []Event) (map[uint64]bool, uint64) {
 	if latest < 0 {
 		return covered, 0
 	}
-	switch boundary.EffectiveScope() {
-	case BoundaryScopeRun:
+	switch {
+	case boundary.Scope == "":
+		// Legacy boundary written by the old prompt.Compact: it carries no
+		// scope, and the retained tail was re-appended after the boundary
+		// with fresh sequence numbers. Covering only FromSeq..ToSeq would
+		// leave the original tail visible next to its re-appended copies,
+		// so everything before the boundary is replaced by the summary.
+		for _, e := range events {
+			if e.Seq < events[latest].Seq {
+				covered[e.Seq] = true
+			}
+		}
+	case boundary.EffectiveScope() == BoundaryScopeRun:
 		for _, e := range events {
 			if e.Type != EventRunEvent {
 				continue

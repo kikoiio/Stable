@@ -85,6 +85,62 @@ func TestProjectionRunScopeBoundary(t *testing.T) {
 	}
 }
 
+func TestProjectionLegacyScopelessBoundary(t *testing.T) {
+	// Logs written before M05 carry boundaries from the old prompt.Compact:
+	// no scope, and the retained tail re-appended after the boundary with
+	// fresh sequence numbers. The summary must replace everything before the
+	// boundary so the original tail is not shown next to its re-appended
+	// copies.
+	root := t.TempDir()
+	s, err := Create(root, "legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventMessage, Message{Role: "user", Text: "old question"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventMessage, Message{Role: "assistant", Text: "old answer"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventMessage, Message{Role: "user", Text: "kept question"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventBoundary, Boundary{FromSeq: 2, ToSeq: 3, Summary: "legacy summary"}); err != nil {
+		t.Fatal(err)
+	}
+	// The old compactor re-appended the retained tail after the boundary.
+	if _, err = Append(root, s.ID, EventMessage, Message{Role: "user", Text: "kept question"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventMessage, Message{Role: "assistant", Text: "kept answer"}); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := Replay(root, s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := Project(replay)
+	got := kinds(p)
+	want := []ItemKind{ItemSummary, ItemMessage, ItemMessage}
+	if len(got) != len(want) {
+		t.Fatalf("kinds = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("kinds = %v, want %v", got, want)
+		}
+	}
+	if p.Items[0].Summary == nil || p.Items[0].Summary.Summary != "legacy summary" {
+		t.Fatalf("summary item = %+v", p.Items[0])
+	}
+	if p.Items[1].Message == nil || p.Items[1].Message.Text != "kept question" {
+		t.Fatalf("re-appended tail = %+v", p.Items[1])
+	}
+	if p.Items[2].Message == nil || p.Items[2].Message.Text != "kept answer" {
+		t.Fatalf("post-boundary message = %+v", p.Items[2])
+	}
+}
+
 func TestProjectionToolPairMatching(t *testing.T) {
 	root := t.TempDir()
 	s, err := Create(root, "pairs")
