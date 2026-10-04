@@ -12,6 +12,7 @@ import (
 	"stable/internal/candidate"
 	"stable/internal/conversation"
 	"stable/internal/core"
+	"stable/internal/inputhistory"
 	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/sessionlog"
@@ -58,6 +59,13 @@ type Model struct {
 	ReviewCandidate     string
 	ReviewConfirmed     map[string]bool
 	ReviewCursor        int
+	ReviewSnapshots     []sessionlog.SnapshotRef
+	RewindPick          bool
+	RewindCursor        int
+	RewindArmed         bool
+	Questions           []sessionlog.PendingQuestion
+	SearchHits          []sessionlog.SearchHit
+	SearchCorrupt       []sessionlog.SearchError
 	Approvals           []permission.ApprovalPrompt
 	SelectedApproval    int
 	approvalPollStarted bool
@@ -65,6 +73,10 @@ type Model struct {
 	ActiveRunID         string
 	LastCursor          uint64
 	stream              *conversation.StreamClient
+	history             *inputhistory.Store
+	historyErr          error
+	histCursor          *inputhistory.Cursor
+	histDraft           string
 }
 
 type resultMsg struct {
@@ -125,7 +137,16 @@ func resubscribeRunCmd(client *conversation.StreamClient, sessionID, runID strin
 func New(socket, root string) Model {
 	c := NewComposer()
 	_ = c.Focus()
-	return Model{Socket: socket, Root: root, Width: 120, Height: 32, Composer: c, Navigation: NavigationState{Mode: ChatView}}
+	m := Model{Socket: socket, Root: root, Width: 120, Height: 32, Composer: c, Navigation: NavigationState{Mode: ChatView}}
+	// Input history is per-project and private; an unavailable store must not
+	// block the TUI, only surface an explicit status when used.
+	history, err := inputhistory.Open(root)
+	if err != nil {
+		m.historyErr = err
+	} else {
+		m.history = history
+	}
+	return m
 }
 func (m Model) Init() tea.Cmd {
 	return requestCmd(m.Socket, conversation.ClientMsg{Op: "session_list", ProjectRoot: m.Root})
@@ -269,7 +290,37 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 				m.ReviewCandidate = x.Review.CandidateID
 				m.ReviewConfirmed = map[string]bool{}
 				m.ReviewCursor = 0
-				m.Status = "候选预览已载入：a 普通接收，f 强制接收（逐项确认），Esc 关闭。"
+				m.ReviewSnapshots = nil
+				m.RewindPick, m.RewindArmed = false, false
+				m.Status = "候选预览已载入：a 普通接收，f 强制接收（逐项确认），r 回滚到快照，Esc 关闭。"
+			}
+		case "snapshots":
+			m.ReviewSnapshots = append([]sessionlog.SnapshotRef(nil), x.Snapshots...)
+		case "rewind":
+			if x.Rewind != nil {
+				m.RewindPick, m.RewindArmed = false, false
+				if x.Rewind.Status == sessionlog.RewindFailed {
+					m.Status = "回滚失败：" + x.Rewind.Error
+				} else {
+					m.Status = "已回滚到快照 " + x.Rewind.SnapshotID + "，快照之后创建的内容已移除。"
+				}
+			}
+		case "questions":
+			m.Questions = append([]sessionlog.PendingQuestion(nil), x.Questions...)
+		case "reply":
+			if x.Reply != nil {
+				m.Status = "答复已记录。"
+			}
+		case "search":
+			if x.Search != nil {
+				m.SearchHits = x.Search.Hits
+				m.SearchCorrupt = x.Search.Corrupt
+				m.Navigation = NavigationState{Mode: SearchResultsView, Cursor: 0}
+				if len(m.SearchHits) == 0 {
+					m.Status = "没有匹配的会话。"
+				} else {
+					m.Status = "Enter 恢复选中的会话。"
+				}
 			}
 		case "acceptance":
 			m.Review = nil
@@ -347,13 +398,33 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 			return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "session_load", ProjectRoot: m.Root, SessionID: m.ActiveSession})
 		}
 	}
+	// A /say success means the instruction is persisted and queued for the
+	// goal's next decision round. The protocol does not yet report the exact
+	// consumption moment, so the UI shows the durable queued state only and
+	// never claims the instruction was consumed.
+	if r.op == "say" {
+		m.Status = "已排队：下一轮决策按序消费。"
+		return m, nil
+	}
+	if r.op == "review_get" && m.Review != nil {
+		return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "snapshot_list", SessionID: m.ActiveSession, CandidateID: m.Review.CandidateID})
+	}
+	if r.op == "snapshot_rewind" && m.Review != nil {
+		// The rewind moved the candidate back; the open review is stale.
+		m.Pending = true
+		return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "review_get", CandidateID: m.Review.CandidateID, SessionID: m.ActiveSession})
+	}
+	if r.op == "reply" {
+		return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "question_list", SessionID: m.ActiveSession})
+	}
 	if r.op == "session_load" && m.ActiveSession != "" {
 		list := requestCmd(m.Socket, conversation.ClientMsg{Op: "approval_list", SessionID: m.ActiveSession})
+		questions := requestCmd(m.Socket, conversation.ClientMsg{Op: "question_list", SessionID: m.ActiveSession})
 		if !m.approvalPollStarted {
 			m.approvalPollStarted = true
-			return m, tea.Batch(list, approvalPollCmd())
+			return m, tea.Batch(list, questions, approvalPollCmd())
 		}
-		return m, list
+		return m, tea.Batch(list, questions)
 	}
 	return m, nil
 }
@@ -447,6 +518,10 @@ func (m Model) handleChatKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+g":
 		m.Navigation = NavigationState{Mode: GoalPickerView, Cursor: m.SelectedGoal}
 		return m, nil
+	case "ctrl+p":
+		return m.historyOlder()
+	case "ctrl+n":
+		return m.historyNewer()
 	case "pgup", "ctrl+up":
 		var cmd tea.Cmd
 		m.Transcript.Viewport, cmd = m.Transcript.Viewport.Update(k)
@@ -520,6 +595,12 @@ func (m Model) handleInput(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.Status = "已取消输入。"
 		return m, nil
 	}
+	if k.String() == "ctrl+p" {
+		return m.historyOlder()
+	}
+	if k.String() == "ctrl+n" {
+		return m.historyNewer()
+	}
 	if k.String() == "ctrl+j" {
 		m.Composer.SetValue(m.Composer.Value() + "\n")
 		return m, nil
@@ -584,7 +665,55 @@ func (m Model) submitComposer() (tea.Model, tea.Cmd) {
 		m.Pending = true
 		m.Status = "正在生成候选预览…"
 		m.Composer.SetValue("")
+		m.recordHistory(text)
 		return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "review_get", CandidateID: candidateID, SessionID: m.ActiveSession})
+	}
+	if text == "/search" || strings.HasPrefix(text, "/search ") {
+		query := strings.TrimSpace(strings.TrimPrefix(text, "/search"))
+		if query == "" {
+			m.Status = "用法：/search 关键词"
+			return m, nil
+		}
+		m.Pending = true
+		m.Status = "正在搜索会话…"
+		m.Composer.SetValue("")
+		m.recordHistory(text)
+		return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "session_search", ProjectRoot: m.Root, Text: query})
+	}
+	if text == "/say" || strings.HasPrefix(text, "/say ") {
+		sayText := strings.TrimSpace(strings.TrimPrefix(text, "/say"))
+		if sayText == "" {
+			m.Status = "用法：/say 补充指令"
+			return m, nil
+		}
+		if len(m.Goals) == 0 {
+			m.Status = "先用 Ctrl+G 选择目标，再 /say。"
+			return m, nil
+		}
+		req := conversation.ClientMsg{Op: "say", ProjectRoot: m.Root, SessionID: m.ActiveSession, Goal: m.Goals[clamp(m.SelectedGoal, 0, len(m.Goals)-1)].ID, Text: sayText}
+		m.Pending = true
+		m.Status = "正在排队补充指令…"
+		m.Composer.SetValue("")
+		m.recordHistory(text)
+		return m, requestCmd(m.Socket, req)
+	}
+	if text == "/reply" || strings.HasPrefix(text, "/reply ") {
+		replyText := strings.TrimSpace(strings.TrimPrefix(text, "/reply"))
+		if replyText == "" {
+			m.Status = "用法：/reply 答复内容"
+			return m, nil
+		}
+		question, ok := m.pendingQuestion()
+		if !ok {
+			m.Status = "当前没有待回答的问题。"
+			return m, nil
+		}
+		req := conversation.ClientMsg{Op: "reply", SessionID: m.ActiveSession, QuestionID: question.QuestionID, Text: replyText}
+		m.Pending = true
+		m.Status = "正在记录答复…"
+		m.Composer.SetValue("")
+		m.recordHistory(text)
+		return m, requestCmd(m.Socket, req)
 	}
 	req := conversation.ClientMsg{ProjectRoot: m.Root, SessionID: m.ActiveSession, Text: text}
 	if len(m.Goals) > 0 && m.Navigation.Mode == GoalPickerView {
@@ -609,6 +738,7 @@ func (m Model) submitComposer() (tea.Model, tea.Cmd) {
 	m.Mode = ""
 	m.Composer.SetValue("")
 	m.Composer.Blur()
+	m.recordHistory(text)
 	if req.Op == "chat" {
 		runID, err := sessionlog.NewID()
 		if err != nil {
@@ -625,11 +755,97 @@ func (m Model) submitComposer() (tea.Model, tea.Cmd) {
 	return m, requestCmd(m.Socket, req)
 }
 
+// recordHistory appends one submitted input to the project history. The
+// submission itself never depends on the history file, but a failed append
+// must be visible instead of silently losing the entry.
+func (m *Model) recordHistory(text string) {
+	m.histCursor, m.histDraft = nil, ""
+	if m.history == nil {
+		if m.historyErr != nil {
+			m.Status = "输入历史未保存：" + m.historyErr.Error()
+		}
+		return
+	}
+	if _, err := m.history.Append(text); err != nil {
+		m.Status = "输入历史未保存：" + err.Error()
+	}
+}
+
+// pendingQuestion returns the oldest still-unanswered question in the active
+// session, which is the only one /reply is allowed to target.
+func (m Model) pendingQuestion() (sessionlog.PendingQuestion, bool) {
+	for _, q := range m.Questions {
+		if q.Status == sessionlog.QuestionPending {
+			return q, true
+		}
+	}
+	return sessionlog.PendingQuestion{}, false
+}
+
+// historyOlder/Newer walk the persisted input history with Ctrl+P/Ctrl+N.
+// Navigation never submits anything; the live draft is saved on entry and
+// restored when the user steps back past the newest entry.
+func (m Model) historyOlder() (tea.Model, tea.Cmd) {
+	if m.history == nil {
+		if m.historyErr != nil {
+			m.Status = "输入历史不可用：" + m.historyErr.Error()
+		}
+		return m, nil
+	}
+	if m.histCursor == nil {
+		cursor, err := m.history.Cursor()
+		if err != nil {
+			m.Status = "输入历史不可用：" + err.Error()
+			return m, nil
+		}
+		m.histCursor = cursor
+		m.histDraft = m.Composer.Value()
+	}
+	entry, ok := m.histCursor.Prev()
+	if !ok {
+		m.Status = "已到最早一条历史。"
+		return m, nil
+	}
+	m.Composer.SetValue(entry.Text)
+	return m, nil
+}
+
+func (m Model) historyNewer() (tea.Model, tea.Cmd) {
+	if m.histCursor == nil {
+		return m, nil
+	}
+	entry, ok := m.histCursor.Next()
+	if !ok {
+		m.Composer.SetValue(m.histDraft)
+		m.histCursor, m.histDraft = nil, ""
+		return m, nil
+	}
+	m.Composer.SetValue(entry.Text)
+	return m, nil
+}
+
 func (m Model) handleReviewKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.RewindPick {
+		return m.handleRewindPickKey(k)
+	}
 	switch k.String() {
 	case "esc":
-		m.Review, m.ReviewConfirmed = nil, nil
+		m.Review, m.ReviewConfirmed, m.ReviewSnapshots = nil, nil, nil
 		m.Status = "已关闭候选预览。"
+		return m, nil
+	case "r":
+		// Rewind targets a snapshot of this candidate; an active run could be
+		// writing to it, so the picker stays disabled with an explicit reason.
+		if m.ActiveRunID != "" || m.Pending {
+			m.Status = "有活动运行：请先等待运行结束或按 Esc 取消运行，再回滚。"
+			return m, nil
+		}
+		if len(m.ReviewSnapshots) == 0 {
+			m.Status = "该候选在此会话没有可回滚的快照。"
+			return m, nil
+		}
+		m.RewindPick, m.RewindCursor, m.RewindArmed = true, 0, false
+		m.Status = "选择回滚目标快照。"
 		return m, nil
 	case " ":
 		if len(m.Review.Findings) > 0 {
@@ -665,6 +881,50 @@ func (m Model) handleReviewKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.Pending, m.Status = true, "正在核对并强制接收候选…"
 		return m, m.acceptReview(candidate.AcceptForce, confirmed...)
+	}
+	return m, nil
+}
+
+// handleRewindPickKey drives the two-step rewind confirmation inside the
+// review dialog: the first Enter arms a concrete target snapshot, the second
+// sends the rewind request. The request carries the digest from the loaded
+// review, so a candidate that moved in between is refused server-side.
+func (m Model) handleRewindPickKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch k.String() {
+	case "esc":
+		m.RewindPick, m.RewindArmed = false, false
+		m.Status = "已取消回滚选择。"
+		return m, nil
+	case "up", "k", "left", "h":
+		if m.RewindCursor > 0 {
+			m.RewindCursor--
+			m.RewindArmed = false
+		}
+		return m, nil
+	case "down", "j", "right", "l":
+		if m.RewindCursor < len(m.ReviewSnapshots)-1 {
+			m.RewindCursor++
+			m.RewindArmed = false
+		}
+		return m, nil
+	case "enter":
+		if len(m.ReviewSnapshots) == 0 || m.Review == nil {
+			m.RewindPick, m.RewindArmed = false, false
+			return m, nil
+		}
+		target := m.ReviewSnapshots[clamp(m.RewindCursor, 0, len(m.ReviewSnapshots)-1)]
+		if !m.RewindArmed {
+			m.RewindArmed = true
+			m.Status = "再次 Enter 确认回滚到快照 " + shortDigest(target.Digest) + "。"
+			return m, nil
+		}
+		m.Pending = true
+		m.RewindPick, m.RewindArmed = false, false
+		m.Status = "正在回滚候选到快照…"
+		return m, requestCmd(m.Socket, conversation.ClientMsg{
+			Op: "snapshot_rewind", SessionID: m.ActiveSession, CandidateID: m.Review.CandidateID,
+			SnapshotID: target.SnapshotID, CandidateDigest: m.Review.CandidateDigest,
+		})
 	}
 	return m, nil
 }
@@ -786,7 +1046,8 @@ func (m *Model) applyRunMessage(message conversation.ServerMsg) {
 func (m Model) handleNavigationKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch k.String() {
 	case "esc":
-		m.Navigation.Mode = ChatView
+		m.Navigation = NavigationState{Mode: ChatView}
+		m.SearchHits, m.SearchCorrupt = nil, nil
 		m.Composer.Focus()
 		return m, nil
 	case "up", "k":
@@ -798,20 +1059,51 @@ func (m Model) handleNavigationKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.Navigation.Mode == GoalPickerView {
 			limit = len(m.Goals)
 		}
+		if m.Navigation.Mode == SessionPickerView {
+			limit = len(filterSessions(m.Sessions, m.Navigation.Filter))
+		}
+		if m.Navigation.Mode == SearchResultsView {
+			limit = len(m.SearchHits)
+		}
 		if m.Navigation.Cursor+1 < limit {
 			m.Navigation.Cursor++
 		}
+	case "backspace":
+		if m.Navigation.Mode == SessionPickerView && m.Navigation.Filter != "" {
+			r := []rune(m.Navigation.Filter)
+			m.Navigation.Filter = string(r[:len(r)-1])
+			m.Navigation.Cursor = 0
+		}
 	case "enter":
-		if m.Navigation.Mode == SessionPickerView && len(m.Sessions) > 0 {
-			m.ActiveSession = m.Sessions[clamp(m.Navigation.Cursor, 0, len(m.Sessions)-1)].ID
-			m.Navigation.Mode = ChatView
-			m.Pending = true
-			m.Status = "正在加载会话…"
-			return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "session_load", ProjectRoot: m.Root, SessionID: m.ActiveSession})
+		if m.Navigation.Mode == SessionPickerView {
+			filtered := filterSessions(m.Sessions, m.Navigation.Filter)
+			if len(filtered) > 0 {
+				m.ActiveSession = filtered[clamp(m.Navigation.Cursor, 0, len(filtered)-1)].ID
+				m.Navigation = NavigationState{Mode: ChatView}
+				m.Pending = true
+				m.Status = "正在加载会话…"
+				return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "session_load", ProjectRoot: m.Root, SessionID: m.ActiveSession})
+			}
 		}
 		if m.Navigation.Mode == GoalPickerView && len(m.Goals) > 0 {
 			m.SelectedGoal = clamp(m.Navigation.Cursor, 0, len(m.Goals)-1)
 			m.Navigation.Mode = ChatView
+		}
+		if m.Navigation.Mode == SearchResultsView && len(m.SearchHits) > 0 {
+			hit := m.SearchHits[clamp(m.Navigation.Cursor, 0, len(m.SearchHits)-1)]
+			m.ActiveSession = hit.Session.ID
+			m.Navigation = NavigationState{Mode: ChatView}
+			m.SearchHits, m.SearchCorrupt = nil, nil
+			m.Pending = true
+			m.Status = "正在加载会话…"
+			return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "session_load", ProjectRoot: m.Root, SessionID: m.ActiveSession})
+		}
+	default:
+		// In the session picker any other printable key extends the local
+		// title/ID filter; it is never submitted anywhere.
+		if m.Navigation.Mode == SessionPickerView && k.Type == tea.KeyRunes {
+			m.Navigation.Filter += string(k.Runes)
+			m.Navigation.Cursor = 0
 		}
 	}
 	return m, nil
@@ -823,10 +1115,13 @@ func (m Model) View() string {
 		return "Stable · 共用对话\n终端窗口较小，请放大窗口。 Ctrl+C 退出。"
 	}
 	if m.Navigation.Mode == SessionPickerView {
-		return "会话\n" + renderSessions(m.Sessions, m.ActiveSession, m.Navigation.Cursor, m.Width) + "\n" + renderStatus(m.statusState(), m.ActiveSession, m.Navigation.Mode, m.Width)
+		return "会话\n" + renderSessions(m.Sessions, m.ActiveSession, m.Navigation.Cursor, m.Width, m.Navigation.Filter) + "\n" + renderStatus(m.statusState(), m.ActiveSession, m.Navigation.Mode, m.Width)
 	}
 	if m.Navigation.Mode == GoalPickerView {
 		return "目标\n" + renderGoals(m.Goals, m.Navigation.Cursor, m.Width) + "\n" + renderStatus(m.statusState(), m.ActiveSession, m.Navigation.Mode, m.Width)
+	}
+	if m.Navigation.Mode == SearchResultsView {
+		return "会话搜索\n" + renderSearchResults(m.SearchHits, m.SearchCorrupt, m.Navigation.Cursor, m.Width) + "\n" + renderStatus(m.statusState(), m.ActiveSession, m.Navigation.Mode, m.Width)
 	}
 	var b strings.Builder
 	if len(m.Approvals) > 0 {
@@ -837,7 +1132,8 @@ func (m Model) View() string {
 		if m.Err != nil {
 			errorText = m.Err.Error()
 		}
-		return renderReview(*m.Review, m.ReviewConfirmed, m.ReviewCursor, m.Status, errorText, m.Width)
+		runActive := m.ActiveRunID != "" || m.Pending
+		return renderReview(*m.Review, m.ReviewConfirmed, m.ReviewCursor, m.ReviewSnapshots, m.RewindPick, m.RewindCursor, m.RewindArmed, runActive, m.Status, errorText, m.Width)
 	}
 	fmt.Fprintf(&b, "%s\n", m.Transcript.View())
 	b.WriteString("\n")
