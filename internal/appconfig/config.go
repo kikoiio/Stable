@@ -17,12 +17,46 @@ type ModelConfig struct {
 	Model    string `json:"model"`
 	BaseURL  string `json:"base_url,omitempty"`
 	APIKey   string `json:"api_key,omitempty"`
+	// ContextWindowTokens overrides the model context window. Zero uses the
+	// conservative default resolved by sessioncontext.EffectiveWindow.
+	ContextWindowTokens int `json:"context_window_tokens,omitempty"`
+}
+
+// SnapshotQuota bounds candidate snapshot storage. Zero fields fall back to
+// the approved defaults.
+type SnapshotQuota struct {
+	MaxProjectBytes          int64 `json:"max_project_bytes,omitempty"`
+	MaxManifestsPerCandidate int   `json:"max_manifests_per_candidate,omitempty"`
+}
+
+const (
+	// DefaultSnapshotProjectBytes is the default per-project blob budget (1 GiB).
+	DefaultSnapshotProjectBytes int64 = 1 << 30
+	// DefaultSnapshotManifests is the default per-candidate manifest budget.
+	DefaultSnapshotManifests = 50
+)
+
+// ProjectBytes resolves the per-project snapshot budget.
+func (q SnapshotQuota) ProjectBytes() int64 {
+	if q.MaxProjectBytes <= 0 {
+		return DefaultSnapshotProjectBytes
+	}
+	return q.MaxProjectBytes
+}
+
+// ManifestsPerCandidate resolves the per-candidate manifest budget.
+func (q SnapshotQuota) ManifestsPerCandidate() int {
+	if q.MaxManifestsPerCandidate <= 0 {
+		return DefaultSnapshotManifests
+	}
+	return q.MaxManifestsPerCandidate
 }
 
 type AppConfig struct {
-	Model        ModelConfig `json:"model"`
-	StateDir     string      `json:"state_dir,omitempty"`
-	TemporalPort int         `json:"temporal_port,omitempty"`
+	Model        ModelConfig   `json:"model"`
+	StateDir     string        `json:"state_dir,omitempty"`
+	TemporalPort int           `json:"temporal_port,omitempty"`
+	Snapshots    SnapshotQuota `json:"snapshots,omitempty"`
 }
 
 func ConfigPath() (string, error) {
@@ -103,6 +137,13 @@ func Load() (AppConfig, error) {
 			return c, errors.New("invalid Temporal port")
 		}
 		c.TemporalPort = n
+	}
+	if v := os.Getenv("STABLE_CONTEXT_WINDOW_TOKENS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return c, errors.New("invalid context window tokens")
+		}
+		c.Model.ContextWindowTokens = n
 	}
 	if c.TemporalPort == 0 {
 		c.TemporalPort = 7233

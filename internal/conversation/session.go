@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"stable/internal/decision"
 	"stable/internal/goalrun"
 	"stable/internal/prompt"
+	"stable/internal/sessioncontext"
 	"stable/internal/sessionlog"
 )
 
@@ -306,19 +308,23 @@ func (s *Service) sessionChat(ctx context.Context, c ClientMsg) ([]ServerMsg, er
 		}
 		goalContext = fmt.Sprintf("ID: %s\nObjective: %s\nStatus: %s\nReason: %s\nEvidence: %s", snap.Goal.ID, snap.Goal.Objective, snap.Goal.Status, snap.Goal.Reason, evidenceSummary(snap.Evidence))
 	}
-	turns := prompt.Project(replay, goalContext)
-	if prompt.ApproxTokens(turns) > 8192 {
-		if _, err = prompt.Compact(ctx, root, c.SessionID, replay.Events, 8, s.deps.ChatProvider); err != nil {
-			return nil, err
-		}
-		replay, err = sessionlog.Replay(root, c.SessionID)
-		if err != nil {
-			return nil, err
-		}
-		turns = prompt.Project(replay, goalContext)
+	projection := sessionlog.Project(replay)
+	manager, fellBack := sessioncontext.NewManager(s.deps.ContextWindowTokens, s.deps.ChatProvider)
+	if fellBack {
+		log.Printf("invalid context_window_tokens %d; using default %d", s.deps.ContextWindowTokens, sessioncontext.DefaultWindowTokens)
 	}
-	turns = prompt.Fit(turns, 8192)
-	answer, err := s.deps.ChatProvider.GenerateChat(ctx, turns)
+	prepared, err := manager.Prepare(ctx, projection, prompt.SystemPrefix(goalContext))
+	if err != nil {
+		return nil, err
+	}
+	if prepared.Compacted && prepared.Boundary != nil {
+		// The conversation service is the only session log writer: persist
+		// the single boundary before sending, or fail the turn visibly.
+		if _, err = sessionlog.Append(root, c.SessionID, sessionlog.EventBoundary, *prepared.Boundary); err != nil {
+			return nil, fmt.Errorf("persist compaction boundary: %w", err)
+		}
+	}
+	answer, err := s.deps.ChatProvider.GenerateChat(ctx, prepared.Messages)
 	if err != nil {
 		return []ServerMsg{{Type: "message", Message: nil}}, fmt.Errorf("chat response failed: %w", err)
 	}

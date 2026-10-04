@@ -1,11 +1,7 @@
 package prompt
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"os"
 	"stable/internal/decision"
 	"stable/internal/sessionlog"
 	"strings"
@@ -29,46 +25,35 @@ func TestStableSystemAndSessionProjection(t *testing.T) {
 	}
 }
 
-type summaryStub struct{}
-
-func (summaryStub) GenerateChat(context.Context, []decision.ChatMessage) (string, error) {
-	return "summary", nil
+func TestMessagesFromItemsDropsDanglingToolCall(t *testing.T) {
+	items := []sessionlog.Item{
+		{Seq: 1, Kind: sessionlog.ItemMessage, Message: &sessionlog.Message{Role: "user", Text: "go"}, Matched: true},
+		{Seq: 2, Kind: sessionlog.ItemToolCall, Call: &sessionlog.ToolCall{CallID: "c1", Name: "write"}, Matched: false},
+	}
+	msgs := MessagesFromItems(items)
+	if len(msgs) != 1 || msgs[0].Content != "go" {
+		t.Fatalf("dangling call leaked into recoverable tail: %+v", msgs)
+	}
+	// A matched call and its result both survive.
+	items[1].Matched = true
+	items = append(items, sessionlog.Item{Seq: 3, Kind: sessionlog.ItemToolResult, Result: &sessionlog.ToolResult{CallID: "c1", Result: "ok"}, Matched: true})
+	msgs = MessagesFromItems(items)
+	if len(msgs) != 3 {
+		t.Fatalf("complete pair not preserved: %+v", msgs)
+	}
 }
 
-type failingSummary struct{}
-
-func (failingSummary) GenerateChat(context.Context, []decision.ChatMessage) (string, error) {
-	return "", errors.New("provider failed")
-}
-
-func TestCompactPreservesOriginalAndProjectsSummaryTail(t *testing.T) {
-	root := t.TempDir()
-	s, err := sessionlog.Create(root, "compact")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 12; i++ {
-		if _, err = sessionlog.Append(root, s.ID, sessionlog.EventMessage, sessionlog.Message{Role: "user", Text: fmt.Sprintf("msg-%02d", i)}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	before, err := sessionlog.Replay(root, s.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = Compact(context.Background(), root, s.ID, before.Events, 3, summaryStub{}); err != nil {
-		t.Fatal(err)
-	}
-	after, err := sessionlog.Replay(root, s.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(after.Events) <= len(before.Events) {
-		t.Fatal("original events were rewritten or removed")
-	}
-	projection := Project(after, "")
+func TestProjectSubstitutesBoundarySummary(t *testing.T) {
+	r := sessionlog.Transcript{Session: sessionlog.SessionInfo{ID: "a"}, Events: []sessionlog.Event{
+		{Seq: 1, Type: sessionlog.EventSessionCreated},
+		{Seq: 2, Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "user", Text: "msg-00"}},
+		{Seq: 3, Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "assistant", Text: "msg-01"}},
+		{Seq: 4, Type: sessionlog.EventBoundary, Data: sessionlog.Boundary{FromSeq: 2, ToSeq: 3, Summary: "summary"}},
+		{Seq: 5, Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "user", Text: "msg-11"}},
+	}}
+	msgs := Project(r, "")
 	joined := ""
-	for _, m := range projection {
+	for _, m := range msgs {
 		joined += m.Content + "\n"
 	}
 	if !strings.Contains(joined, "summary") || !strings.Contains(joined, "msg-11") || strings.Contains(joined, "msg-00") {
@@ -76,50 +61,13 @@ func TestCompactPreservesOriginalAndProjectsSummaryTail(t *testing.T) {
 	}
 }
 
-func TestSummaryFailureDoesNotMutateLog(t *testing.T) {
-	root := t.TempDir()
-	s, err := sessionlog.Create(root, "failure")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 12; i++ {
-		if _, err = sessionlog.Append(root, s.ID, sessionlog.EventMessage, sessionlog.Message{Role: "user", Text: fmt.Sprintf("old-%d", i)}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	before, err := sessionlog.Replay(root, s.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path, _ := sessionlog.SessionPath(root, s.ID)
-	original, _ := os.ReadFile(path)
-	if _, err = Compact(context.Background(), root, s.ID, before.Events, 2, failingSummary{}); err == nil {
-		t.Fatal("summary failure was hidden")
-	}
-	after, _ := os.ReadFile(path)
-	if string(after) != string(original) {
-		t.Fatal("failed compaction mutated the append-only log")
-	}
-}
-
 func TestOversizedToolResultIsBudgetedButStoredWhole(t *testing.T) {
-	root := t.TempDir()
-	s, err := sessionlog.Create(root, "tool-result")
-	if err != nil {
-		t.Fatal(err)
-	}
-	large := strings.Repeat("payload", 3000)
-	if _, err = sessionlog.Append(root, s.ID, sessionlog.EventToolCall, sessionlog.ToolCall{CallID: "call-1", Name: "future-tool", Input: map[string]any{"path": "example"}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = sessionlog.Append(root, s.ID, sessionlog.EventToolResult, sessionlog.ToolResult{CallID: "call-1", Result: large}); err != nil {
-		t.Fatal(err)
-	}
-	replay, err := sessionlog.Replay(root, s.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	projection := Project(replay, "")
+	r := sessionlog.Transcript{Session: sessionlog.SessionInfo{ID: "a"}, Events: []sessionlog.Event{
+		{Seq: 1, Type: sessionlog.EventSessionCreated},
+		{Seq: 2, Type: sessionlog.EventToolCall, Data: sessionlog.ToolCall{CallID: "call-1", Name: "future-tool", Input: map[string]any{"path": "example"}}},
+		{Seq: 3, Type: sessionlog.EventToolResult, Data: sessionlog.ToolResult{CallID: "call-1", Result: strings.Repeat("payload", 3000)}},
+	}}
+	projection := Project(r, "")
 	var resultMessage string
 	for _, m := range projection {
 		if strings.Contains(m.Content, "recorded tool result") {
@@ -130,8 +78,8 @@ func TestOversizedToolResultIsBudgetedButStoredWhole(t *testing.T) {
 		t.Fatalf("result projection not budgeted: %d chars", len([]rune(resultMessage)))
 	}
 	var stored sessionlog.ToolResult
-	raw, _ := json.Marshal(replay.Events[2].Data)
-	if json.Unmarshal(raw, &stored) != nil || stored.Result != large {
+	raw, _ := json.Marshal(r.Events[2].Data)
+	if json.Unmarshal(raw, &stored) != nil || stored.Result != strings.Repeat("payload", 3000) {
 		t.Fatal("full tool result was lost from the event log")
 	}
 }

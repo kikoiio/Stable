@@ -334,8 +334,9 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 	permissionService := &permission.PermissionService{Repository: s, NewID: func() string { id, _ := sessionlog.NewID(); return id }}
 	svc, err := conversation.Serve(ctx, conversation.Deps{
 		Store: s, Provider: provider, ChatProvider: chatProvider, Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: address, ProjectRoot: p.Share, RunRoot: p.Goals, SocketPath: p.ChatSocket,
-		Refresher:         refresher,
-		CandidateCheckers: []candidate.Checker{candidate.KicadERCChecker{Sandbox: sandbox.LinuxManager{}, RunRoot: p.Goals}},
+		Refresher:           refresher,
+		CandidateCheckers:   []candidate.Checker{candidate.KicadERCChecker{Sandbox: sandbox.LinuxManager{}, RunRoot: p.Goals}},
+		ContextWindowTokens: c.Model.ContextWindowTokens,
 	})
 	if err != nil {
 		return err
