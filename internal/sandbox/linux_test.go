@@ -40,9 +40,21 @@ func TestProfileValidation(t *testing.T) {
 	}
 }
 
+// bwrapPath returns the bubblewrap binary path, skipping the test on hosts
+// without it (CI runners); argument-construction coverage runs wherever the
+// real binary exists.
+func bwrapPath(t *testing.T) string {
+	t.Helper()
+	const path = "/usr/bin/bwrap"
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("bubblewrap not installed on this host: %v", err)
+	}
+	return path
+}
+
 func TestBubblewrapArgs(t *testing.T) {
 	p := sandboxFixture(t)
-	m := LinuxManager{Bwrap: "/usr/bin/bwrap"}
+	m := LinuxManager{Bwrap: bwrapPath(t)}
 	a, err := m.args(p, []string{"python3", "-c", "pass"})
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +85,7 @@ func TestBubblewrapArgsWithApprovedNetworkProxy(t *testing.T) {
 	p.ProxyHelperPath = helper
 	p.ReadOnlyFiles = []ReadOnlyFileMount{{HostPath: helper, GuestPath: "/workspace/runtime/agentworker"}}
 	p.ReadOnlyMounts = []ReadOnlyMount{{HostPath: proxyDir, GuestPath: "/run/stable-network"}}
-	a, err := (LinuxManager{Bwrap: "/usr/bin/bwrap"}).args(p, []string{"/bin/true"})
+	a, err := (LinuxManager{Bwrap: bwrapPath(t)}).args(p, []string{"/bin/true"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +112,7 @@ func TestBubblewrapArgsWithSessionControl(t *testing.T) {
 	p.sessionControl = true
 	p.sessionGeneration = 3
 	p.ReadOnlyMounts = []ReadOnlyMount{{HostPath: controlDir, GuestPath: "/run/stable-session"}}
-	a, err := (LinuxManager{Bwrap: "/usr/bin/bwrap"}).args(p, p.SessionArgv)
+	a, err := (LinuxManager{Bwrap: bwrapPath(t)}).args(p, p.SessionArgv)
 	if err != nil {
 		t.Fatal(err)
 	}
