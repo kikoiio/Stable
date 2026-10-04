@@ -116,11 +116,40 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	if _, err = db.Exec(`PRAGMA user_version = 10`); err != nil {
+	if version < 11 {
+		if err = migrateV11(db); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if _, err = db.Exec(`PRAGMA user_version = 11`); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+// migrateV11 introduces the rewind journal for candidate snapshot recovery.
+func migrateV11(db *sql.DB) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS rewind_journal (
+		id TEXT PRIMARY KEY,
+		candidate_id TEXT NOT NULL REFERENCES candidates(id),
+		snapshot_id TEXT NOT NULL,
+		phase TEXT NOT NULL CHECK(phase IN ('prepared','swapped','finalized','blocked')),
+		expected_digest TEXT NOT NULL,
+		target_digest TEXT NOT NULL,
+		staging_dir TEXT NOT NULL DEFAULT '',
+		reason TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS rewind_journal_candidate ON rewind_journal(candidate_id,phase,updated_at)`); err != nil {
+		return err
+	}
+	_, err := db.Exec(`PRAGMA user_version=11`)
+	return err
 }
 
 func migrateV10(db *sql.DB) error {

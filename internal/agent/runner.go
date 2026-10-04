@@ -25,6 +25,9 @@ type RunnerOptions struct {
 	ExecutorFactory ExecutorFactory
 	ToolSchemas     []llm.ToolSchema
 	Budget          ResourceBounds
+	// ContextManager prepares provider messages before each request and may
+	// publish a persistent compaction boundary. Nil disables compaction.
+	ContextManager ContextPreparer
 }
 
 type runEntry struct{ cancel context.CancelFunc }
@@ -122,6 +125,7 @@ func ValidateRequest(request ExecutionRequest) error {
 func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest, output chan<- ExecutionEvent) RunOutcome {
 	var seq uint64
 	messages := append([]llm.Message(nil), request.Messages...)
+	msgSeqs := make([]uint64, len(messages)) // request history predates this run
 	budget := r.runBudget(request)
 	startedAt := time.Now()
 	toolRounds := 0
@@ -133,6 +137,28 @@ func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest,
 		}
 		if budget.MaxTotalDuration > 0 && time.Since(startedAt) >= budget.MaxTotalDuration {
 			return r.budgetExhausted(request, output, &seq, "max_total_duration")
+		}
+
+		if r.options.ContextManager != nil {
+			prepared, err := r.options.ContextManager.PrepareRun(ctx, request.RunID, messages, msgSeqs)
+			if err != nil {
+				providerErr := &llm.ProviderError{Class: llm.ErrorProvider, Message: "context preparation failed: " + err.Error()}
+				payload, _ := json.Marshal(providerErr)
+				_ = r.publish(request, output, &seq, ExecutionEvent{Kind: EventError, Payload: payload})
+				return r.terminal(request, output, &seq, RunFailed, providerErr)
+			}
+			if prepared.Boundary != nil {
+				payload, _ := json.Marshal(prepared.Boundary)
+				if err := r.publish(request, output, &seq, ExecutionEvent{Kind: EventCompactionBoundary, Payload: payload}); err != nil {
+					providerErr := &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish compaction boundary"}
+					return r.terminal(request, output, &seq, RunFailed, providerErr)
+				}
+				// The synthetic summary message aligns with the boundary
+				// event so a later boundary can cover it in turn.
+				newSeqs := append(append([]uint64{}, msgSeqs[:prepared.HeadKept]...), seq)
+				msgSeqs = append(newSeqs, msgSeqs[prepared.TailStart:]...)
+				messages = prepared.Messages
+			}
 		}
 
 		var (
@@ -250,10 +276,12 @@ func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest,
 		assistant := llm.Message{Role: "assistant", Content: responseText}
 		if len(toolCalls) == 0 {
 			messages = append(messages, assistant)
+			msgSeqs = append(msgSeqs, seq)
 			return r.terminal(request, output, &seq, RunCompleted, nil)
 		}
 		assistant.ToolUses = toolCalls
 		messages = append(messages, assistant)
+		msgSeqs = append(msgSeqs, seq)
 		toolRounds++
 		if budget.MaxToolRounds > 0 && toolRounds > budget.MaxToolRounds {
 			return r.budgetExhausted(request, output, &seq, "max_tool_rounds")
@@ -306,6 +334,7 @@ func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest,
 			results = append(results, llm.ToolResultPart{ToolUseID: call.ID, Content: outcome.Content, IsError: outcome.IsError})
 		}
 		messages = append(messages, llm.Message{Role: "user", ToolResults: results})
+		msgSeqs = append(msgSeqs, seq)
 	}
 }
 

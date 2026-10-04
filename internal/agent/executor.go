@@ -26,6 +26,18 @@ type DiffSummary struct {
 	Text      string `json:"text"`
 }
 
+// SnapshotMeta describes one candidate snapshot created while executing a
+// tool call. The conversation service persists it as a session snapshot
+// event in stream order; the metadata never carries file contents.
+type SnapshotMeta struct {
+	SnapshotID  string    `json:"snapshot_id"`
+	CandidateID string    `json:"candidate_id"`
+	RunID       string    `json:"run_id,omitempty"`
+	Label       string    `json:"label,omitempty"`
+	Digest      string    `json:"digest"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 type ToolOutcome struct {
 	CallID      string         `json:"call_id"`
 	ToolName    string         `json:"tool_name"`
@@ -35,6 +47,7 @@ type ToolOutcome struct {
 	Elapsed     time.Duration  `json:"elapsed"`
 	OutputBytes int            `json:"output_bytes"`
 	Diff        *DiffSummary   `json:"diff,omitempty"`
+	Snapshots   []SnapshotMeta `json:"snapshots,omitempty"`
 }
 
 type RunExecutor interface {

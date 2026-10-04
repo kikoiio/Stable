@@ -50,7 +50,14 @@ type CommandSource interface {
 type builtinCommands struct{}
 
 func (builtinCommands) List(prefix string) []CompletionItem {
-	all := []CompletionItem{{Kind: CommandCompletion, Label: "/sessions", Detail: "浏览会话", InsertText: "/sessions"}, {Kind: CommandCompletion, Label: "/goals", Detail: "浏览目标", InsertText: "/goals"}}
+	all := []CompletionItem{
+		{Kind: CommandCompletion, Label: "/sessions", Detail: "浏览会话", InsertText: "/sessions"},
+		{Kind: CommandCompletion, Label: "/goals", Detail: "浏览目标", InsertText: "/goals"},
+		{Kind: CommandCompletion, Label: "/search", Detail: "搜索会话内容", InsertText: "/search "},
+		{Kind: CommandCompletion, Label: "/review", Detail: "预览候选变更", InsertText: "/review "},
+		{Kind: CommandCompletion, Label: "/say", Detail: "为目标排队补充指令", InsertText: "/say "},
+		{Kind: CommandCompletion, Label: "/reply", Detail: "答复待答问题", InsertText: "/reply "},
+	}
 	return FilterCompletions(all, prefix)
 }
 func FilterCompletions(items []CompletionItem, prefix string) []CompletionItem {

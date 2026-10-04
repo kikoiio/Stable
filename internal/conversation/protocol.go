@@ -33,6 +33,9 @@ type ClientMsg struct {
 	Confirmed       []string                `json:"confirmed_findings,omitempty"`
 	ApprovalID      string                  `json:"approval_id,omitempty"`
 	ApprovalChoice  string                  `json:"approval_choice,omitempty"`
+	SnapshotID      string                  `json:"snapshot_id,omitempty"`
+	QuestionID      string                  `json:"question_id,omitempty"`
+	Limit           int                     `json:"limit,omitempty"`
 }
 
 // ServerMsg is one line of JSON pushed from the session service to clients.
@@ -55,11 +58,16 @@ type ServerMsg struct {
 	Approval   *permission.ApprovalPrompt     `json:"approval,omitempty"`
 	Approvals  []permission.ApprovalPrompt    `json:"approvals,omitempty"`
 	Decision   *permission.PermissionDecision `json:"decision,omitempty"`
+	Search     *sessionlog.SearchResult       `json:"search,omitempty"`
+	Snapshots  []sessionlog.SnapshotRef       `json:"snapshots,omitempty"`
+	Rewind     *sessionlog.RewindRecord       `json:"rewind,omitempty"`
+	Questions  []sessionlog.PendingQuestion   `json:"questions,omitempty"`
+	Reply      *sessionlog.QuestionReply      `json:"reply,omitempty"`
 }
 
 func validOp(op string) bool {
 	switch op {
-	case "session_list", "session_create", "session_load", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel":
+	case "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list":
 		return true
 	}
 	return false
@@ -91,13 +99,38 @@ func validateClient(m ClientMsg) error {
 		if m.ProjectRoot == "" || m.SessionID == "" {
 			return fmt.Errorf("op session_load requires project_root and session_id")
 		}
+	case "session_search":
+		if m.ProjectRoot == "" || m.Text == "" {
+			return fmt.Errorf("op session_search requires project_root and text")
+		}
+	case "snapshot_list", "question_list":
+		if m.SessionID == "" {
+			return fmt.Errorf("op %s requires session_id", m.Op)
+		}
+		if m.Op == "snapshot_list" && m.CandidateID == "" {
+			return fmt.Errorf("op snapshot_list requires candidate_id")
+		}
+	case "snapshot_rewind":
+		if m.SessionID == "" || m.CandidateID == "" || m.SnapshotID == "" || m.CandidateDigest == "" {
+			return fmt.Errorf("op snapshot_rewind requires session, candidate, snapshot and the expected candidate digest")
+		}
 	case "chat":
 		if m.Text == "" {
 			return fmt.Errorf("op chat requires text")
 		}
-	case "say", "reply":
+	case "say":
 		if m.Goal == "" || m.Text == "" {
-			return fmt.Errorf("op %s requires goal and text", m.Op)
+			return fmt.Errorf("op say requires goal and text")
+		}
+	case "reply":
+		// The session-scoped reply answers one explicit pending question; the
+		// legacy goal-scoped reply stays a queued workflow message.
+		if m.QuestionID != "" {
+			if m.SessionID == "" || m.Text == "" {
+				return fmt.Errorf("op reply with question_id requires session_id and text")
+			}
+		} else if m.Goal == "" || m.Text == "" {
+			return fmt.Errorf("op reply requires goal and text")
 		}
 	case "create_goal":
 		if m.Text == "" {

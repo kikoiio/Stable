@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -26,6 +27,7 @@ import (
 	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/sandbox"
+	"stable/internal/sessioncontext"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
 	"stable/internal/tools"
@@ -249,6 +251,15 @@ func Supervise(c appconfig.AppConfig, p Paths) error {
 	}
 }
 
+// snapshotCredentials lists the configured secrets that must never reach
+// snapshot metadata. Empty entries are dropped.
+func snapshotCredentials(apiKey string) []string {
+	if apiKey == "" {
+		return nil
+	}
+	return []string{apiKey}
+}
+
 func runtimeToolSchemas() []llm.ToolSchema {
 	nameMap := map[string]string{
 		"read_file":  "read_file",
@@ -316,7 +327,12 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 	var runnerError string
 	var executorFactory agent.ExecutorFactory
 	var toolSchemas []llm.ToolSchema
+	var snapshotStore *candidate.SnapshotStore
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
+		snapshotStore, err = candidate.NewSnapshotStore(p.Share, c.Snapshots.ProjectBytes(), c.Snapshots.ManifestsPerCandidate(), snapshotCredentials(c.Model.APIKey))
+		if err != nil {
+			return fmt.Errorf("candidate snapshot store: %w", err)
+		}
 		executorFactory = execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
 			Sandbox:            sandbox.LinuxManager{},
 			Gate:               execution.StorePermissionGate{Store: s},
@@ -325,17 +341,24 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 			HelperPath:         filepath.Join(p.Libexec, "agentworker"),
 			SessionRoot:        p.Share,
 			ProviderCredential: c.Model.APIKey,
+			Snapshots:          snapshotStore,
 		})
 		toolSchemas = runtimeToolSchemas()
-		runner = agent.NewRunner(streamingProvider, agent.RunnerOptions{ExecutorFactory: executorFactory, ToolSchemas: toolSchemas})
+		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, chatProvider)
+		if fellBack {
+			log.Printf("invalid context_window_tokens %d; using default %d", c.Model.ContextWindowTokens, sessioncontext.DefaultWindowTokens)
+		}
+		runner = agent.NewRunner(streamingProvider, agent.RunnerOptions{ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, ContextManager: contextManager})
 	} else {
 		runnerError = streamErr.Error()
 	}
 	permissionService := &permission.PermissionService{Repository: s, NewID: func() string { id, _ := sessionlog.NewID(); return id }}
 	svc, err := conversation.Serve(ctx, conversation.Deps{
 		Store: s, Provider: provider, ChatProvider: chatProvider, Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: address, ProjectRoot: p.Share, RunRoot: p.Goals, SocketPath: p.ChatSocket,
-		Refresher:         refresher,
-		CandidateCheckers: []candidate.Checker{candidate.KicadERCChecker{Sandbox: sandbox.LinuxManager{}, RunRoot: p.Goals}},
+		Refresher:           refresher,
+		CandidateCheckers:   []candidate.Checker{candidate.KicadERCChecker{Sandbox: sandbox.LinuxManager{}, RunRoot: p.Goals}},
+		ContextWindowTokens: c.Model.ContextWindowTokens,
+		Snapshots:           snapshotStore,
 	})
 	if err != nil {
 		return err

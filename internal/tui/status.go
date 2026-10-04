@@ -29,7 +29,7 @@ func renderStatus(s StatusState, session string, mode ViewMode, width int) strin
 	} else if mode == GoalPickerView {
 		view = "目标"
 	}
-	hints := "PgUp/PgDn 滚动  Enter 发送  Ctrl+J 换行  Tab 补全  Ctrl+S 会话  Ctrl+G 目标  Ctrl+C 退出"
+	hints := "PgUp/PgDn 滚动  Enter 发送  Ctrl+J 换行  Ctrl+P/N 历史  Tab 补全  Ctrl+S 会话  Ctrl+G 目标  Ctrl+C 退出"
 	if mode != ChatView {
 		hints = "↑/↓ 选择  Enter 确认  Esc 返回  Ctrl+C 退出"
 	}

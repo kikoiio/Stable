@@ -128,11 +128,30 @@ func sessionConversationMessages(root, sessionID string) []llm.Message {
 	if err != nil {
 		return nil
 	}
+	covered, boundarySeq := sessionlog.CoveredSeqs(transcript.Events)
 	var messages []llm.Message
 	runAssistant := map[string]int{}
 	pendingToolCalls := map[string]bool{}
 	for _, event := range transcript.Events {
+		if covered[event.Seq] {
+			continue
+		}
 		switch event.Type {
+		case sessionlog.EventBoundary:
+			// The latest effective boundary replaces its covered range with
+			// the summary; older boundaries are superseded. Post-compaction
+			// deltas of the same run start a fresh assistant message.
+			if event.Seq != boundarySeq {
+				continue
+			}
+			var b sessionlog.Boundary
+			if decodeSessionData(event.Data, &b) != nil {
+				continue
+			}
+			messages = append(messages, llm.Message{Role: "assistant", Content: "Earlier conversation summary: " + b.Summary})
+			if b.EffectiveScope() == sessionlog.BoundaryScopeRun {
+				delete(runAssistant, b.RunID)
+			}
 		case sessionlog.EventMessage:
 			var msg sessionlog.Message
 			if decodeSessionData(event.Data, &msg) == nil && (msg.Role == "user" || msg.Role == "assistant") && msg.Text != "" {
@@ -199,6 +218,38 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 		}
 		s.eventMu.Lock()
 		stored, err := sessionlog.Append(s.deps.ProjectRoot, request.Work.SessionID, sessionlog.EventRunEvent, persisted)
+		if err == nil && event.Kind == agent.EventCompactionBoundary {
+			// The conversation service is the only session log writer: the
+			// runner-issued boundary becomes a run-scope compaction boundary
+			// in stream order, right after its run event.
+			var boundary agent.ContextBoundary
+			if json.Unmarshal(event.Payload, &boundary) != nil {
+				err = errors.New("compaction boundary has invalid payload")
+			} else {
+				_, err = sessionlog.Append(s.deps.ProjectRoot, request.Work.SessionID, sessionlog.EventBoundary, sessionlog.Boundary{
+					FromSeq: boundary.FromSeq, ToSeq: boundary.ToSeq, Summary: boundary.Summary,
+					Scope: sessionlog.BoundaryScopeRun, RunID: boundary.RunID,
+				})
+			}
+		}
+		if err == nil && event.Kind == agent.EventToolExecResult {
+			// Snapshots created at tool write boundaries ride the tool result
+			// payload; each becomes a session snapshot event, bound to its
+			// run and candidate, in stream order.
+			var outcome agent.ToolOutcome
+			if json.Unmarshal(event.Payload, &outcome) != nil {
+				err = errors.New("tool result has invalid payload")
+			} else {
+				for _, snap := range outcome.Snapshots {
+					if _, err = sessionlog.Append(s.deps.ProjectRoot, request.Work.SessionID, sessionlog.EventSnapshot, sessionlog.SnapshotRef{
+						SnapshotID: snap.SnapshotID, SessionID: request.Work.SessionID, CandidateID: snap.CandidateID,
+						RunID: snap.RunID, Label: snap.Label, Digest: snap.Digest, CreatedAt: snap.CreatedAt,
+					}); err != nil {
+						break
+					}
+				}
+			}
+		}
 		s.eventMu.Unlock()
 		if err != nil {
 			_ = s.deps.Runner.Cancel(request.RunID)
@@ -256,6 +307,12 @@ func (s *Service) finalizeRunCandidate(ctx context.Context, request agent.Execut
 			return errors.New("candidate ownership does not match run")
 		}
 		formalRoot = record.Candidate.FormalRoot
+	}
+	if record != nil && record.Candidate.Status == "blocked" {
+		// A failed snapshot checkpoint blocked this candidate during the
+		// run. Keep it blocked: it must not be frozen ready, accepted, or
+		// silently cleaned up.
+		return nil
 	}
 	_, candidateDigest, err := candidate.BuildManifest(candidateRoot)
 	if err != nil {

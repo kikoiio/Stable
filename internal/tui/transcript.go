@@ -22,12 +22,30 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 	}
 	var blocks []*block
 	runs := map[string]*block{}
+	// First pass: pair tool calls with their results and questions with
+	// their replies, so recovery display can flag interrupted calls and
+	// already-answered questions instead of leaving both ambiguous.
+	answered := map[string]bool{}
+	toolResults := map[string]sessionlog.ToolResult{}
+	for _, e := range events {
+		switch e.Type {
+		case sessionlog.EventToolResult:
+			var result sessionlog.ToolResult
+			if decodeEventData(e.Data, &result) == nil && result.CallID != "" {
+				toolResults[result.CallID] = result
+			}
+		case sessionlog.EventReply:
+			var reply sessionlog.QuestionReply
+			if decodeEventData(e.Data, &reply) == nil {
+				answered[reply.QuestionID] = true
+			}
+		}
+	}
 	for _, e := range events {
 		switch e.Type {
 		case sessionlog.EventMessage:
-			b, _ := json.Marshal(e.Data)
 			var msg sessionlog.Message
-			if json.Unmarshal(b, &msg) != nil || strings.TrimSpace(msg.Text) == "" {
+			if decodeEventData(e.Data, &msg) != nil || strings.TrimSpace(msg.Text) == "" {
 				continue
 			}
 			role := msg.Role
@@ -36,10 +54,105 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 			}
 			blocks = append(blocks, &block{role: role})
 			blocks[len(blocks)-1].text.WriteString(msg.Text)
+		case sessionlog.EventToolCall:
+			var call sessionlog.ToolCall
+			if decodeEventData(e.Data, &call) != nil {
+				continue
+			}
+			role := "工具调用"
+			if _, ok := toolResults[call.CallID]; !ok {
+				role = "工具调用（未配对，可能已中断）"
+			}
+			part := &block{role: role}
+			part.text.WriteString(call.Name)
+			if call.Input != nil {
+				raw, _ := json.Marshal(call.Input)
+				part.text.WriteString(" " + truncate(string(raw), 400))
+			}
+			blocks = append(blocks, part)
+		case sessionlog.EventToolResult:
+			var result sessionlog.ToolResult
+			if decodeEventData(e.Data, &result) != nil {
+				continue
+			}
+			part := &block{role: "工具结果"}
+			if result.Error != "" {
+				part.text.WriteString("失败：" + truncate(result.Error, 400))
+			} else {
+				raw, _ := json.Marshal(result.Result)
+				part.text.WriteString(truncate(string(raw), 400))
+			}
+			blocks = append(blocks, part)
+		case sessionlog.EventBoundary:
+			var boundary sessionlog.Boundary
+			if decodeEventData(e.Data, &boundary) != nil {
+				continue
+			}
+			part := &block{role: "上下文压缩"}
+			scope := boundary.EffectiveScope()
+			fmt.Fprintf(&part.text, "摘要：%s\n（覆盖 %s 序号 %d–%d", truncate(boundary.Summary, 600), scope, boundary.FromSeq, boundary.ToSeq)
+			if boundary.RunID != "" {
+				fmt.Fprintf(&part.text, "，运行 %s", boundary.RunID)
+			}
+			part.text.WriteString("）")
+			blocks = append(blocks, part)
+		case sessionlog.EventSnapshot:
+			var snap sessionlog.SnapshotRef
+			if decodeEventData(e.Data, &snap) != nil {
+				continue
+			}
+			part := &block{role: "快照"}
+			label := snap.Label
+			if label == "" {
+				label = "checkpoint"
+			}
+			fmt.Fprintf(&part.text, "%s · 候选 %s · digest %s", label, snap.CandidateID, shortDigest(snap.Digest))
+			if snap.RunID != "" {
+				fmt.Fprintf(&part.text, " · 运行 %s", snap.RunID)
+			}
+			blocks = append(blocks, part)
+		case sessionlog.EventRewind:
+			var rewind sessionlog.RewindRecord
+			if decodeEventData(e.Data, &rewind) != nil {
+				continue
+			}
+			part := &block{role: "回滚"}
+			switch rewind.Status {
+			case sessionlog.RewindCompleted:
+				fmt.Fprintf(&part.text, "成功：候选 %s 已回滚到快照 %s", rewind.CandidateID, rewind.SnapshotID)
+			case sessionlog.RewindFailed:
+				fmt.Fprintf(&part.text, "失败：候选 %s 回滚到快照 %s 未完成", rewind.CandidateID, rewind.SnapshotID)
+				if rewind.Error != "" {
+					fmt.Fprintf(&part.text, "：%s", truncate(rewind.Error, 300))
+				}
+			default:
+				fmt.Fprintf(&part.text, "待处理：候选 %s 回滚到快照 %s", rewind.CandidateID, rewind.SnapshotID)
+			}
+			blocks = append(blocks, part)
+		case sessionlog.EventQuestion:
+			var question sessionlog.PendingQuestion
+			if decodeEventData(e.Data, &question) != nil {
+				continue
+			}
+			part := &block{role: "待答问题"}
+			part.text.WriteString(truncate(question.Prompt, 600))
+			if answered[question.QuestionID] {
+				part.text.WriteString("\n（已回答）")
+			} else {
+				part.text.WriteString("\n（待回答 · /reply 答复）")
+			}
+			blocks = append(blocks, part)
+		case sessionlog.EventReply:
+			var reply sessionlog.QuestionReply
+			if decodeEventData(e.Data, &reply) != nil {
+				continue
+			}
+			part := &block{role: "问题回复"}
+			part.text.WriteString(truncate(reply.ReplyText, 600))
+			blocks = append(blocks, part)
 		case sessionlog.EventRunEvent:
-			b, _ := json.Marshal(e.Data)
 			var run sessionlog.RunEvent
-			if json.Unmarshal(b, &run) != nil {
+			if decodeEventData(e.Data, &run) != nil {
 				continue
 			}
 			if run.Kind == "text_delta" || run.Kind == "thinking_delta" {
@@ -88,7 +201,7 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 		if text == "" {
 			continue
 		}
-		if part.role == "思考（仅供查看）" || strings.HasPrefix(part.role, "工具") || part.role == "等待授权" || part.role == "预算耗尽" || part.role == "用量" || part.role == "重试" || part.role == "模型错误" || part.role == "运行状态" {
+		if part.role == "思考（仅供查看）" || strings.HasPrefix(part.role, "工具") || part.role == "等待授权" || part.role == "预算耗尽" || part.role == "用量" || part.role == "重试" || part.role == "模型错误" || part.role == "运行状态" || part.role == "上下文压缩" || part.role == "快照" || part.role == "回滚" || part.role == "待答问题" || part.role == "问题回复" {
 			out = append(out, part.role+"\n"+text)
 		} else {
 			out = append(out, part.role+"\n"+renderMarkdown(text, max(1, width-10), color))
@@ -98,6 +211,23 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 		return "空会话。输入消息后回车开始聊天。"
 	}
 	return strings.Join(out, "\n\n")
+}
+
+// decodeEventData re-decodes a sessionlog event payload, which arrives as a
+// generic map after JSON round-trips.
+func decodeEventData(data any, out any) error {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+func shortDigest(digest string) string {
+	if len(digest) > 12 {
+		return digest[:12]
+	}
+	return digest
 }
 
 func formatUsage(payload []byte) string {

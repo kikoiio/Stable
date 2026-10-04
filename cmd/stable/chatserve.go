@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/sandbox"
+	"stable/internal/sessioncontext"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
 	"stable/internal/tools"
@@ -76,7 +78,16 @@ func chatserve(args []string) error {
 	var executorFactory agent.ExecutorFactory
 	var toolSchemas []llm.ToolSchema
 	var runnerError string
+	var snapshotStore *candidate.SnapshotStore
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
+		var credentials []string
+		if c.Model.APIKey != "" {
+			credentials = []string{c.Model.APIKey}
+		}
+		snapshotStore, err = candidate.NewSnapshotStore(*projectRoot, c.Snapshots.ProjectBytes(), c.Snapshots.ManifestsPerCandidate(), credentials)
+		if err != nil {
+			return fmt.Errorf("candidate snapshot store: %w", err)
+		}
 		executorFactory = execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
 			Sandbox:            sandbox.LinuxManager{},
 			Gate:               execution.StorePermissionGate{Store: s},
@@ -85,17 +96,24 @@ func chatserve(args []string) error {
 			HelperPath:         helperPath,
 			SessionRoot:        *projectRoot,
 			ProviderCredential: c.Model.APIKey,
+			Snapshots:          snapshotStore,
 		})
 		toolSchemas = chatserveToolSchemas()
-		runner = agent.NewRunner(streamingProvider, agent.RunnerOptions{ExecutorFactory: executorFactory, ToolSchemas: toolSchemas})
+		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, model.(decision.ChatProvider))
+		if fellBack {
+			log.Printf("invalid context_window_tokens %d; using default %d", c.Model.ContextWindowTokens, sessioncontext.DefaultWindowTokens)
+		}
+		runner = agent.NewRunner(streamingProvider, agent.RunnerOptions{ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, ContextManager: contextManager})
 	} else {
 		runnerError = streamErr.Error()
 	}
 	permissionService := &permission.PermissionService{Repository: s, NewID: func() string { id, _ := sessionlog.NewID(); return id }}
 	svc, err := conversation.Serve(ctx, conversation.Deps{
 		Store: s, Provider: provider, ChatProvider: model.(decision.ChatProvider), Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket,
-		Refresher:         refresher,
-		CandidateCheckers: chatCandidateCheckers(*runRoot),
+		Refresher:           refresher,
+		CandidateCheckers:   chatCandidateCheckers(*runRoot),
+		ContextWindowTokens: c.Model.ContextWindowTokens,
+		Snapshots:           snapshotStore,
 	})
 	if err != nil {
 		return err
