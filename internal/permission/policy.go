@@ -217,6 +217,12 @@ func contained(root, target string) (bool, error) {
 	}
 	r, err = filepath.EvalSymlinks(r)
 	if err != nil {
+		// A root that does not exist yet (e.g. the lazily created candidate
+		// directory during a read-only investigation) contains nothing; that
+		// is a negative answer, not a resolution failure.
+		if os.IsNotExist(err) {
+			return false, nil
+		}
 		return false, err
 	}
 	parent := filepath.Dir(t)

@@ -68,6 +68,13 @@ func BuildManifest(root string) ([]ManifestEntry, string, error) {
 		if err != nil {
 			return err
 		}
+		// The service keeps session logs under <root>/.stable. That subtree is
+		// runtime state, not project content: it grows while a run is in
+		// flight, so counting it would make every session-scoped candidate look
+		// stale at review time, and exchanging it would revert the transcript.
+		if rel == ".stable" && d.IsDir() {
+			return filepath.SkipDir
+		}
 		rel, err = CleanRelative(rel)
 		if err != nil {
 			return err

@@ -15,7 +15,7 @@ import socket
 import sys
 
 
-def exchange(sock_path: str, message: dict, timeout: float = 120.0) -> list[dict]:
+def exchange(sock_path: str, message: dict, timeout: float = 120.0, stop_types: tuple = ('done',)) -> list[dict]:
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     conn.settimeout(timeout)
     conn.connect(sock_path)
@@ -34,8 +34,10 @@ def exchange(sock_path: str, message: dict, timeout: float = 120.0) -> list[dict
                     continue
                 msg = json.loads(line)
                 out.append(msg)
-                print(json.dumps(msg, ensure_ascii=False))
-                if msg.get('type') == 'done':
+                # Flush per line: e2e polls these streamed files while the
+                # run is still open, and block buffering would hide events.
+                print(json.dumps(msg, ensure_ascii=False), flush=True)
+                if msg.get('type') in stop_types:
                     return out
     finally:
         conn.close()
@@ -93,8 +95,39 @@ def main() -> int:
     resolve.add_argument('--approval', required=True)
     resolve.add_argument('--choice', required=True, choices=['allow_once', 'save_rule', 'deny'])
 
+    run = sub.add_parser('run_start')
+    run.add_argument('--session', required=True)
+    run.add_argument('--text', required=True)
+    run.add_argument('--intent', default='')
+
+    cancel = sub.add_parser('run_cancel')
+    cancel.add_argument('--session', required=True)
+    cancel.add_argument('--run', required=True)
+
     args = parser.parse_args()
     msg: dict = {'op': args.op}
+    if args.op == 'run_start':
+        intent = args.intent or args.text
+        msg.update(session_id=args.session, run=dict(
+            work=dict(kind='session', session_id=args.session),
+            intent=intent,
+            messages=[dict(role='user', content=args.text)],
+        ))
+        # run_start streams events and ends with run_outcome; no done follows.
+        messages = exchange(args.socket, msg, timeout=600.0, stop_types=('run_outcome', 'error'))
+        for m in messages:
+            if m.get('type') == 'error':
+                print(f"error: {m.get('error', '')}", file=sys.stderr)
+                return 1
+        return 0
+    if args.op == 'run_cancel':
+        msg.update(session_id=args.session, run_id=args.run)
+        messages = exchange(args.socket, msg)
+        for m in messages:
+            if m.get('type') == 'error':
+                print(f"error: {m.get('error', '')}", file=sys.stderr)
+                return 1
+        return 0
     if args.op == 'session_create':
         msg['project_root'] = args.root
     elif args.op == 'session_load':

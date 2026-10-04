@@ -5,6 +5,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TRANSLATE_MARKER = "Translate the user's acceptance requirements"
 ASK_MARKER = "请停下来问我"
+# When the user text carries this marker, the fixture inserts one controlled
+# command round between the read and the edit so e2e can observe command
+# output flowing back into the conversation.
+COMMAND_MARKER = "运行命令验证"
+COMMAND_PROBE = "printf 'm04-probe-'; grep -c '(wire' /workspace/project/sensor.kicad_sch"
 MISSING_WIRE = '(wire (pts (xy 114.3 102.87) (xy 121.92 102.87))\n        (stroke (width 0) (type solid)) (uuid "81110618-6579-58c6-8f1f-78d9234e76d6"))'
 
 
@@ -15,9 +20,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_request_failure(self, error):
         # Keep E2E diagnostics out of the response body while retaining the
         # request-level failure in the run root for bounded local debugging.
+        self.log_line(repr(error))
+
+    def log_line(self, text):
         try:
             with open(self.server.log_path, 'a', encoding='utf-8') as output:
-                output.write(repr(error) + '\\n')
+                output.write(text + '\n')
         except OSError:
             pass
 
@@ -32,6 +40,11 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as error:
             self.log_request_failure(error)
             raise
+        for message in request.get('messages') or []:
+            if message.get('role') == 'tool':
+                # Record tool results reaching the next model turn so e2e can
+                # prove tool output (e.g. command stdout) flowed back.
+                self.log_line('TOOL_RESULT ' + str(message.get('content'))[:500])
         tool_call = self.goal_tool_call(request)
         if prompt.startswith(TRANSLATE_MARKER):
             content = self.transpile(prompt)
@@ -59,14 +72,33 @@ class Handler(BaseHTTPRequestHandler):
         messages = request.get('messages') or []
         if not messages:
             return None
+        edit_call = dict(id='mock-edit-1', name='edit_file', arguments=json.dumps({
+            'file_path': 'sensor.kicad_sch',
+            'old_string': '\\t(wire (pts (xy 114.3 105.41) (xy 114.3 102.87))\\n        (stroke (width 0) (type solid)) (uuid "ddd57af5-2125-566a-bcf5-c11ca6ff8a52"))',
+            'new_string': '\\t(wire (pts (xy 114.3 105.41) (xy 114.3 102.87))\\n        (stroke (width 0) (type solid)) (uuid "ddd57af5-2125-566a-bcf5-c11ca6ff8a52"))\\n\\t' + MISSING_WIRE,
+        }))
+        # The marker path edits the real file bytes (tab-indented segment).
+        wire_segment = '\t(wire (pts (xy 114.3 105.41) (xy 114.3 102.87))\n        (stroke (width 0) (type solid)) (uuid "ddd57af5-2125-566a-bcf5-c11ca6ff8a52"))'
+        edit_call_real = dict(id='mock-edit-1', name='edit_file', arguments=json.dumps({
+            'file_path': 'sensor.kicad_sch',
+            'old_string': wire_segment,
+            'new_string': wire_segment + '\n\t' + MISSING_WIRE,
+        }))
+        wants_command = any(
+            COMMAND_MARKER in (m.get('content') or '')
+            for m in messages
+            if isinstance(m.get('content'), str)
+        )
         if messages[-1].get('role') == 'tool':
             tool_results = [m for m in messages if m.get('role') == 'tool']
+            if wants_command:
+                if len(tool_results) == 1:
+                    return dict(id='mock-command-1', name='command', arguments=json.dumps({'command': COMMAND_PROBE}))
+                if len(tool_results) == 2:
+                    return edit_call_real
+                return None
             if len(tool_results) == 1:
-                return dict(id='mock-edit-1', name='edit_file', arguments=json.dumps({
-                    'file_path': 'sensor.kicad_sch',
-                    'old_string': '\\t(wire (pts (xy 114.3 105.41) (xy 114.3 102.87))\\n        (stroke (width 0) (type solid)) (uuid "ddd57af5-2125-566a-bcf5-c11ca6ff8a52"))',
-                    'new_string': '\\t(wire (pts (xy 114.3 105.41) (xy 114.3 102.87))\\n        (stroke (width 0) (type solid)) (uuid "ddd57af5-2125-566a-bcf5-c11ca6ff8a52"))\\n\\t' + MISSING_WIRE,
-                }))
+                return edit_call
             return None
         return dict(id='mock-read-1', name='read_file', arguments=json.dumps({'file_path': 'sensor.kicad_sch', 'limit': 2000}))
 

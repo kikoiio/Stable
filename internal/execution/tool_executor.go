@@ -171,6 +171,16 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		outcome.IsError = true
 		return e.finish(outcome, started), nil
 	}
+	// The permission gate resolves write targets against the candidate root,
+	// so the workspace must exist before evaluation, not only after approval.
+	// An unchanged candidate is cleaned up when the run finalizes, so a denied
+	// or cancelled call still leaves no trace behind.
+	if kind == permission.OpWrite || kind == permission.OpCommand {
+		if err = e.ensureCandidate(ctx); err != nil {
+			outcome.Status, outcome.Content = agent.ToolDenied, "Error: candidate unavailable"
+			return e.finish(outcome, started), nil
+		}
+	}
 	decision, authErr := e.deps.Gate.Authorize(ctx, e.authority, operation)
 	if authErr != nil {
 		outcome.Status, outcome.Content = agent.ToolDenied, "Error: permission authorization failed"
@@ -183,6 +193,7 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		decision, authErr = e.waitForApproval(ctx, operation)
 		if authErr != nil {
 			if errors.Is(authErr, context.Canceled) || errors.Is(authErr, context.DeadlineExceeded) {
+				e.abortLoggedCall(call.ID, "Error: run cancelled while awaiting approval")
 				return outcome, authErr
 			}
 			outcome.Status, outcome.Content = agent.ToolDenied, "Error: approval unavailable"
@@ -197,12 +208,6 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 	if e.deps.Sandbox == nil {
 		outcome.Status, outcome.Content = agent.ToolDenied, "Error: isolation unavailable"
 		return e.finish(outcome, started), nil
-	}
-	if kind == permission.OpWrite || kind == permission.OpCommand {
-		if err = e.ensureCandidate(ctx); err != nil {
-			outcome.Status, outcome.Content = agent.ToolDenied, "Error: candidate unavailable"
-			return e.finish(outcome, started), nil
-		}
 	}
 	if kind == permission.OpWrite {
 		if err = e.checkMappedPath(kind, rel); err != nil {
@@ -232,6 +237,7 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		} else if errors.Is(err, context.DeadlineExceeded) {
 			outcome.Status, outcome.Content = agent.ToolTimeout, "Error: tool timed out"
 		} else if errors.Is(err, context.Canceled) {
+			e.abortLoggedCall(call.ID, "Error: run cancelled during execution")
 			return outcome, err
 		} else {
 			outcome.Status, outcome.Content = agent.ToolFailed, "Error: isolated tool execution failed"
@@ -455,6 +461,18 @@ func commandTimeoutFor(args map[string]any) time.Duration {
 		seconds = 120
 	}
 	return min(time.Duration(seconds)*time.Second, commandTimeout)
+}
+
+// abortLoggedCall closes the sessionlog pairing for a call whose tool_call
+// event was already recorded but which will never produce a real result
+// because the run was cancelled. Without this the call id stays "pending"
+// forever and sessionlog rejects any later reuse of the id ("duplicate
+// pending tool call id"), poisoning the session for all future runs.
+func (e *toolRunExecutor) abortLoggedCall(callID, reason string) {
+	if e.deps.SessionRoot == "" || callID == "" {
+		return
+	}
+	_, _ = sessionlog.Append(e.deps.SessionRoot, e.request.Work.SessionID, sessionlog.EventToolResult, sessionlog.ToolResult{CallID: callID, Result: e.redact(reason), Error: e.redact(reason)})
 }
 
 func (e *toolRunExecutor) waitForApproval(ctx context.Context, operation permission.Operation) (permission.PermissionDecision, error) {

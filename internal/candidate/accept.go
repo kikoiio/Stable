@@ -90,6 +90,17 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 		_ = store.SetAcceptancePhase(ctx, decision.ID, "prepared", "blocked", err.Error())
 		return Receipt{}, err
 	}
+	// Candidates never carry the .stable service subtree (see BuildManifest),
+	// so the exchange moved the live session logs into the spent candidate
+	// directory. Move them back before anyone appends to the transcript. A
+	// crash before this move leaves the logs under the candidate root, where
+	// acceptance recovery can still find them.
+	if st, statErr := os.Lstat(filepath.Join(c.CandidateRoot, ".stable")); statErr == nil && st.IsDir() {
+		if moveErr := os.Rename(filepath.Join(c.CandidateRoot, ".stable"), filepath.Join(c.FormalRoot, ".stable")); moveErr != nil {
+			_ = store.SetAcceptancePhase(ctx, decision.ID, "swapped", "blocked", moveErr.Error())
+			return Receipt{}, fmt.Errorf("project exchanged; session state restore required: %w", moveErr)
+		}
+	}
 	_, acceptedDigest, err := BuildManifest(c.FormalRoot)
 	if err != nil {
 		return Receipt{}, err

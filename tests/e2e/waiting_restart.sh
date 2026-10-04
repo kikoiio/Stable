@@ -59,6 +59,9 @@ PY
 )
 e2e_chat confirm --session "$session_id" --goal "$goal_id" --proposal "$proposal_id" >/dev/null
 for _ in $(seq 1 360); do
+  # M04: goal evaluations run the shared tool loop; resolve pending approvals
+  # so the first evaluation is not stuck behind an unanswered ask.
+  e2e_allow_pending_approvals "$session_id" || true
   "$run_root/bin/agentctl" status --run-root "$run_root/goals" --db "$run_root/state.db" --goal "$goal_id" >"$status_file"
   if python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); s=x["snapshot"]; sys.exit(0 if s["goal"]["status"]=="waiting" and s["session"]["generation"]>=1 else 1)' "$status_file"; then break; fi
   sleep 0.5

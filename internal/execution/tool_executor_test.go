@@ -15,6 +15,7 @@ import (
 	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/sandbox"
+	"stable/internal/sessionlog"
 )
 
 type executorTestGate struct {
@@ -192,5 +193,154 @@ func TestToolExecutorEnforcesReadBeforeWrite(t *testing.T) {
 	fresh, err := runner.Execute(context.Background(), llm.ToolUse{ID: "w3", Name: "write_file", Arguments: json.RawMessage(`{"file_path":"new.txt","content":"x\n"}`)})
 	if err != nil || fresh.IsError {
 		t.Fatalf("fresh write = %#v, err=%v", fresh, err)
+	}
+}
+
+type pendingApprovals struct{}
+
+func (pendingApprovals) CreateApproval(context.Context, permission.ApprovalRequest) error { return nil }
+func (pendingApprovals) GetApproval(context.Context, string) (permission.ApprovalRequest, error) {
+	return permission.ApprovalRequest{}, errors.New("unused")
+}
+func (pendingApprovals) GetApprovalForOperation(context.Context, string, string, string) (permission.ApprovalRequest, bool, error) {
+	return permission.ApprovalRequest{Status: permission.ApprovalPending}, true, nil
+}
+func (pendingApprovals) ResolveApproval(context.Context, string, permission.ApprovalStatus, string, string, *permission.ExactRule) error {
+	return errors.New("unused")
+}
+func (pendingApprovals) CancelApproval(context.Context, string, string) error { return errors.New("unused") }
+func (pendingApprovals) ConsumeApproval(context.Context, string, string, string) error {
+	return errors.New("unused")
+}
+func (pendingApprovals) RecordPermissionDecision(context.Context, permission.PermissionDecision, permission.Authority, permission.Operation) error {
+	return nil
+}
+
+type sequenceGate struct {
+	decisions []permission.PermissionDecision
+	calls     int
+	seen      permission.Operation
+}
+
+func (g *sequenceGate) Authorize(_ context.Context, _ permission.Authority, op permission.Operation) (permission.PermissionDecision, error) {
+	g.seen = op
+	i := g.calls
+	if i >= len(g.decisions) {
+		i = len(g.decisions) - 1
+	}
+	g.calls++
+	return g.decisions[i], nil
+}
+
+func TestToolExecutorCancelDuringApprovalClosesSessionlogPair(t *testing.T) {
+	formal := t.TempDir()
+	candidateRoot := filepath.Join(t.TempDir(), "cand")
+	sessionRoot := t.TempDir()
+	info, err := sessionlog.Create(sessionRoot, "cancel-pairing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := &sequenceGate{decisions: []permission.PermissionDecision{
+		{Kind: permission.DecisionAsk},
+		{Kind: permission.DecisionAllow},
+	}}
+	sandboxFake := &executorTestSandbox{result: sandbox.SandboxResult{Stdout: []byte(`{"output":"done"}`), ExitCode: 0}}
+	factory := NewToolExecutorFactory(ToolExecutorDeps{Gate: gate, Sandbox: sandboxFake, Approvals: pendingApprovals{}, HelperPath: "helper", SessionRoot: sessionRoot, Now: time.Now, PollEvery: time.Millisecond})
+	request := executorRequest(t, formal, candidateRoot)
+	authority := permission.Authority{RunID: "run-1", SessionID: info.ID, AllowedRoot: formal, FormalRoot: formal, CandidateRoot: candidateRoot, Mode: permission.ModeBypass}
+	raw, err := json.Marshal(authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Work.SessionID = info.ID
+	request.PermissionBounds = raw
+	runner, err := factory.ForRun(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	call := llm.ToolUse{ID: "call-cancel", Name: "write_file", Arguments: json.RawMessage(`{"file_path":"a.txt","content":"x\n"}`)}
+	if _, err = runner.Execute(ctx, call); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled write err = %v", err)
+	}
+	// The aborted call must be paired in the session log: a later run reusing
+	// the same call id must not fail with "duplicate pending tool call id".
+	// Real runs get a fresh candidate root per run, so mirror that here.
+	request.RunID = "run-2"
+	authority.RunID = "run-2"
+	authority.CandidateRoot = filepath.Join(t.TempDir(), "cand2")
+	raw, err = json.Marshal(authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.PermissionBounds = raw
+	runner2, err := factory.ForRun(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := runner2.Execute(context.Background(), call)
+	if err != nil {
+		t.Fatalf("reused call id after cancellation: %v", err)
+	}
+	if outcome.IsError {
+		t.Fatalf("reused call id outcome = %#v", outcome)
+	}
+	replay, err := sessionlog.Replay(sessionRoot, info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls, results := 0, 0
+	for _, event := range replay.Events {
+		raw, _ := json.Marshal(event.Data)
+		switch event.Type {
+		case sessionlog.EventToolCall:
+			var c sessionlog.ToolCall
+			if json.Unmarshal(raw, &c) == nil && c.CallID == "call-cancel" {
+				calls++
+			}
+		case sessionlog.EventToolResult:
+			var r sessionlog.ToolResult
+			if json.Unmarshal(raw, &r) == nil && r.CallID == "call-cancel" {
+				results++
+			}
+		}
+	}
+	if calls != 2 || results != 2 {
+		t.Fatalf("sessionlog pairing: calls=%d results=%d, want 2/2", calls, results)
+	}
+}
+
+func TestToolExecutorCreatesCandidateBeforePermissionCheck(t *testing.T) {
+	formal := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formal, "a.txt"), []byte("old\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	candidateRoot := filepath.Join(t.TempDir(), "cand")
+	gate := &executorTestGate{decision: permission.PermissionDecision{Kind: permission.DecisionDeny, Reason: "denied by test"}}
+	sandboxFake := &executorTestSandbox{}
+	factory := NewToolExecutorFactory(ToolExecutorDeps{Gate: gate, Sandbox: sandboxFake, HelperPath: "helper", Now: time.Now})
+	runner, err := factory.ForRun(executorRequest(t, formal, candidateRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := runner.Execute(context.Background(), llm.ToolUse{ID: "w1", Name: "write_file", Arguments: json.RawMessage(`{"file_path":"a.txt","content":"new\n"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Status != agent.ToolDenied || !outcome.IsError {
+		t.Fatalf("denied write outcome = %#v", outcome)
+	}
+	// The gate resolves write targets against the candidate root, so the
+	// workspace must already exist when Authorize runs — otherwise the policy
+	// denies with "target path cannot be safely resolved" before any ask.
+	if _, statErr := os.Stat(candidateRoot); statErr != nil {
+		t.Fatalf("candidate root missing when the gate evaluated the write: %v", statErr)
+	}
+	if want := filepath.Join(candidateRoot, "a.txt"); gate.seen.Target != want {
+		t.Fatalf("gate target = %q, want %q", gate.seen.Target, want)
+	}
+	if sandboxFake.argv != nil {
+		t.Fatalf("denied write reached the sandbox: %v", sandboxFake.argv)
 	}
 }
