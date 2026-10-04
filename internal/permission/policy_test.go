@@ -133,3 +133,22 @@ func TestExactRules(t *testing.T) {
 		t.Fatalf("corrupt rule did not fail closed: %+v", d)
 	}
 }
+
+// A read-only operation must not be denied just because the lazily created
+// candidate root does not exist yet (read-first normal task flows).
+func TestReadAllowedBeforeCandidateExists(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	if err := os.MkdirAll(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(project, "a.txt")
+	if err := os.WriteFile(target, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a := Authority{RunID: "r", SessionID: "s", AllowedRoot: project, CandidateRoot: filepath.Join(root, "not-created-yet"), FormalRoot: project, Mode: ModeDefault}
+	d := (Policy{}).Decide(a, Operation{ID: "1", Kind: OpRead, Name: "ReadFile", Target: target})
+	if d.Kind != DecisionAllow {
+		t.Fatalf("read before candidate creation should be allowed: %+v", d)
+	}
+}

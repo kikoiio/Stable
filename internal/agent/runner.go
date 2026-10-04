@@ -294,7 +294,7 @@ func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest,
 				if ctx.Err() != nil {
 					return r.terminal(request, output, &seq, RunCancelled, nil)
 				}
-				providerErr := &llm.ProviderError{Class: llm.ErrorProvider, Message: "tool executor failed"}
+				providerErr := &llm.ProviderError{Class: llm.ErrorProvider, Message: "tool executor failed: " + err.Error()}
 				payload, _ := json.Marshal(providerErr)
 				_ = r.publish(request, output, &seq, ExecutionEvent{Kind: EventError, Payload: payload})
 				return r.terminal(request, output, &seq, RunFailed, providerErr)

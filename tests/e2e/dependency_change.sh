@@ -248,6 +248,21 @@ PY
 "$dev_root/bin/stable" down >/dev/null 2>&1 || true
 start_runner
 wait_verified
+# The 30s re-evaluation loop can momentarily flap verified while it reruns
+# (M04 tool-loop evaluations lengthen the window); require a stable verified
+# snapshot before asserting evidence identity, as the tail phases already do.
+stable_hits=0
+for _ in $(seq 1 120); do
+  e2e_allow_pending_approvals "$accept_session" || true
+  if read_status && python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["verified"] else 1)' "$status_file"; then
+    stable_hits=$((stable_hits+1))
+    [[ $stable_hits -ge 3 ]] && break
+    sleep 2
+  else
+    stable_hits=0
+    sleep 0.5
+  fi
+done
 read_status
 python3 - "$status_file" "$baseline_connection_id" "$erc_id_before" <<'PY'
 import json,sys
@@ -296,6 +311,8 @@ converged() {
 }
 stable_hits=0
 for _ in $(seq 1 900); do
+  # M04: re-verification runs the shared tool loop; keep resolving approvals.
+  e2e_allow_pending_approvals "$accept_session" || true
   if converged; then
     stable_hits=$((stable_hits+1))
     [[ $stable_hits -ge 3 ]] && break
@@ -347,6 +364,8 @@ PY
 start_runner
 stable_hits=0
 for _ in $(seq 1 900); do
+  # M04: re-verification runs the shared tool loop; keep resolving approvals.
+  e2e_allow_pending_approvals "$accept_session" || true
   if converged; then
     stable_hits=$((stable_hits+1))
     [[ $stable_hits -ge 3 ]] && break
