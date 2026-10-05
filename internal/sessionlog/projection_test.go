@@ -267,3 +267,55 @@ func TestProjectionPlanAndTodoItems(t *testing.T) {
 		t.Fatalf("todo item = %+v", p.Items[3])
 	}
 }
+
+func TestProjectionSkillItems(t *testing.T) {
+	root := t.TempDir()
+	s, err := Create(root, "skill-projection")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventSkillInventory, SkillInventory{Skills: []SkillInfo{
+		{Name: "code-review", Description: "Review the diff", WhenToUse: "before commits", Source: "user"},
+		{Name: "triage", Description: "Triage bugs", WhenToUse: "new issue", Source: "project"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventSkillDelta, SkillDelta{Added: []SkillInfo{{Name: "fresh-skill", Description: "New", WhenToUse: "always", Source: "project"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventSkillInvoked, SkillInvoked{Name: "code-review", Source: "user", Entry: SkillEntrySlash, Args: "focus"}); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := Replay(root, s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := Project(replay)
+	got := kinds(p)
+	want := []ItemKind{ItemSkillInventory, ItemSkillDelta, ItemSkillInvoked}
+	if len(got) != len(want) {
+		t.Fatalf("kinds = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("kinds = %v, want %v", got, want)
+		}
+	}
+	if p.Items[0].SkillInventory == nil || len(p.Items[0].SkillInventory.Skills) != 2 ||
+		p.Items[0].SkillInventory.Skills[0].Name != "code-review" ||
+		p.Items[0].SkillInventory.Skills[0].Description != "Review the diff" ||
+		p.Items[0].SkillInventory.Skills[0].WhenToUse != "before commits" ||
+		p.Items[0].SkillInventory.Skills[0].Source != "user" ||
+		p.Items[0].SkillInventory.Skills[1].Name != "triage" {
+		t.Fatalf("inventory item = %+v", p.Items[0])
+	}
+	if p.Items[1].SkillDelta == nil || len(p.Items[1].SkillDelta.Added) != 1 || p.Items[1].SkillDelta.Added[0].Name != "fresh-skill" || p.Items[1].SkillDelta.Added[0].Source != "project" {
+		t.Fatalf("delta item = %+v", p.Items[1])
+	}
+	if p.Items[2].SkillInvoked == nil || p.Items[2].SkillInvoked.Name != "code-review" ||
+		p.Items[2].SkillInvoked.Source != "user" ||
+		p.Items[2].SkillInvoked.Entry != SkillEntrySlash ||
+		p.Items[2].SkillInvoked.Args != "focus" {
+		t.Fatalf("invoked item = %+v", p.Items[2])
+	}
+}

@@ -16,6 +16,7 @@ type scanState struct {
 	questions     map[string]string            // question ID -> current status
 	planApprovals map[string]string            // request ID -> last recorded status
 	todoRev       int                          // last observed todo snapshot revision
+	skillInv      bool                         // a skill inventory snapshot already exists
 }
 
 func scanEvents(events []Event) scanState {
@@ -80,6 +81,11 @@ func scanEvents(events []Event) scanState {
 			var update TodoUpdate
 			if decodeData(e.Data, &update) == nil {
 				st.todoRev = update.Revision
+			}
+		case EventSkillInventory:
+			var inv SkillInventory
+			if decodeData(e.Data, &inv) == nil {
+				st.skillInv = true
 			}
 		}
 	}
@@ -264,8 +270,43 @@ func checkTodoUpdate(u TodoUpdate, st scanState) error {
 	return nil
 }
 
+func checkSkillList(entries []SkillInfo, what string) error {
+	if len(entries) > MaxSkillListEntries {
+		return fmt.Errorf("%s carries %d entries, limit is %d", what, len(entries), MaxSkillListEntries)
+	}
+	for _, info := range entries {
+		if info.Name == "" {
+			return fmt.Errorf("%s requires a name for every skill", what)
+		}
+	}
+	return nil
+}
+
+func checkSkillInventory(inv SkillInventory, st scanState) error {
+	if st.skillInv {
+		return errors.New("session already has a skill inventory")
+	}
+	return checkSkillList(inv.Skills, "skill inventory")
+}
+
+func checkSkillDelta(d SkillDelta) error {
+	return checkSkillList(d.Added, "skill delta")
+}
+
+func checkSkillInvoked(i SkillInvoked) error {
+	if i.Name == "" {
+		return errors.New("skill invocation requires a name")
+	}
+	switch i.Entry {
+	case SkillEntrySlash, SkillEntryTool:
+	default:
+		return fmt.Errorf("skill invocation has invalid entry %q", i.Entry)
+	}
+	return nil
+}
+
 // validateOwnedAppend checks boundary, snapshot, rewind, question, reply,
-// plan mode, plan approval, and todo events before they are appended.
+// plan mode, plan approval, todo, and skill events before they are appended.
 // selfSeq is the sequence number the new event will occupy.
 func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSeq uint64) error {
 	st := scanEvents(events)
@@ -318,6 +359,24 @@ func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSe
 			return errors.New("todo update event has invalid shape")
 		}
 		return checkTodoUpdate(u, st)
+	case EventSkillInventory:
+		var inv SkillInventory
+		if err := decodeData(data, &inv); err != nil {
+			return errors.New("skill inventory event has invalid shape")
+		}
+		return checkSkillInventory(inv, st)
+	case EventSkillDelta:
+		var d SkillDelta
+		if err := decodeData(data, &d); err != nil {
+			return errors.New("skill delta event has invalid shape")
+		}
+		return checkSkillDelta(d)
+	case EventSkillInvoked:
+		var i SkillInvoked
+		if err := decodeData(data, &i); err != nil {
+			return errors.New("skill invoked event has invalid shape")
+		}
+		return checkSkillInvoked(i)
 	}
 	return nil
 }

@@ -74,6 +74,22 @@ func ConfigPath() (string, error) {
 	return filepath.Join(base, "stable", "config.json"), nil
 }
 
+// UserSkillsDir returns the user-level skill directory: the same directory
+// base as ConfigPath (XDG_CONFIG_HOME, or $HOME/.config when unset) plus
+// stable/skills. STABLE_CONFIG does not affect it: that variable relocates
+// only the config file itself, not the configuration directory tree.
+func UserSkillsDir() (string, error) {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		base = filepath.Join(home, ".config")
+	}
+	return filepath.Join(base, "stable", "skills"), nil
+}
+
 func StateDir() (string, error) {
 	if p := os.Getenv("STABLE_STATE_DIR"); p != "" {
 		return filepath.Abs(p)

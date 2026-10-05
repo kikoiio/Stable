@@ -84,6 +84,9 @@ const (
 	EventPlanMode       = "plan_mode"
 	EventPlanApproval   = "plan_approval"
 	EventTodo           = "todo_update"
+	EventSkillInventory = "skill_inventory"
+	EventSkillDelta     = "skill_delta"
+	EventSkillInvoked   = "skill_invoked"
 )
 
 // SnapshotRef records a candidate file snapshot owned by this session.
@@ -200,6 +203,45 @@ type TaskSnapshot struct {
 type TodoUpdate struct {
 	Revision int            `json:"revision"`
 	Tasks    []TaskSnapshot `json:"tasks"`
+}
+
+// MaxSkillListEntries bounds the entry count of one skill_inventory or
+// skill_delta event.
+const MaxSkillListEntries = 200
+
+// Entries via which a skill can be activated.
+const (
+	SkillEntrySlash = "slash"
+	SkillEntryTool  = "tool"
+)
+
+// SkillInfo is the lightweight skill metadata recorded in skill events.
+// Skill bodies never enter the log; they travel through the message or
+// tool-result events that carry the activation.
+type SkillInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	WhenToUse   string `json:"when_to_use"`
+	Source      string `json:"source"`
+}
+
+// SkillInventory is the skill catalog snapshot written once per session.
+type SkillInventory struct {
+	Skills []SkillInfo `json:"skills"`
+}
+
+// SkillDelta lists skills newly added to the catalog after the inventory.
+type SkillDelta struct {
+	Added []SkillInfo `json:"added"`
+}
+
+// SkillInvoked records one skill activation for the audit trail. Entry is
+// SkillEntrySlash or SkillEntryTool.
+type SkillInvoked struct {
+	Name   string `json:"name"`
+	Source string `json:"source"`
+	Entry  string `json:"entry"`
+	Args   string `json:"args,omitempty"`
 }
 
 type RunStarted struct {

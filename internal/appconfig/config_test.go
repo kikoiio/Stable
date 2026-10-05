@@ -47,6 +47,34 @@ func TestLoadAndValidate(t *testing.T) {
 	}
 }
 
+func TestUserSkillsDirUsesXDGConfigHome(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, "xdg")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("STABLE_CONFIG", filepath.Join(home, "elsewhere", "config.json"))
+	dir, err := UserSkillsDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir != filepath.Join(xdg, "stable", "skills") {
+		t.Fatalf("UserSkillsDir with XDG_CONFIG_HOME = %q", dir)
+	}
+}
+
+func TestUserSkillsDirFallsBackToHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	dir, err := UserSkillsDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir != filepath.Join(home, ".config", "stable", "skills") {
+		t.Fatalf("UserSkillsDir without XDG_CONFIG_HOME = %q", dir)
+	}
+}
+
 func TestCompatibleURL(t *testing.T) {
 	for _, s := range []string{"http://127.0.0.1:1000/v1", "http://[::1]:1000/v1", "https://example.com/v1"} {
 		if err := ValidateBaseURL(s); err != nil {
