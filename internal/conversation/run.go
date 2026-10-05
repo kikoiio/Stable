@@ -15,6 +15,8 @@ import (
 	"stable/internal/candidate"
 	"stable/internal/llm"
 	"stable/internal/permission"
+	"stable/internal/planfile"
+	"stable/internal/prompt"
 	"stable/internal/redact"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
@@ -51,7 +53,9 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if err := agent.ValidateRequest(request); err != nil {
 		return err
 	}
-	authority, err := BuildAuthority(ctx, s.deps.Store, s.deps.ProjectRoot, request, permission.ModeDefault)
+	plan := s.PlanStateOf(msg.SessionID)
+	mode, planFilePath := planRunAuthority(plan, request.Work.Kind)
+	authority, err := BuildAuthority(ctx, s.deps.Store, s.deps.ProjectRoot, request, mode, planFilePath)
 	if err != nil {
 		return fmt.Errorf("build trusted run authority: %w", err)
 	}
@@ -67,7 +71,29 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	s.eventMu.Lock()
 	if request.Work.Kind == agent.WorkSession {
 		history := sessionConversationMessages(s.deps.ProjectRoot, msg.SessionID)
-		request.Messages = append([]llm.Message{{Role: "system", Content: "你是 Stable 的通用 agent。读、搜、列只能访问正式工程只读视图；写、编辑只能写入本次运行的候选区。工具路径使用工作区相对路径。工具结果代表真实受控执行结果。"}}, append(history, request.Messages...)...)
+		prefix := []llm.Message{{Role: "system", Content: "你是 Stable 的通用 agent。读、搜、列只能访问正式工程只读视图；写、编辑只能写入本次运行的候选区。工具路径使用工作区相对路径。工具结果代表真实受控执行结果。"}}
+		if plan.Mode == sessionlog.PlanModePlan && plan.PlanPath != "" {
+			// The plan workflow reminder is per-turn context, not session
+			// history: it is inserted after the replayed conversation and
+			// immediately before the newest user message of this request, so
+			// the model reads it as the last instruction before acting, and
+			// it is deliberately not appended to the session log. The run
+			// counter drives the cadence: the full workflow text opens the
+			// first plan run and repeats every fifth run, the compact
+			// reminder fills the turns in between.
+			plan = s.recordPlanRun(msg.SessionID)
+			exists, existsErr := planfile.Exists(s.deps.ProjectRoot, msg.SessionID)
+			if existsErr != nil {
+				s.eventMu.Unlock()
+				return fmt.Errorf("check plan file: %w", existsErr)
+			}
+			reminder := prompt.BuildPlanModeReminder(plan.PlanPath, exists, int(plan.Runs))
+			prefix = append(prefix, history...)
+			prefix = append(prefix, llm.Message{Role: "user", Content: reminder})
+			request.Messages = append(prefix, request.Messages...)
+		} else {
+			request.Messages = append(prefix, append(history, request.Messages...)...)
+		}
 		for i := range request.Messages {
 			request.Messages[i].Content = redactRunCredential(request.Messages[i].Content, s.deps.ProviderCredential)
 		}

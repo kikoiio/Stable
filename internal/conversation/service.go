@@ -57,6 +57,13 @@ type Service struct {
 	activeRuns        map[string]string
 	notifiedApprovals map[string]bool
 	eventMu           sync.Mutex
+	// planMu guards the plan mode runtime state below. Plan state and plan
+	// approvals are service-lifetime memory: a restart drops sessions back to
+	// the default mode and clears pending dialogs (the session log keeps the
+	// transitions auditable).
+	planMu        sync.Mutex
+	planStates    map[string]*PlanState
+	planApprovals map[string]*PlanApproval
 }
 
 type clientSubscription struct {

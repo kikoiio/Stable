@@ -15,8 +15,12 @@ import (
 
 // BuildAuthority derives trusted run bounds from the on-disk session and
 // persisted goal. Client-provided AllowedScope and PermissionBounds are never
-// used to widen the returned authority.
-func BuildAuthority(ctx context.Context, state *store.Store, projectRoot string, request agent.ExecutionRequest, mode permission.Mode) (permission.Authority, error) {
+// used to widen the returned authority. mode selects the permission mode of
+// the run (plan/accept-edits semantics are decided by the conversation plan
+// state); planFilePath is the session's plan file, non-empty only for runs
+// that start in plan mode, and is copied into Authority.PlanFilePath so the
+// policy can exempt exactly that file from the write restrictions.
+func BuildAuthority(ctx context.Context, state *store.Store, projectRoot string, request agent.ExecutionRequest, mode permission.Mode, planFilePath string) (permission.Authority, error) {
 	var out permission.Authority
 	root, err := sessionlog.ProjectRoot(projectRoot)
 	if err != nil {
@@ -34,6 +38,12 @@ func BuildAuthority(ctx context.Context, state *store.Store, projectRoot string,
 	}
 	if _, err = os.Stat(sessionPath); err != nil {
 		return out, errors.New("run session does not exist")
+	}
+	if planFilePath != "" {
+		if request.Work.Kind != agent.WorkSession {
+			return out, errors.New("plan authority requires a session run")
+		}
+		planFilePath = filepath.Clean(planFilePath)
 	}
 	authorizedRoot := root
 	var goalID, workID string
@@ -106,7 +116,7 @@ func BuildAuthority(ctx context.Context, state *store.Store, projectRoot string,
 	} else if !os.IsNotExist(err) {
 		return out, err
 	}
-	return permission.Authority{RunID: request.RunID, SessionID: request.Work.SessionID, GoalID: goalID, WorkItemID: workID, AllowedRoot: allowed, CandidateRoot: candidateRoot, FormalRoot: formalRoot, Mode: mode, Capabilities: capabilities}, nil
+	return permission.Authority{RunID: request.RunID, SessionID: request.Work.SessionID, GoalID: goalID, WorkItemID: workID, AllowedRoot: allowed, CandidateRoot: candidateRoot, FormalRoot: formalRoot, Mode: mode, PlanFilePath: planFilePath, Capabilities: capabilities}, nil
 }
 
 func validComponent(value string) bool {
