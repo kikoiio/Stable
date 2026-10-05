@@ -73,18 +73,33 @@ func (e *toolRunExecutor) SetApprovalObserver(observer func()) {
 
 func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcome agent.ToolOutcome, err error) {
 	started := e.deps.Now()
-	outcome = agent.ToolOutcome{CallID: call.ID, ToolName: call.Name, Status: agent.ToolFailed, IsError: true}
 	args := map[string]any{}
+	postHook := false
+	defer func() {
+		if postHook && ctx.Err() == nil && e.deps.HookRunner != nil {
+			e.deps.HookRunner.PostToolUse(e.request.Work.SessionID, call.Name, args, outcome.Content)
+		}
+	}()
+	outcome = agent.ToolOutcome{CallID: call.ID, ToolName: call.Name, Status: agent.ToolFailed, IsError: true}
 	if len(call.Arguments) != 0 {
 		if err = json.Unmarshal(call.Arguments, &args); err != nil {
 			outcome.Content = "Error: invalid tool arguments"
-			return outcome, nil
+			return e.finish(outcome, started), nil
 		}
 	}
 	if e.deps.SessionRoot != "" {
 		if _, logErr := sessionlog.Append(e.deps.SessionRoot, e.request.Work.SessionID, sessionlog.EventToolCall, sessionlog.ToolCall{CallID: call.ID, Name: call.Name, Input: redactJSON(args, e.deps.ProviderCredential)}); logErr != nil {
 			return outcome, fmt.Errorf("record tool call: %w", logErr)
 		}
+	}
+	if e.deps.HookRunner != nil {
+		rejected, hookID, message := e.deps.HookRunner.PreToolUse(e.request.Work.SessionID, call.Name, args)
+		if rejected {
+			outcome.Status = agent.ToolDenied
+			outcome.Content = fmt.Sprintf("Blocked by hook %s: %s", hookID, message)
+			return e.finish(outcome, started), nil
+		}
+		postHook = true
 	}
 	// M06 host-side branches run before the sandbox mapping: the interactive
 	// and task tools never touch the filesystem, and a write to the session's

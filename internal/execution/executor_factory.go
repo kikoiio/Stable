@@ -29,6 +29,13 @@ type SnapshotCreator interface {
 	Create(sessionID, candidateID, runID, label, candidateRoot string) (candidate.FileSnapshot, error)
 }
 
+// HookRunner runs lifecycle hooks around individual tool calls. A rejected
+// pre-hook can only block a call; it never alters permission decisions.
+type HookRunner interface {
+	PreToolUse(sessionID, toolName string, args map[string]any) (rejected bool, hookID, message string)
+	PostToolUse(sessionID, toolName string, args map[string]any, result string)
+}
+
 type ToolExecutorDeps struct {
 	Sandbox            sandbox.SandboxManager
 	Gate               PermissionGate
@@ -58,6 +65,9 @@ type ToolExecutorDeps struct {
 	// per-session inventory used by run-context injection. Nil makes load_skill
 	// unavailable; the nil behavior is defined by the M07-A tool dispatch.
 	SkillProvider SkillProvider
+	// HookRunner runs optional pre/post tool-use hooks. A nil runner leaves
+	// existing tool execution behavior unchanged.
+	HookRunner HookRunner
 }
 
 // OptionSpec is one choice shown to the user for a question.
@@ -164,6 +174,11 @@ func WithTodoProvider(provider TodoProvider) ToolExecutorOption {
 // the run-context skill inventory.
 func WithSkillProvider(provider SkillProvider) ToolExecutorOption {
 	return func(deps *ToolExecutorDeps) { deps.SkillProvider = provider }
+}
+
+// WithHookRunner injects the lifecycle hook runner for tool calls.
+func WithHookRunner(runner HookRunner) ToolExecutorOption {
+	return func(deps *ToolExecutorDeps) { deps.HookRunner = runner }
 }
 
 type ToolExecutorFactory struct{ deps ToolExecutorDeps }

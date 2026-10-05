@@ -21,11 +21,43 @@ import (
 type executorTestGate struct {
 	decision permission.PermissionDecision
 	seen     permission.Operation
+	calls    int
 }
 
 func (g *executorTestGate) Authorize(_ context.Context, _ permission.Authority, op permission.Operation) (permission.PermissionDecision, error) {
+	g.calls++
 	g.seen = op
 	return g.decision, nil
+}
+
+type executorTestHookRunner struct {
+	preRejected bool
+	preHookID   string
+	preMessage  string
+	preCalls    int
+	postCalls   int
+	preArgs     map[string]any
+	postArgs    map[string]any
+	postContent string
+	sequence    *[]string
+}
+
+func (h *executorTestHookRunner) PreToolUse(_ string, _ string, args map[string]any) (bool, string, string) {
+	h.preCalls++
+	h.preArgs = args
+	if h.sequence != nil {
+		*h.sequence = append(*h.sequence, "pre")
+	}
+	return h.preRejected, h.preHookID, h.preMessage
+}
+
+func (h *executorTestHookRunner) PostToolUse(_ string, _ string, args map[string]any, result string) {
+	h.postCalls++
+	h.postArgs = args
+	h.postContent = result
+	if h.sequence != nil {
+		*h.sequence = append(*h.sequence, "post")
+	}
 }
 
 type executorTestSandbox struct {
@@ -64,6 +96,98 @@ func executorRequest(t *testing.T, formal, candidateRoot string) agent.Execution
 		t.Fatal(err)
 	}
 	return agent.ExecutionRequest{RunID: authority.RunID, Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: authority.SessionID}, Intent: "test", Model: "test", PermissionBounds: raw}
+}
+
+func TestToolExecutorHookRunner(t *testing.T) {
+	formal := t.TempDir()
+	candidateRoot := filepath.Join(t.TempDir(), "candidate")
+	gate := &executorTestGate{decision: permission.PermissionDecision{Kind: permission.DecisionAllow}}
+	hooks := &executorTestHookRunner{preRejected: true, preHookID: "deny-command", preMessage: "commands are disabled"}
+	factory := NewToolExecutorFactory(ToolExecutorDeps{Gate: gate, Now: time.Now}, WithHookRunner(hooks))
+	runner, err := factory.ForRun(executorRequest(t, formal, candidateRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := runner.Execute(context.Background(), llm.ToolUse{ID: "call-1", Name: "command", Arguments: json.RawMessage(`{"command":"pwd"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Status != agent.ToolDenied || !outcome.IsError || outcome.Content != "Blocked by hook deny-command: commands are disabled" {
+		t.Fatalf("hook rejection outcome = %#v", outcome)
+	}
+	if gate.calls != 0 {
+		t.Fatalf("permission gate called %d times after hook rejection", gate.calls)
+	}
+	if hooks.preCalls != 1 || hooks.postCalls != 0 {
+		t.Fatalf("hook calls = pre %d post %d, want 1/0", hooks.preCalls, hooks.postCalls)
+	}
+}
+
+func TestToolExecutorHookRunnerPostsFinalizedContent(t *testing.T) {
+	formal := t.TempDir()
+	candidateRoot := filepath.Join(t.TempDir(), "candidate")
+	credential := "secret-token"
+	gate := &executorTestGate{decision: permission.PermissionDecision{Kind: permission.DecisionAllow}}
+	sandboxFake := &executorTestSandbox{result: sandbox.SandboxResult{Stdout: []byte(""), Stderr: []byte(strings.Repeat("x", toolOutputLimit+1) + credential), ExitCode: 0}}
+	hooks := &executorTestHookRunner{}
+	factory := NewToolExecutorFactory(ToolExecutorDeps{Gate: gate, Sandbox: sandboxFake, Now: time.Now, ProviderCredential: credential}, WithHookRunner(hooks))
+	runner, err := factory.ForRun(executorRequest(t, formal, candidateRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := runner.Execute(context.Background(), llm.ToolUse{ID: "call-1", Name: "command", Arguments: json.RawMessage(`{"command":"pwd"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hooks.preCalls != 1 || hooks.postCalls != 1 {
+		t.Fatalf("hook calls = pre %d post %d, want 1/1", hooks.preCalls, hooks.postCalls)
+	}
+	if hooks.postContent != outcome.Content || len(hooks.postContent) > toolOutputLimit+len("\n[output truncated]") || strings.Contains(hooks.postContent, credential) {
+		t.Fatalf("post content was not finalized: %q", hooks.postContent)
+	}
+}
+
+func TestToolExecutorHookRunnerSkipsPostOnCancellation(t *testing.T) {
+	formal := t.TempDir()
+	candidateRoot := filepath.Join(t.TempDir(), "candidate")
+	gate := &executorTestGate{decision: permission.PermissionDecision{Kind: permission.DecisionAllow}}
+	sandboxFake := &executorTestSandbox{err: context.Canceled}
+	hooks := &executorTestHookRunner{}
+	factory := NewToolExecutorFactory(ToolExecutorDeps{Gate: gate, Sandbox: sandboxFake, Now: time.Now}, WithHookRunner(hooks))
+	runner, err := factory.ForRun(executorRequest(t, formal, candidateRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err = runner.Execute(ctx, llm.ToolUse{ID: "call-1", Name: "command", Arguments: json.RawMessage(`{"command":"pwd"}`)}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled command err = %v", err)
+	}
+	if hooks.preCalls != 1 || hooks.postCalls != 0 {
+		t.Fatalf("hook calls = pre %d post %d, want 1/0", hooks.preCalls, hooks.postCalls)
+	}
+}
+
+func TestToolExecutorHookRunnerRunsBeforePermission(t *testing.T) {
+	formal := t.TempDir()
+	candidateRoot := filepath.Join(t.TempDir(), "candidate")
+	sequence := []string{}
+	gate := &sequenceGate{decisions: []permission.PermissionDecision{{Kind: permission.DecisionDeny}}, sequence: &sequence}
+	hooks := &executorTestHookRunner{sequence: &sequence}
+	factory := NewToolExecutorFactory(ToolExecutorDeps{Gate: gate, Now: time.Now}, WithHookRunner(hooks))
+	runner, err := factory.ForRun(executorRequest(t, formal, candidateRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = runner.Execute(context.Background(), llm.ToolUse{ID: "call-1", Name: "read_file", Arguments: json.RawMessage(`{"file_path":"a.txt"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(sequence, ","), "pre,gate,post"; got != want {
+		t.Fatalf("call sequence = %q, want %q", got, want)
+	}
 }
 
 func TestToolExecutorMapsRelativePathsToFormalAndCandidateRoots(t *testing.T) {
@@ -222,9 +346,13 @@ type sequenceGate struct {
 	decisions []permission.PermissionDecision
 	calls     int
 	seen      permission.Operation
+	sequence  *[]string
 }
 
 func (g *sequenceGate) Authorize(_ context.Context, _ permission.Authority, op permission.Operation) (permission.PermissionDecision, error) {
+	if g.sequence != nil {
+		*g.sequence = append(*g.sequence, "gate")
+	}
 	g.seen = op
 	i := g.calls
 	if i >= len(g.decisions) {
