@@ -41,3 +41,22 @@ func TestOperationDigestChangesWithParameters(t *testing.T) {
 		t.Fatal("parameter change did not change operation digest")
 	}
 }
+
+// The plan file path is a transient per-session path like the candidate root;
+// it must not change the saved-rule scope digest.
+func TestScopeDigestIgnoresPlanFilePath(t *testing.T) {
+	a := Authority{RunID: "r1", SessionID: "s1", AllowedRoot: "/project", CandidateRoot: "/candidate", Mode: ModePlan, PlanFilePath: "/project/.stable/plans/s1.md"}
+	b := a
+	d1, err := a.ScopeDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.PlanFilePath = ""
+	d2, err := b.ScopeDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d1 != d2 {
+		t.Fatal("plan file path changed the saved-rule scope digest")
+	}
+}

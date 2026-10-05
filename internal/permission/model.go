@@ -29,16 +29,21 @@ const (
 )
 
 type Authority struct {
-	RunID         string         `json:"run_id"`
-	SessionID     string         `json:"session_id"`
-	GoalID        string         `json:"goal_id,omitempty"`
-	WorkItemID    string         `json:"work_item_id,omitempty"`
-	AllowedRoot   string         `json:"allowed_root"`
-	CandidateRoot string         `json:"candidate_root"`
-	FormalRoot    string         `json:"formal_root,omitempty"`
-	Mode          Mode           `json:"mode"`
-	Network       []NetworkGrant `json:"network,omitempty"`
-	Capabilities  []string       `json:"capabilities,omitempty"`
+	RunID         string `json:"run_id"`
+	SessionID     string `json:"session_id"`
+	GoalID        string `json:"goal_id,omitempty"`
+	WorkItemID    string `json:"work_item_id,omitempty"`
+	AllowedRoot   string `json:"allowed_root"`
+	CandidateRoot string `json:"candidate_root"`
+	FormalRoot    string `json:"formal_root,omitempty"`
+	Mode          Mode   `json:"mode"`
+	// PlanFilePath is the session's plan file inside the formal project
+	// (.stable/plans/<sessionID>.md); empty means the session is not in plan
+	// mode. Like the other run-scoped identifiers it is excluded from the
+	// scope digest and re-checked on every operation.
+	PlanFilePath string         `json:"plan_file_path,omitempty"`
+	Network      []NetworkGrant `json:"network,omitempty"`
+	Capabilities []string       `json:"capabilities,omitempty"`
 }
 
 type NetworkGrant struct {
@@ -101,11 +106,13 @@ func (a Authority) ScopeDigest() (string, error) {
 		sort.Strings(a.Network[i].ResolvedIPs)
 	}
 	sort.Strings(a.Capabilities)
-	// A saved rule follows the trusted project scope across candidate/run IDs;
-	// those transient paths are still checked on every operation before rules.
+	// A saved rule follows the trusted project scope across candidate/run IDs
+	// and plan-mode toggles; those transient paths are still checked on every
+	// operation before rules.
 	a.RunID = ""
 	a.WorkItemID = ""
 	a.CandidateRoot = ""
+	a.PlanFilePath = ""
 	return digest(a)
 }
 

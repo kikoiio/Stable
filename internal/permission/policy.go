@@ -42,6 +42,10 @@ func (p Policy) Decide(a Authority, o Operation) PermissionDecision {
 	deny := func(reason string) PermissionDecision {
 		return PermissionDecision{Kind: DecisionDeny, Reason: reason, ScopeDigest: scope, OperationDigest: operation}
 	}
+	// The only ask-free write in plan mode is the session's plan file; it is
+	// exempt from the candidate-only write restriction but must still resolve
+	// inside the authorized root and is still subject to exact rules below.
+	planWrite := false
 	if o.Kind == OpNetwork {
 		if !networkGranted(a.Network, o) {
 			return deny("network destination is not explicitly authorized")
@@ -54,12 +58,18 @@ func (p Policy) Decide(a Authority, o Operation) PermissionDecision {
 		if err != nil {
 			return deny("target path cannot be safely resolved")
 		}
+		if a.Mode == ModePlan && a.PlanFilePath != "" && o.Kind == OpWrite {
+			planPath, planErr := resolvePath(a.PlanFilePath)
+			if planErr == nil && planPath == resolved {
+				planWrite = true
+			}
+		}
 		allowed, err := contained(a.AllowedRoot, resolved)
 		candidate, candidateErr := contained(a.CandidateRoot, resolved)
 		if err != nil || candidateErr != nil || (!allowed && !candidate) {
 			return deny("target is outside authorized project data")
 		}
-		if o.Kind == OpWrite || o.Kind == OpLegacy {
+		if (o.Kind == OpWrite || o.Kind == OpLegacy) && !planWrite {
 			if !candidate {
 				return deny("writes are restricted to the isolated candidate")
 			}
@@ -106,6 +116,9 @@ func (p Policy) Decide(a Authority, o Operation) PermissionDecision {
 	case OpWrite, OpLegacy:
 		if a.Mode == ModeAcceptEdits {
 			return PermissionDecision{Kind: DecisionAllow, Reason: "candidate edit accepted by mode", ScopeDigest: scope, OperationDigest: operation}
+		}
+		if planWrite {
+			return PermissionDecision{Kind: DecisionAllow, Reason: "plan file write allowed in plan mode", ScopeDigest: scope, OperationDigest: operation}
 		}
 	}
 	return PermissionDecision{Kind: DecisionAsk, Reason: fmt.Sprintf("%s operation requires user approval", o.Kind), ScopeDigest: scope, OperationDigest: operation}

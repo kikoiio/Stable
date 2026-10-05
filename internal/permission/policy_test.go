@@ -152,3 +152,66 @@ func TestReadAllowedBeforeCandidateExists(t *testing.T) {
 		t.Fatalf("read before candidate creation should be allowed: %+v", d)
 	}
 }
+
+// In plan mode the session's plan file is the only ask-free write target;
+// every other plan-mode decision matches default mode. Non-plan modes keep
+// the formal project (including the plan file) read-only.
+func TestPlanModeMatrix(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	candidate := filepath.Join(root, "candidate")
+	plans := filepath.Join(project, ".stable", "plans")
+	for _, p := range []string{project, candidate, plans} {
+		if err := os.MkdirAll(p, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	planFile := filepath.Join(plans, "sess-1.md")
+	if err := os.WriteFile(planFile, []byte("# plan"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(plans, "other.md")
+	if err := os.WriteFile(sibling, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	base := Authority{RunID: "r", SessionID: "s", AllowedRoot: project, CandidateRoot: candidate, FormalRoot: project}
+	ops := []Operation{
+		{ID: "pw", Kind: OpWrite, Name: "WriteFile", Target: planFile},
+		{ID: "cw", Kind: OpWrite, Name: "WriteFile", Target: filepath.Join(candidate, "board.kicad_sch")},
+		{ID: "fw", Kind: OpWrite, Name: "WriteFile", Target: filepath.Join(project, "board.kicad_sch")},
+		{ID: "c", Kind: OpCommand, Name: "exec"},
+		{ID: "rd", Kind: OpRead, Name: "ReadFile", Target: filepath.Join(project, "input")},
+	}
+	want := []DecisionKind{DecisionAllow, DecisionAsk, DecisionDeny, DecisionAsk, DecisionAllow}
+
+	t.Run("plan", func(t *testing.T) {
+		a := base
+		a.Mode = ModePlan
+		a.PlanFilePath = planFile
+		for i, op := range ops {
+			if d := (Policy{}).Decide(a, op); d.Kind != want[i] {
+				t.Errorf("%s %s: got %s want %s (%s)", op.Kind, op.Target, d.Kind, want[i], d.Reason)
+			}
+		}
+		// Only the exact plan file path is exempt; a sibling file under
+		// .stable/plans/ is still a read-only formal project write.
+		if d := (Policy{}).Decide(a, Operation{ID: "sw", Kind: OpWrite, Name: "WriteFile", Target: sibling}); d.Kind != DecisionDeny {
+			t.Errorf("sibling plan write: got %s want deny (%s)", d.Kind, d.Reason)
+		}
+		// An empty PlanFilePath never hits the plan-file exemption.
+		a.PlanFilePath = ""
+		if d := (Policy{}).Decide(a, ops[0]); d.Kind != DecisionDeny {
+			t.Errorf("plan write without PlanFilePath: got %s want deny (%s)", d.Kind, d.Reason)
+		}
+	})
+	for _, mode := range []Mode{ModeDefault, ModeAcceptEdits} {
+		t.Run(string(mode), func(t *testing.T) {
+			a := base
+			a.Mode = mode
+			a.PlanFilePath = planFile
+			if d := (Policy{}).Decide(a, ops[0]); d.Kind != DecisionDeny {
+				t.Errorf("plan file write in %s mode: got %s want deny (%s)", mode, d.Kind, d.Reason)
+			}
+		})
+	}
+}
