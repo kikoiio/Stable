@@ -1,4 +1,4 @@
-package runtime
+package paths
 
 import (
 	"errors"
@@ -48,3 +48,17 @@ func Resolve(c appconfig.AppConfig) (Paths, error) {
 }
 
 func (p Paths) Prepare() error { return os.MkdirAll(p.Goals, 0700) }
+
+func (p Paths) HelperBinary(name string) string {
+	return filepath.Join(p.Libexec, name+exeSuffix)
+}
+
+func (p Paths) HelperBinaryResolved(name string) string {
+	candidates := []string{p.HelperBinary(name), filepath.Join(p.Root, "dev-install", "libexec", name+exeSuffix), filepath.Join(p.Bin, name+exeSuffix)}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return candidates[0]
+}

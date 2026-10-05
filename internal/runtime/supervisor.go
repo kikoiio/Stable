@@ -26,6 +26,7 @@ import (
 	"stable/internal/execution"
 	"stable/internal/llm"
 	"stable/internal/permission"
+	"stable/internal/platform/paths"
 	"stable/internal/sandbox"
 	"stable/internal/sessioncontext"
 	"stable/internal/sessionlog"
@@ -44,7 +45,7 @@ type Status struct {
 	WorkerLog       string `json:"worker_log"`
 }
 
-func Control(p Paths, cmd string) (Status, error) {
+func Control(p paths.Paths, cmd string) (Status, error) {
 	var s Status
 	conn, err := net.DialTimeout("unix", p.Socket, 500*time.Millisecond)
 	if err != nil {
@@ -61,7 +62,7 @@ func Control(p Paths, cmd string) (Status, error) {
 	return s, nil
 }
 
-func Up(ctx context.Context, c appconfig.AppConfig, p Paths) (Status, error) {
+func Up(ctx context.Context, c appconfig.AppConfig, p paths.Paths) (Status, error) {
 	if s, err := Control(p, "status"); err == nil && s.Running {
 		return s, nil
 	}
@@ -116,7 +117,7 @@ func ReconcileBeforeDispatch(ctx context.Context, dbPath string) error {
 	return s.ReconcileAcceptances(ctx)
 }
 
-func Supervise(c appconfig.AppConfig, p Paths) error {
+func Supervise(c appconfig.AppConfig, p paths.Paths) error {
 	if err := p.Prepare(); err != nil {
 		return err
 	}
@@ -173,7 +174,7 @@ func Supervise(c appconfig.AppConfig, p Paths) error {
 		return err
 	}
 	defer workerLog.Close()
-	temporal := exec.Command(filepath.Join(p.Libexec, "temporal"), "server", "start-dev", "--headless", "--ip", "127.0.0.1", "--port", strconv.Itoa(c.TemporalPort), "--db-filename", p.TemporalDB)
+	temporal := exec.Command(p.HelperBinary("temporal"), "server", "start-dev", "--headless", "--ip", "127.0.0.1", "--port", strconv.Itoa(c.TemporalPort), "--db-filename", p.TemporalDB)
 	temporal.Stdout = temporalLog
 	temporal.Stderr = temporalLog
 	if err = temporal.Start(); err != nil {
@@ -183,7 +184,7 @@ func Supervise(c appconfig.AppConfig, p Paths) error {
 	if err = waitPort(address, temporal, 20*time.Second); err != nil {
 		return fmt.Errorf("Temporal startup: %w; see %s", err, p.TemporalLog)
 	}
-	worker := exec.Command(filepath.Join(p.Libexec, "agentworker"), "--app-config", "--db", p.Database, "--run-root", p.Goals, "--temporal", address, "--project-root", p.Share, "--chat-socket", p.ChatSocket)
+	worker := exec.Command(p.HelperBinary("agentworker"), "--app-config", "--db", p.Database, "--run-root", p.Goals, "--temporal", address, "--project-root", p.Share, "--chat-socket", p.ChatSocket)
 	worker.Env = os.Environ()
 	worker.Stdout = workerLog
 	worker.Stderr = workerLog
@@ -311,7 +312,7 @@ func userSkillsDir() string {
 
 // startChatService runs the persistent conversation service inside the
 // supervisor process. It returns a channel that closes when the service stops.
-func startChatService(c appconfig.AppConfig, p Paths, address string) <-chan struct{} {
+func startChatService(c appconfig.AppConfig, p paths.Paths, address string) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -325,7 +326,7 @@ func startChatService(c appconfig.AppConfig, p Paths, address string) <-chan str
 	return done
 }
 
-func runChatService(c appconfig.AppConfig, p Paths, address string) error {
+func runChatService(c appconfig.AppConfig, p paths.Paths, address string) error {
 	s, err := store.Open(p.Database)
 	if err != nil {
 		return err
@@ -367,7 +368,7 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 			Gate:               execution.StorePermissionGate{Store: s},
 			Approvals:          s,
 			Candidates:         s,
-			HelperPath:         filepath.Join(p.Libexec, "agentworker"),
+			HelperPath:         p.HelperBinary("agentworker"),
 			SessionRoot:        p.Share,
 			ProviderCredential: c.Model.APIKey,
 			Snapshots:          snapshotStore,

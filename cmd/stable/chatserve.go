@@ -21,6 +21,7 @@ import (
 	"stable/internal/execution"
 	"stable/internal/llm"
 	"stable/internal/permission"
+	"stable/internal/platform/paths"
 	"stable/internal/sandbox"
 	"stable/internal/sessioncontext"
 	"stable/internal/sessionlog"
@@ -70,10 +71,11 @@ func chatserve(args []string) error {
 	if err != nil {
 		return err
 	}
-	helperPath, err := chatserveHelperPath()
+	p, err := paths.Resolve(c)
 	if err != nil {
 		return err
 	}
+	helperPath := p.HelperBinaryResolved("agentworker")
 	var runner agent.Runner
 	var executorFactory agent.ExecutorFactory
 	var toolSchemas []llm.ToolSchema
@@ -146,33 +148,6 @@ func userSkillsDir() string {
 		return ""
 	}
 	return dir
-}
-
-func chatserveHelperPath() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("find chatserve executable: %w", err)
-	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		return "", fmt.Errorf("resolve chatserve executable: %w", err)
-	}
-	exe, err = filepath.Abs(exe)
-	if err != nil {
-		return "", fmt.Errorf("resolve chatserve executable path: %w", err)
-	}
-	root := filepath.Dir(filepath.Dir(exe))
-	candidates := []string{
-		filepath.Join(root, "libexec", "agentworker"),
-		filepath.Join(root, "dev-install", "libexec", "agentworker"),
-		filepath.Join(filepath.Dir(exe), "agentworker"),
-	}
-	for _, candidate := range candidates {
-		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
-			return candidate, nil
-		}
-	}
-	return candidates[0], nil
 }
 
 func chatserveToolSchemas() []llm.ToolSchema {

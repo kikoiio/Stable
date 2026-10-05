@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"stable/internal/appconfig"
+	"stable/internal/platform/paths"
 	"stable/internal/prototype"
 	"stable/internal/runtime"
 	"stable/internal/sandbox"
@@ -67,7 +67,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		p, err := runtime.Resolve(c)
+		p, err := paths.Resolve(c)
 		if err != nil {
 			return err
 		}
@@ -124,7 +124,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	p, err := runtime.Resolve(c)
+	p, err := paths.Resolve(c)
 	if err != nil {
 		return err
 	}
@@ -217,7 +217,7 @@ func run(args []string) error {
 	}
 }
 
-func goal(args []string, c appconfig.AppConfig, p runtime.Paths) error {
+func goal(args []string, c appconfig.AppConfig, p paths.Paths) error {
 	if len(args) == 0 {
 		return errors.New("usage: stable goal create|status|notify|export")
 	}
@@ -239,7 +239,7 @@ func goal(args []string, c appconfig.AppConfig, p runtime.Paths) error {
 	forward = append(forward, args[1:]...)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	child := exec.CommandContext(ctx, filepath.Join(p.Libexec, "agentctl"), forward...)
+	child := exec.CommandContext(ctx, p.HelperBinary("agentctl"), forward...)
 	child.Stdout = os.Stdout
 	child.Stderr = os.Stderr
 	child.Stdin = os.Stdin

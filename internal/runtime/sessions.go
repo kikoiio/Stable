@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 
+	"stable/internal/platform/paths"
+
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -25,7 +27,7 @@ type sessionHandle struct {
 // the exact recorded command on a design inside the state dir, so recycled
 // pids and unrelated KiCad windows are never touched. Returns the number of
 // processes signalled.
-func StopSessionProcesses(p Paths) int {
+func StopSessionProcesses(p paths.Paths) int {
 	if _, err := os.Stat(p.Database); err != nil {
 		return 0
 	}

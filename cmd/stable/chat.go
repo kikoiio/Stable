@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"stable/internal/core"
-	"stable/internal/runtime"
+	"stable/internal/platform/paths"
 )
 
 type wireMsg struct {
@@ -69,7 +69,7 @@ func printWire(line []byte) (bool, string) {
 // mode (any action flag) sends a single operation, prints the responses and
 // exits — scripts and e2e tests rely on it; interactive mode renders the live
 // transcript.
-func chat(args []string, p runtime.Paths) error {
+func chat(args []string, p paths.Paths) error {
 	fs := flag.NewFlagSet("chat", flag.ContinueOnError)
 	goal := fs.String("goal", "", "goal to focus (say/reply target)")
 	say := fs.String("say", "", "send a steering message to the focused goal")

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"stable/internal/appconfig"
+	"stable/internal/platform/paths"
 )
 
 type Check struct {
@@ -17,9 +18,9 @@ type Check struct {
 	Detail string `json:"detail"`
 }
 
-func Doctor(c appconfig.AppConfig, p Paths) []Check {
+func Doctor(c appconfig.AppConfig, p paths.Paths) []Check {
 	var checks []Check
-	for name, path := range map[string]string{"agentctl": filepath.Join(p.Libexec, "agentctl"), "agentworker": filepath.Join(p.Libexec, "agentworker"), "temporal": filepath.Join(p.Libexec, "temporal"), "fixture": filepath.Join(p.Share, "fixtures/sensor_board/sensor.kicad_sch"), "project fixture": filepath.Join(p.Share, "fixtures/sensor_board/sensor.kicad_pro"), "schema": filepath.Join(p.Share, "schemas/next_action.schema.json"), "criteria schema": filepath.Join(p.Share, "schemas/criteria_proposal.schema.json"), "KiCad bridge": filepath.Join(p.Share, "workers/kicad/bridge.py"), "computer bridge": filepath.Join(p.Share, "workers/computer/bridge.py")} {
+	for name, path := range map[string]string{"agentctl": p.HelperBinary("agentctl"), "agentworker": p.HelperBinary("agentworker"), "temporal": p.HelperBinary("temporal"), "fixture": filepath.Join(p.Share, "fixtures/sensor_board/sensor.kicad_sch"), "project fixture": filepath.Join(p.Share, "fixtures/sensor_board/sensor.kicad_pro"), "schema": filepath.Join(p.Share, "schemas/next_action.schema.json"), "criteria schema": filepath.Join(p.Share, "schemas/criteria_proposal.schema.json"), "KiCad bridge": filepath.Join(p.Share, "workers/kicad/bridge.py"), "computer bridge": filepath.Join(p.Share, "workers/computer/bridge.py")} {
 		st, err := os.Stat(path)
 		checks = append(checks, Check{Name: name, OK: err == nil && st.Mode().IsRegular(), Detail: path})
 	}

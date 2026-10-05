@@ -16,16 +16,17 @@ import (
 	"time"
 
 	"stable/internal/appconfig"
+	"stable/internal/platform/paths"
 	"stable/internal/runtime"
 )
 
 const oneshotTimeout = 15 * time.Minute
 
-func agentctl(p runtime.Paths, c appconfig.AppConfig, cmd string, extra ...string) (string, error) {
+func agentctl(p paths.Paths, c appconfig.AppConfig, cmd string, extra ...string) (string, error) {
 	args := []string{cmd, "--run-root", p.Goals, "--db", p.Database, "--temporal", "127.0.0.1:" + strconv.Itoa(c.TemporalPort), "--project-root", p.Share}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	child := exec.CommandContext(ctx, filepath.Join(p.Libexec, "agentctl"), append(args, extra...)...)
+	child := exec.CommandContext(ctx, p.HelperBinary("agentctl"), append(args, extra...)...)
 	var out, errOut bytes.Buffer
 	child.Stdout, child.Stderr = &out, &errOut
 	if err := child.Run(); err != nil {
@@ -35,7 +36,7 @@ func agentctl(p runtime.Paths, c appconfig.AppConfig, cmd string, extra ...strin
 }
 
 // runOnce starts the runtime if needed, runs one goal to a stopping point, exports the result, and stops what it started.
-func runOnce(c appconfig.AppConfig, p runtime.Paths) error {
+func runOnce(c appconfig.AppConfig, p paths.Paths) error {
 	if err := c.Validate(true); err != nil {
 		return fmt.Errorf("%w\nrun `stable config init` to create the config file, fill in your model and key, then run stable again", err)
 	}
