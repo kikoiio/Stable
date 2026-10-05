@@ -90,6 +90,16 @@ func UserSkillsDir() (string, error) {
 	return filepath.Join(base, "stable", "skills"), nil
 }
 
+// UserHooksPath returns the user-level hooks file in the same configuration
+// directory tree as UserSkillsDir.
+func UserHooksPath() (string, error) {
+	base, err := UserSkillsDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(base), "hooks.yaml"), nil
+}
+
 func StateDir() (string, error) {
 	if p := os.Getenv("STABLE_STATE_DIR"); p != "" {
 		return filepath.Abs(p)
