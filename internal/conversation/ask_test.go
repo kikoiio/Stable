@@ -109,12 +109,19 @@ func TestAskAdapterAskReplyLoop(t *testing.T) {
 	}()
 
 	waitFor(t, 2*time.Second, func() bool { return svc.askWaiterCount(session.ID) == 1 })
-	listed, err := svc.listQuestions(ClientMsg{SessionID: session.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(listed) != 1 || listed[0].Status != sessionlog.QuestionPending {
-		t.Fatalf("questions = %+v", listed)
+	// The waiter registers before the question event is appended, so poll
+	// until the question is actually visible instead of trusting the count.
+	var listed []sessionlog.PendingQuestion
+	waitFor(t, 2*time.Second, func() bool {
+		items, err := svc.listQuestions(ClientMsg{SessionID: session.ID})
+		if err != nil || len(items) != 1 || items[0].Status != sessionlog.QuestionPending {
+			return false
+		}
+		listed = items
+		return true
+	})
+	if listed == nil {
+		t.Fatal("question never became visible")
 	}
 	for _, want := range []string{"[Database]", "用哪个数据库？", "SQLite", "Postgres"} {
 		if !strings.Contains(listed[0].Prompt, want) {
