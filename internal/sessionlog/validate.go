@@ -377,6 +377,35 @@ func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSe
 			return errors.New("skill invoked event has invalid shape")
 		}
 		return checkSkillInvoked(i)
+	case EventHookFired:
+		var h HookFired
+		if err := decodeData(data, &h); err != nil {
+			return errors.New("hook fired event has invalid shape")
+		}
+		return checkHookFired(h)
+	case EventHookReload:
+		var h HookReload
+		if err := decodeData(data, &h); err != nil {
+			return errors.New("hook reload event has invalid shape")
+		}
+		return checkHookReload(h)
+	}
+	return nil
+}
+
+func checkHookFired(h HookFired) error {
+	if h.HookID == "" || h.Event == "" || h.Action == "" {
+		return errors.New("hook fired event is missing hook_id, event, or action")
+	}
+	if len(h.Output) > MaxHookOutput {
+		return fmt.Errorf("hook output exceeds %d bytes", MaxHookOutput)
+	}
+	return nil
+}
+
+func checkHookReload(h HookReload) error {
+	if h.Before < 0 || h.After < 0 {
+		return errors.New("hook reload counts must be non-negative")
 	}
 	return nil
 }

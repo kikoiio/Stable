@@ -19,6 +19,8 @@ const (
 	ItemSkillInventory ItemKind = "skill_inventory"
 	ItemSkillDelta     ItemKind = "skill_delta"
 	ItemSkillInvoked   ItemKind = "skill_invoked"
+	ItemHookFired      ItemKind = "hook_fired"
+	ItemHookReload     ItemKind = "hook_reload"
 )
 
 // Item is one entry of the unified session projection. The pointer field
@@ -41,6 +43,8 @@ type Item struct {
 	SkillInventory *SkillInventory
 	SkillDelta     *SkillDelta
 	SkillInvoked   *SkillInvoked
+	HookFired      *HookFired
+	HookReload     *HookReload
 	// Matched reports whether a tool call has its result inside the same
 	// projected tail. An unmatched call stays visible for audit but must
 	// not become the recoverable tail of a normal conversation.
@@ -175,6 +179,18 @@ func Project(t Transcript) Projection {
 			if decodeData(e.Data, &invoked) == nil {
 				i := invoked
 				out.Items = append(out.Items, Item{Seq: e.Seq, Kind: ItemSkillInvoked, SkillInvoked: &i, Matched: true})
+			}
+		case EventHookFired:
+			var fired HookFired
+			if decodeData(e.Data, &fired) == nil {
+				h := fired
+				out.Items = append(out.Items, Item{Seq: e.Seq, Kind: ItemHookFired, HookFired: &h, Matched: true})
+			}
+		case EventHookReload:
+			var reload HookReload
+			if decodeData(e.Data, &reload) == nil {
+				h := reload
+				out.Items = append(out.Items, Item{Seq: e.Seq, Kind: ItemHookReload, HookReload: &h, Matched: true})
 			}
 		}
 	}

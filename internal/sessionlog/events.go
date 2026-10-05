@@ -87,6 +87,8 @@ const (
 	EventSkillInventory = "skill_inventory"
 	EventSkillDelta     = "skill_delta"
 	EventSkillInvoked   = "skill_invoked"
+	EventHookFired      = "hook_fired"
+	EventHookReload     = "hook_reload"
 )
 
 // SnapshotRef records a candidate file snapshot owned by this session.
@@ -242,6 +244,26 @@ type SkillInvoked struct {
 	Source string `json:"source"`
 	Entry  string `json:"entry"`
 	Args   string `json:"args,omitempty"`
+}
+
+const MaxHookOutput = 8 * 1024
+
+// HookFired records one hook execution that passed its condition.
+type HookFired struct {
+	HookID   string `json:"hook_id"`
+	Event    string `json:"event"`
+	Action   string `json:"action"`
+	Source   string `json:"source,omitempty"`
+	Success  bool   `json:"success"`
+	Rejected bool   `json:"rejected,omitempty"`
+	Output   string `json:"output,omitempty"`
+	RunID    string `json:"run_id,omitempty"`
+}
+
+// HookReload records a hooks configuration reload.
+type HookReload struct {
+	Before int `json:"before"`
+	After  int `json:"after"`
 }
 
 type RunStarted struct {

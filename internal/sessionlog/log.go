@@ -37,7 +37,7 @@ func Append(root, id, typ string, data any) (Event, error) {
 		return Event{}, errors.New("event type is required")
 	}
 	switch typ {
-	case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked:
+	case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload:
 	default:
 		return Event{}, fmt.Errorf("unknown event type %q", typ)
 	}
@@ -78,7 +78,7 @@ func Append(root, id, typ string, data any) (Event, error) {
 			}
 		}
 		switch typ {
-		case EventBoundary, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked:
+		case EventBoundary, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload:
 			if err := validateOwnedAppend(id, typ, data, replay.Events, seq+1); err != nil {
 				return Event{}, err
 			}
@@ -319,7 +319,7 @@ func replayFile(path, id string) (Transcript, error) {
 			return out, fmt.Errorf("session log invalid envelope at seq %d", expected)
 		}
 		switch e.Type {
-		case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked:
+		case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload:
 		default:
 			return out, fmt.Errorf("session log has unknown event type %q at seq %d", e.Type, e.Seq)
 		}
@@ -426,6 +426,22 @@ func replayFile(path, id string) (Transcript, error) {
 			}
 			if err := checkSkillInvoked(invoked); err != nil {
 				return out, fmt.Errorf("session log has invalid skill invoked event at seq %d: %v", e.Seq, err)
+			}
+		case EventHookFired:
+			var fired HookFired
+			if decodeData(e.Data, &fired) != nil {
+				return out, fmt.Errorf("session log has invalid hook fired event at seq %d", e.Seq)
+			}
+			if err := checkHookFired(fired); err != nil {
+				return out, fmt.Errorf("session log has invalid hook fired event at seq %d: %v", e.Seq, err)
+			}
+		case EventHookReload:
+			var reload HookReload
+			if decodeData(e.Data, &reload) != nil {
+				return out, fmt.Errorf("session log has invalid hook reload event at seq %d", e.Seq)
+			}
+			if err := checkHookReload(reload); err != nil {
+				return out, fmt.Errorf("session log has invalid hook reload event at seq %d: %v", e.Seq, err)
 			}
 		case EventRunStarted:
 			var started RunStarted
