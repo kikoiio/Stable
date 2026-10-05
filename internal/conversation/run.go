@@ -68,10 +68,31 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		return err
 	}
 	work := sessionlog.RunStarted{RunID: request.RunID, WorkKind: string(request.Work.Kind), GoalID: request.Work.GoalID, WorkItemID: request.Work.WorkItemID, Intent: request.Intent}
+	// The skill inventory is refreshed before the event mutex is taken: the
+	// gate journals its events under the same mutex, so calling it here keeps
+	// the lock order gate → event and avoids a re-entrant acquire.
+	var skillPrefix []llm.Message
+	if request.Work.Kind == agent.WorkSession && s.skills != nil {
+		snapshotText, deltaText, invErr := s.skills.SkillInventory(ctx, msg.SessionID)
+		if invErr != nil {
+			return invErr
+		}
+		if snapshotText != "" {
+			skillPrefix = append(skillPrefix, llm.Message{Role: "user", Content: snapshotText})
+		}
+		if deltaText != "" {
+			skillPrefix = append(skillPrefix, llm.Message{Role: "user", Content: deltaText})
+		}
+	}
 	s.eventMu.Lock()
 	if request.Work.Kind == agent.WorkSession {
 		history := sessionConversationMessages(s.deps.ProjectRoot, msg.SessionID)
 		prefix := []llm.Message{{Role: "system", Content: "你是 Stable 的通用 agent。读、搜、列只能访问正式工程只读视图；写、编辑只能写入本次运行的候选区。工具路径使用工作区相对路径。工具结果代表真实受控执行结果。"}}
+		// The skill inventory text is per-run context like the plan reminder:
+		// it rides after the system prefix (before the replayed history, so
+		// the stable snapshot sits at a fixed offset) and is deliberately not
+		// appended to the session log — the skill events keep it auditable.
+		prefix = append(prefix, skillPrefix...)
 		if plan.Mode == sessionlog.PlanModePlan && plan.PlanPath != "" {
 			// The plan workflow reminder is per-turn context, not session
 			// history: it is inserted after the replayed conversation and

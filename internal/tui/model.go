@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"stable/internal/agent"
+	"stable/internal/appconfig"
 	"stable/internal/candidate"
 	"stable/internal/commands"
 	"stable/internal/conversation"
@@ -19,6 +20,7 @@ import (
 	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/sessionlog"
+	"stable/internal/skills"
 )
 
 type Panel int
@@ -99,9 +101,16 @@ type Model struct {
 	registry          *commands.Registry
 	loader            *commands.Loader
 	host              *commandHost
+	// skills is the TUI-side skill catalog: it feeds the /skills listing and
+	// registers one slash command per skill behind the built-in and custom
+	// command names. The conversation service keeps its own instance.
+	skills *skills.Catalog
 	// commandReportShown marks that the loader's rejected-file report has
 	// already been surfaced once in the status line.
 	commandReportShown bool
+	// skillConflictShown marks that the skipped-skill-command report has
+	// already been surfaced once in the status line.
+	skillConflictShown bool
 }
 
 // commandHost bridges built-in Local closures with the live model: a
@@ -153,6 +162,17 @@ func receiveRunCmd(client *conversation.StreamClient) tea.Cmd {
 		return runStreamMsg{client: client, message: message, err: err}
 	}
 }
+
+// openSkillRunCmd starts a skill run; the same connection streams the run
+// events and closes at the outcome, mirroring the chat run path.
+func openSkillRunCmd(socket, sessionID, name, args string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		client, err := conversation.InvokeSkill(ctx, socket, sessionID, name, args)
+		return runStreamStartedMsg{client: client, err: err}
+	}
+}
 func resumeRunCmd(socket, sessionID, runID string, cursor uint64) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -199,6 +219,17 @@ func (m *Model) initCommands(root string) {
 		filepath.Join(root, ".stable", "commands"),
 		userCommandsDir(),
 	)
+	m.skills = skills.LoadCatalog(userSkillsDir(), filepath.Join(root, ".stable", "skills"))
+}
+
+// userSkillsDir returns the user-level skill directory; an unavailable home
+// directory or config base simply contributes no user skills.
+func userSkillsDir() string {
+	dir, err := appconfig.UserSkillsDir()
+	if err != nil {
+		return ""
+	}
+	return dir
 }
 
 // userCommandsDir returns the user-level custom command directory; an
@@ -211,11 +242,11 @@ func userCommandsDir() string {
 	return filepath.Join(home, ".config", "stable", "commands")
 }
 
-// refreshCommands rebuilds the registry from the fixed built-in set plus the
-// loader's custom commands. Built-ins register first, so a custom file that
-// shadows a built-in name is skipped by RegisterOptional and the built-in
-// stays authoritative. Rebuilding instead of accumulating also lets a deleted
-// custom file disappear from completion and dispatch.
+// refreshCommands rebuilds the registry from the fixed built-in set, the
+// loader's custom commands, and one command per skill — in that order, so a
+// custom file shadows a skill name and a built-in shadows both. Rebuilding
+// instead of accumulating also lets a deleted custom file or skill disappear
+// from completion and dispatch.
 func (m *Model) refreshCommands() {
 	if m.host == nil || m.loader == nil || m.registry == nil {
 		m.initCommands(m.Root)
@@ -228,6 +259,37 @@ func (m *Model) refreshCommands() {
 			registry.RegisterOptional(c)
 		}
 		m.surfaceCommandReport(rejected)
+	}
+	var conflicts []string
+	if m.skills != nil {
+		if m.skills.NeedsReload() {
+			m.skills.Reload()
+		}
+		for _, s := range m.skills.List() {
+			name, description := s.Meta.Name, s.Meta.Description
+			command := &commands.Command{
+				Name:        name,
+				Description: "（技能）" + description,
+				Kind:        commands.KindLocal,
+				Local: func(args string) {
+					m2 := m.host.model
+					m2.Pending = true
+					m2.Status = "正在激活技能 " + name + "…"
+					m2.Composer.SetValue("")
+					m2.recordHistory(m.host.raw)
+					m.host.send(openSkillRunCmd(m2.Socket, m2.ActiveSession, name, args))
+				},
+			}
+			if !registry.RegisterOptional(command) {
+				conflicts = append(conflicts, name)
+			}
+		}
+	}
+	if len(conflicts) > 0 && !m.skillConflictShown {
+		m.skillConflictShown = true
+		if m.Status == "" {
+			m.Status = "部分技能命令与既有命令同名，已跳过：" + strings.Join(conflicts, "、")
+		}
 	}
 	m.registry = registry
 }
@@ -366,6 +428,43 @@ func registerBuiltins(host *commandHost, registry *commands.Registry) {
 		m.Composer.SetValue("")
 		m.Events = append(m.Events, sessionlog.Event{Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "系统", Text: renderHelp(m.registry.List()), Kind: "text"}})
 		m.Transcript.SetEvents(m.Events)
+	})
+	set("skills", "列出可用技能", "reload", func(args string) {
+		m := host.model
+		m.Composer.SetValue("")
+		if strings.TrimSpace(args) == "reload" {
+			if m.skills == nil {
+				m.Status = "技能目录不可用。"
+				return
+			}
+			before := len(m.skills.List())
+			m.skills.Reload()
+			after := len(m.skills.List())
+			m.Pending = true
+			m.Status = fmt.Sprintf("技能已重载：%d → %d。", before, after)
+			m.recordHistory(host.raw)
+			host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "skill_reload", SessionID: m.ActiveSession}))
+			return
+		}
+		if m.skills == nil {
+			m.Status = "技能目录不可用。"
+			return
+		}
+		list := m.skills.List()
+		var b strings.Builder
+		b.WriteString("可用技能：")
+		for _, s := range list {
+			fmt.Fprintf(&b, "\n- /%s — %s（来源：%s）", s.Meta.Name, s.Meta.Description, s.Source)
+		}
+		if len(list) == 0 {
+			b.WriteString("\n（无）\n提示：把技能放到项目的 .stable/skills/<名称>/SKILL.md 或用户级 ~/.config/stable/skills/<名称>/SKILL.md。")
+		}
+		m.Events = append(m.Events, sessionlog.Event{Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "系统", Text: b.String(), Kind: "text"}})
+		m.Transcript.SetEvents(m.Events)
+		if m.ActiveSession != "" {
+			m.Pending = true
+			host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "skill_list", SessionID: m.ActiveSession}))
+		}
 	})
 }
 
@@ -607,6 +706,24 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 			// The transcript projection renders todo snapshots; the TUI only
 			// stores the latest list here.
 			m.Todos = append([]sessionlog.TaskSnapshot(nil), x.Tasks...)
+		case "skill_report":
+			if x.SkillReport != nil {
+				switch x.SkillReport.Kind {
+				case conversation.SkillReportError:
+					m.Status = "技能调用失败：" + x.SkillReport.Error
+				case conversation.SkillReportReload:
+					m.Status = fmt.Sprintf("服务端技能已重载：%d → %d。", x.SkillReport.Before, x.SkillReport.After)
+				case conversation.SkillReportDelta:
+					m.Status = "新增可用技能：" + strings.Join(x.SkillReport.Added, "、")
+				}
+			}
+		case "skill_list":
+			if len(x.SkillActivated) > 0 {
+				m.Events = append(m.Events, sessionlog.Event{Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "系统", Text: "本会话已激活技能：" + strings.Join(x.SkillActivated, "、"), Kind: "text"}})
+				m.Transcript.SetEvents(m.Events)
+			} else {
+				m.Status = "当前会话没有已激活技能。"
+			}
 		case "plan_state":
 			if x.PlanState != nil {
 				m.Plan = x.PlanState
@@ -1455,6 +1572,19 @@ func (m *Model) applyRunMessage(message conversation.ServerMsg) {
 		m.applyQuestions(message.Questions, false)
 	case "todo":
 		m.Todos = append([]sessionlog.TaskSnapshot(nil), message.Tasks...)
+	case "skill_report":
+		// Live skill pushes on a run stream: the one-shot delta notice and
+		// reload confirmations surface in the status line.
+		if message.SkillReport != nil {
+			switch message.SkillReport.Kind {
+			case conversation.SkillReportDelta:
+				m.Status = "新增可用技能：" + strings.Join(message.SkillReport.Added, "、")
+			case conversation.SkillReportReload:
+				m.Status = fmt.Sprintf("服务端技能已重载：%d → %d。", message.SkillReport.Before, message.SkillReport.After)
+			case conversation.SkillReportError:
+				m.Status = "技能调用失败：" + message.SkillReport.Error
+			}
+		}
 	case "plan_state":
 		if message.PlanState != nil {
 			m.Plan = message.PlanState

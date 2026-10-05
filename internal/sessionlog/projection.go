@@ -4,37 +4,43 @@ package sessionlog
 type ItemKind string
 
 const (
-	ItemMessage      ItemKind = "message"
-	ItemToolCall     ItemKind = "tool_call"
-	ItemToolResult   ItemKind = "tool_result"
-	ItemSummary      ItemKind = "summary"
-	ItemRunTerminal  ItemKind = "run_terminal"
-	ItemSnapshot     ItemKind = "snapshot"
-	ItemRewind       ItemKind = "rewind"
-	ItemQuestion     ItemKind = "question"
-	ItemReply        ItemKind = "reply"
-	ItemPlanMode     ItemKind = "plan_mode"
-	ItemPlanApproval ItemKind = "plan_approval"
-	ItemTodo         ItemKind = "todo_update"
+	ItemMessage        ItemKind = "message"
+	ItemToolCall       ItemKind = "tool_call"
+	ItemToolResult     ItemKind = "tool_result"
+	ItemSummary        ItemKind = "summary"
+	ItemRunTerminal    ItemKind = "run_terminal"
+	ItemSnapshot       ItemKind = "snapshot"
+	ItemRewind         ItemKind = "rewind"
+	ItemQuestion       ItemKind = "question"
+	ItemReply          ItemKind = "reply"
+	ItemPlanMode       ItemKind = "plan_mode"
+	ItemPlanApproval   ItemKind = "plan_approval"
+	ItemTodo           ItemKind = "todo_update"
+	ItemSkillInventory ItemKind = "skill_inventory"
+	ItemSkillDelta     ItemKind = "skill_delta"
+	ItemSkillInvoked   ItemKind = "skill_invoked"
 )
 
 // Item is one entry of the unified session projection. The pointer field
 // matching Kind is set; the rest are nil.
 type Item struct {
-	Seq      uint64
-	Kind     ItemKind
-	Message  *Message
-	Call     *ToolCall
-	Result   *ToolResult
-	Summary  *Boundary
-	Run      *RunEvent
-	Snapshot *SnapshotRef
-	Rewind   *RewindRecord
-	Question *PendingQuestion
-	Reply    *QuestionReply
-	PlanMode *PlanMode
-	Approval *PlanApprovalRecord
-	Todo     *TodoUpdate
+	Seq            uint64
+	Kind           ItemKind
+	Message        *Message
+	Call           *ToolCall
+	Result         *ToolResult
+	Summary        *Boundary
+	Run            *RunEvent
+	Snapshot       *SnapshotRef
+	Rewind         *RewindRecord
+	Question       *PendingQuestion
+	Reply          *QuestionReply
+	PlanMode       *PlanMode
+	Approval       *PlanApprovalRecord
+	Todo           *TodoUpdate
+	SkillInventory *SkillInventory
+	SkillDelta     *SkillDelta
+	SkillInvoked   *SkillInvoked
 	// Matched reports whether a tool call has its result inside the same
 	// projected tail. An unmatched call stays visible for audit but must
 	// not become the recoverable tail of a normal conversation.
@@ -151,6 +157,24 @@ func Project(t Transcript) Projection {
 			if decodeData(e.Data, &update) == nil {
 				u := update
 				out.Items = append(out.Items, Item{Seq: e.Seq, Kind: ItemTodo, Todo: &u, Matched: true})
+			}
+		case EventSkillInventory:
+			var inv SkillInventory
+			if decodeData(e.Data, &inv) == nil {
+				s := inv
+				out.Items = append(out.Items, Item{Seq: e.Seq, Kind: ItemSkillInventory, SkillInventory: &s, Matched: true})
+			}
+		case EventSkillDelta:
+			var delta SkillDelta
+			if decodeData(e.Data, &delta) == nil {
+				d := delta
+				out.Items = append(out.Items, Item{Seq: e.Seq, Kind: ItemSkillDelta, SkillDelta: &d, Matched: true})
+			}
+		case EventSkillInvoked:
+			var invoked SkillInvoked
+			if decodeData(e.Data, &invoked) == nil {
+				i := invoked
+				out.Items = append(out.Items, Item{Seq: e.Seq, Kind: ItemSkillInvoked, SkillInvoked: &i, Matched: true})
 			}
 		}
 	}

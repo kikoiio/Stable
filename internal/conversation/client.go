@@ -31,6 +31,21 @@ func OpenRun(ctx context.Context, socket string, request agent.ExecutionRequest)
 	return client, nil
 }
 
+// InvokeSkill opens a skill run: the service activates the skill and binds
+// this connection to the resulting run, so run events (and the plain error
+// plus done on activation failure) stream back over the returned client.
+func InvokeSkill(ctx context.Context, socket, sessionID, name, args string) (*StreamClient, error) {
+	client, err := openStream(ctx, socket)
+	if err != nil {
+		return nil, err
+	}
+	if err = client.Send(ClientMsg{Op: "skill_invoke", SessionID: sessionID, SkillName: name, SkillArgs: args}); err != nil {
+		client.Close()
+		return nil, err
+	}
+	return client, nil
+}
+
 func SubscribeRun(ctx context.Context, socket, sessionID, runID string, afterSeq uint64) (*StreamClient, error) {
 	client, err := openStream(ctx, socket)
 	if err != nil {

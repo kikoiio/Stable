@@ -54,6 +54,10 @@ type ToolExecutorDeps struct {
 	// task_create/task_get/task_list/task_update tools. Nil makes them
 	// unavailable; the nil behavior is defined by the M06 tool dispatch.
 	TodoProvider TodoProvider
+	// SkillProvider, when set, serves skill activation for load_skill and the
+	// per-session inventory used by run-context injection. Nil makes load_skill
+	// unavailable; the nil behavior is defined by the M07-A tool dispatch.
+	SkillProvider SkillProvider
 }
 
 // OptionSpec is one choice shown to the user for a question.
@@ -125,6 +129,17 @@ type TodoProvider interface {
 	For(sessionID string) *todo.TaskList
 }
 
+// SkillProvider resolves skill activations and the per-session skill
+// inventory on the host. LoadSkill activates a skill and returns its rendered
+// body; unknown skills, fork-mode skills and unreadable bodies come back as
+// errors. SkillInventory returns the stable inventory text for run-context
+// injection plus, when new skills appeared since the last run, a one-shot
+// delta reminder.
+type SkillProvider interface {
+	LoadSkill(ctx context.Context, sessionID, name, args string) (string, error)
+	SkillInventory(ctx context.Context, sessionID string) (snapshotText, deltaReminder string, err error)
+}
+
 // ToolExecutorOption customizes the optional M06 tool dependencies at factory
 // construction so existing deps literal call sites stay unchanged.
 type ToolExecutorOption func(*ToolExecutorDeps)
@@ -143,6 +158,12 @@ func WithPlanSink(sink PlanSink) ToolExecutorOption {
 // task_create/task_get/task_list/task_update tools.
 func WithTodoProvider(provider TodoProvider) ToolExecutorOption {
 	return func(deps *ToolExecutorDeps) { deps.TodoProvider = provider }
+}
+
+// WithSkillProvider injects the host skill provider used by load_skill and
+// the run-context skill inventory.
+func WithSkillProvider(provider SkillProvider) ToolExecutorOption {
+	return func(deps *ToolExecutorDeps) { deps.SkillProvider = provider }
 }
 
 type ToolExecutorFactory struct{ deps ToolExecutorDeps }

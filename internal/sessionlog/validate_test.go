@@ -459,3 +459,123 @@ func TestTodoUpdateValidation(t *testing.T) {
 		t.Fatalf("todo round-trip = %+v", got)
 	}
 }
+
+func TestSkillEventValidation(t *testing.T) {
+	root := t.TempDir()
+	s, err := Create(root, "skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	overflow := make([]SkillInfo, MaxSkillListEntries+1)
+	for i := range overflow {
+		overflow[i] = SkillInfo{Name: fmt.Sprintf("s%d", i), Description: "d", Source: "user"}
+	}
+	bad := []struct {
+		name string
+		typ  string
+		data any
+	}{
+		{"inventory missing name", EventSkillInventory, SkillInventory{Skills: []SkillInfo{{Description: "d", Source: "user"}}}},
+		{"inventory over limit", EventSkillInventory, SkillInventory{Skills: overflow}},
+		{"delta missing name", EventSkillDelta, SkillDelta{Added: []SkillInfo{{Description: "d", Source: "project"}}}},
+		{"delta over limit", EventSkillDelta, SkillDelta{Added: overflow}},
+		{"invoked missing name", EventSkillInvoked, SkillInvoked{Entry: SkillEntrySlash}},
+		{"invoked missing entry", EventSkillInvoked, SkillInvoked{Name: "code-review"}},
+		{"invoked invalid entry", EventSkillInvoked, SkillInvoked{Name: "code-review", Entry: "auto"}},
+	}
+	for _, tc := range bad {
+		if _, err = Append(root, s.ID, tc.typ, tc.data); err == nil {
+			t.Fatalf("%s: invalid skill event accepted", tc.name)
+		}
+	}
+
+	info := SkillInfo{Name: "code-review", Description: "Review the diff", WhenToUse: "before commits", Source: "user"}
+	if _, err = Append(root, s.ID, EventSkillInventory, SkillInventory{Skills: []SkillInfo{info}}); err != nil {
+		t.Fatalf("valid skill_inventory rejected: %v", err)
+	}
+	if _, err = Append(root, s.ID, EventSkillInventory, SkillInventory{Skills: []SkillInfo{{Name: "other", Source: "user"}}}); err == nil {
+		t.Fatal("second skill_inventory accepted")
+	}
+	if _, err = Append(root, s.ID, EventSkillDelta, SkillDelta{Added: []SkillInfo{{Name: "fresh-skill", Description: "New", Source: "project"}}}); err != nil {
+		t.Fatalf("valid skill_delta rejected: %v", err)
+	}
+	if _, err = Append(root, s.ID, EventSkillDelta, SkillDelta{Added: []SkillInfo{}}); err != nil {
+		t.Fatalf("empty skill_delta rejected: %v", err)
+	}
+	if _, err = Append(root, s.ID, EventSkillInvoked, SkillInvoked{Name: "code-review", Source: "user", Entry: SkillEntrySlash, Args: "focus on memory"}); err != nil {
+		t.Fatalf("valid slash skill_invoked rejected: %v", err)
+	}
+	if _, err = Append(root, s.ID, EventSkillInvoked, SkillInvoked{Name: "fresh-skill", Source: "project", Entry: SkillEntryTool}); err != nil {
+		t.Fatalf("valid tool skill_invoked rejected: %v", err)
+	}
+	if _, err = Append(root, s.ID, EventSkillInvoked, SkillInvoked{Name: "code-review", Source: "user", Entry: SkillEntryTool}); err != nil {
+		t.Fatalf("repeated skill invocation rejected: %v", err)
+	}
+
+	replayed, err := Replay(root, s.ID)
+	if err != nil {
+		t.Fatalf("replay of skill log: %v", err)
+	}
+	var inv SkillInventory
+	if err = decodeData(replayed.Events[1].Data, &inv); err != nil {
+		t.Fatal(err)
+	}
+	if len(inv.Skills) != 1 || inv.Skills[0].Name != "code-review" || inv.Skills[0].WhenToUse != "before commits" || inv.Skills[0].Source != "user" {
+		t.Fatalf("inventory round-trip = %+v", inv)
+	}
+	var delta SkillDelta
+	if err = decodeData(replayed.Events[2].Data, &delta); err != nil {
+		t.Fatal(err)
+	}
+	if len(delta.Added) != 1 || delta.Added[0].Name != "fresh-skill" {
+		t.Fatalf("delta round-trip = %+v", delta)
+	}
+	var invoked SkillInvoked
+	if err = decodeData(replayed.Events[4].Data, &invoked); err != nil {
+		t.Fatal(err)
+	}
+	if invoked.Name != "code-review" || invoked.Entry != SkillEntrySlash || invoked.Args != "focus on memory" {
+		t.Fatalf("invoked round-trip = %+v", invoked)
+	}
+}
+
+func TestReplayRejectsDuplicateSkillInventory(t *testing.T) {
+	root := t.TempDir()
+	s, err := Create(root, "corrupt-skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventSkillInventory, SkillInventory{Skills: []SkillInfo{{Name: "a", Source: "user"}}}); err != nil {
+		t.Fatal(err)
+	}
+	// Bypass append validation to simulate a corrupted or downgraded writer.
+	raw, err := json.Marshal(Event{
+		SchemaVersion: SchemaVersion,
+		SessionID:     s.ID,
+		Seq:           3,
+		At:            time.Now().UTC(),
+		Type:          EventSkillInventory,
+		Data:          SkillInventory{Skills: []SkillInfo{{Name: "b", Source: "user"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := SessionPath(root, s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.Write(append(raw, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Replay(root, s.ID); err == nil || !strings.Contains(err.Error(), "already has a skill inventory") {
+		t.Fatalf("replay accepted duplicate skill inventory: %v", err)
+	}
+}

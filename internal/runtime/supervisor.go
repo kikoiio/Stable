@@ -273,11 +273,12 @@ func runtimeToolSchemas() []llm.ToolSchema {
 		"task_get":       "task_get",
 		"task_list":      "task_list",
 		"task_update":    "task_update",
+		"load_skill":     "load_skill",
 	}
 	registry := tools.CreateDefaultTools().Registry
-	// M06 tools live outside the default registry; the copy keeps append from
-	// aliasing the registry slice.
-	sources := append(append([]map[string]any{}, registry.GetAllSchemas()...), execution.M06ToolSchemas()...)
+	// M06/M07 tools live outside the default registry; the copy keeps append
+	// from aliasing the registry slice.
+	sources := append(append(append([]map[string]any{}, registry.GetAllSchemas()...), execution.M06ToolSchemas()...), execution.SkillToolSchemas()...)
 	schemas := make([]llm.ToolSchema, 0, len(nameMap)+1)
 	for _, schema := range sources {
 		internalName, _ := schema["name"].(string)
@@ -296,6 +297,16 @@ func runtimeToolSchemas() []llm.ToolSchema {
 	})
 	sort.Slice(schemas, func(i, j int) bool { return schemas[i].Name < schemas[j].Name })
 	return schemas
+}
+
+// userSkillsDir returns the user-level skill directory for the skill gate;
+// an unavailable config base simply contributes no user skills.
+func userSkillsDir() string {
+	dir, err := appconfig.UserSkillsDir()
+	if err != nil {
+		return ""
+	}
+	return dir
 }
 
 // startChatService runs the persistent conversation service inside the
@@ -343,6 +354,9 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 	askSink := conversation.NewAskAdapter(nil)
 	todoProvider := conversation.NewTodoProvider(nil)
 	planSink := conversation.NewPlanApprovalSink(nil)
+	// The skill gate reads the same directories the TUI lists; Serve binds it
+	// to the service so its event appends share the service event mutex.
+	skillGate := conversation.NewSkillGate(nil, userSkillsDir(), filepath.Join(p.Share, ".stable", "skills"))
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
 		snapshotStore, err = candidate.NewSnapshotStore(p.Share, c.Snapshots.ProjectBytes(), c.Snapshots.ManifestsPerCandidate(), snapshotCredentials(c.Model.APIKey))
 		if err != nil {
@@ -359,7 +373,7 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 			Snapshots:          snapshotStore,
 			QuestionSink:       askSink,
 			TodoProvider:       todoProvider,
-		}, execution.WithPlanSink(planSink))
+		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate))
 		toolSchemas = runtimeToolSchemas()
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, chatProvider)
 		if fellBack {
@@ -376,6 +390,7 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 		CandidateCheckers:   []candidate.Checker{candidate.KicadERCChecker{Sandbox: sandbox.LinuxManager{}, RunRoot: p.Goals}},
 		ContextWindowTokens: c.Model.ContextWindowTokens,
 		Snapshots:           snapshotStore,
+		Skills:              skillGate,
 	})
 	if err != nil {
 		return err

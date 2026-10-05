@@ -106,6 +106,30 @@ var (
 	TaskUpdateSchema = m06TaskSchema(todo.TaskUpdateSchema)
 )
 
+// LoadSkillSchema is the provider-facing schema of the load_skill tool. The
+// executor resolves the name through the host SkillProvider; skill names come
+// from the session's skill inventory, not from this static description.
+var LoadSkillSchema = map[string]any{
+	"name": "load_skill",
+	"description": `Load the full instructions of a skill by name and activate it for the current session. Use this when the skill inventory or a delta notice lists a skill relevant to the current task.
+
+The skill body is returned as the tool result and its guidance applies to the conversation from this point on. Call it again later to re-read the freshest body (for example after context compaction).`,
+	"input_schema": map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name": map[string]any{
+				"type":        "string",
+				"description": "The skill name, exactly as listed in the available skills inventory.",
+			},
+			"args": map[string]any{
+				"type":        "string",
+				"description": "Optional arguments forwarded into the skill body. When the skill body contains an $ARGUMENTS placeholder it is substituted; otherwise the arguments are appended as the user request section.",
+			},
+		},
+		"required": []string{"name"},
+	},
+}
+
 // M06ToolSchemas returns the six M06 tool schemas in model-name order, ready
 // for the chatserve/runtime schema whitelists and executor dispatch tests.
 func M06ToolSchemas() []map[string]any {
@@ -123,4 +147,10 @@ func M06ToolSchemas() []map[string]any {
 		return left < right
 	})
 	return schemas
+}
+
+// SkillToolSchemas returns the M07-A tool schemas in model-name order, ready
+// for the chatserve/runtime schema whitelists and executor dispatch tests.
+func SkillToolSchemas() []map[string]any {
+	return []map[string]any{LoadSkillSchema}
 }
