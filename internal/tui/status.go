@@ -15,7 +15,7 @@ type StatusState struct {
 	Text  string
 }
 
-func renderStatus(s StatusState, session string, mode ViewMode, width int) string {
+func renderStatus(s StatusState, session string, mode ViewMode, width int, planMode bool) string {
 	phase := "就绪"
 	switch s.Phase {
 	case StatusLoading:
@@ -33,7 +33,13 @@ func renderStatus(s StatusState, session string, mode ViewMode, width int) strin
 	if mode != ChatView {
 		hints = "↑/↓ 选择  Enter 确认  Esc 返回  Ctrl+C 退出"
 	}
-	line := fmt.Sprintf("Stable · %s · %s · %s", truncate(session, 20), view, hints)
+	line := fmt.Sprintf("Stable · %s · %s", truncate(session, 20), view)
+	// Plan mode is session runtime state (session_load restore or plan_state
+	// pushes); the segment keeps it visible on every status line.
+	if planMode {
+		line += " · 计划模式"
+	}
+	line += " · " + hints
 	if s.Text != "" {
 		line += " · " + s.Text
 	}
