@@ -44,7 +44,8 @@ type Task struct {
 // and nil slices leave the corresponding field untouched; AddBlocks and
 // AddBlockedBy append to the existing dependencies with de-duplication,
 // matching the task_update tool arguments. A patch whose Status is
-// StatusDeleted removes the task.
+// StatusDeleted removes the task. Metadata, when set, replaces the task's
+// metadata map wholesale so task_update can attach or clear key/value pairs.
 type UpdatePatch struct {
 	Subject      *string
 	Description  *string
@@ -53,6 +54,7 @@ type UpdatePatch struct {
 	Owner        *string
 	AddBlocks    []string
 	AddBlockedBy []string
+	Metadata     *map[string]string
 }
 
 // ErrNotFound reports that no task with the requested id exists.
@@ -198,6 +200,9 @@ func (tl *TaskList) Update(id string, patch UpdatePatch) (Task, error) {
 	}
 	if patch.Owner != nil {
 		task.Owner = *patch.Owner
+	}
+	if patch.Metadata != nil {
+		task.Metadata = copyMetadata(*patch.Metadata)
 	}
 	if patch.Status != nil {
 		switch *patch.Status {
