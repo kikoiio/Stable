@@ -624,6 +624,8 @@ func (e *toolRunExecutor) executeHostTool(ctx context.Context, call llm.ToolUse,
 		return e.executeExitPlanMode(ctx, call, outcome), true
 	case "task_create", "task_get", "task_list", "task_update":
 		return e.executeTaskTool(call, args, outcome), true
+	case "load_skill":
+		return e.executeLoadSkill(ctx, call, args, outcome), true
 	case "write_file", "edit_file":
 		if target, ok := e.planFileTarget(args); ok {
 			return e.executePlanFileWrite(ctx, call, args, target, outcome), true
@@ -982,6 +984,30 @@ func (e *toolRunExecutor) executeTaskTool(call llm.ToolUse, args map[string]any,
 		return e.executeTaskUpdate(list, args, outcome)
 	}
 	outcome.Content = fmt.Sprintf("Error: unknown tool %q", call.Name)
+	return outcome
+}
+
+// executeLoadSkill activates a skill through the host SkillProvider and
+// returns its rendered body as the tool result. The provider composes all
+// error cases — unknown skill (with the available names), fork-mode skills,
+// unreadable bodies — so the executor only validates the arguments.
+func (e *toolRunExecutor) executeLoadSkill(ctx context.Context, call llm.ToolUse, args map[string]any, outcome agent.ToolOutcome) agent.ToolOutcome {
+	name, _ := args["name"].(string)
+	if strings.TrimSpace(name) == "" {
+		outcome.Content = "Error: name is required"
+		return outcome
+	}
+	if e.deps.SkillProvider == nil {
+		outcome.Content = "Error: 技能通道不可用"
+		return outcome
+	}
+	skillArgs, _ := args["args"].(string)
+	body, err := e.deps.SkillProvider.LoadSkill(ctx, e.request.Work.SessionID, name, skillArgs)
+	if err != nil {
+		outcome.Content = "Error: " + err.Error()
+		return outcome
+	}
+	outcome.Status, outcome.IsError, outcome.Content = agent.ToolSucceeded, false, "# Skill: "+name+"\n\n"+body
 	return outcome
 }
 
