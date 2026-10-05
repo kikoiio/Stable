@@ -15,6 +15,7 @@ import (
 	"stable/internal/candidate"
 	"stable/internal/llm"
 	"stable/internal/permission"
+	"stable/internal/redact"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
 )
@@ -116,11 +117,16 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	return nil
 }
 
+// redactRunCredential strips the provider credential from text before it
+// reaches the model or the session log. A credential too short for
+// redact.Redact to identify safely is still replaced literally: leaking it
+// is worse than the mangling risk of a short replacement.
 func redactRunCredential(text, credential string) string {
-	if credential == "" {
-		return text
+	redacted, err := redact.Redact(text, []string{credential})
+	if err != nil {
+		return strings.ReplaceAll(text, credential, redact.Placeholder)
 	}
-	return strings.ReplaceAll(text, credential, "[credential redacted]")
+	return redacted
 }
 
 func sessionConversationMessages(root, sessionID string) []llm.Message {

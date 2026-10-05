@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"go.temporal.io/sdk/client"
 	"stable/internal/core"
@@ -188,7 +187,7 @@ func redactProviderCredential(text string, providers ...any) string {
 		if !ok || p == nil || p.Config.APIKey == "" {
 			continue
 		}
-		text = strings.ReplaceAll(text, p.Config.APIKey, "[credential redacted]")
+		text = redactRunCredential(text, p.Config.APIKey)
 	}
 	return text
 }

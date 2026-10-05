@@ -16,6 +16,7 @@ import (
 	"stable/internal/candidate"
 	"stable/internal/llm"
 	"stable/internal/permission"
+	"stable/internal/redact"
 	"stable/internal/sandbox"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
@@ -628,11 +629,16 @@ func (e *toolRunExecutor) finish(outcome agent.ToolOutcome, started time.Time) a
 	return outcome
 }
 
+// redact strips the provider credential from tool output before it reaches
+// the model or the session log. A credential too short for redact.Redact to
+// identify safely is still replaced literally: leaking it is worse than the
+// mangling risk of a short replacement.
 func (e *toolRunExecutor) redact(value string) string {
-	if e.deps.ProviderCredential != "" {
-		value = strings.ReplaceAll(value, e.deps.ProviderCredential, "[credential redacted]")
+	redacted, err := redact.Redact(value, []string{e.deps.ProviderCredential})
+	if err != nil {
+		return strings.ReplaceAll(value, e.deps.ProviderCredential, redact.Placeholder)
 	}
-	return value
+	return redacted
 }
 
 func redactJSON(value any, credential string) any {
@@ -643,7 +649,10 @@ func redactJSON(value any, credential string) any {
 	if err != nil {
 		return "[input redacted]"
 	}
-	text := strings.ReplaceAll(string(encoded), credential, "[credential redacted]")
+	text, err := redact.Redact(string(encoded), []string{credential})
+	if err != nil {
+		text = strings.ReplaceAll(string(encoded), credential, redact.Placeholder)
+	}
 	var redacted any
 	if json.Unmarshal([]byte(text), &redacted) != nil {
 		return "[input redacted]"
