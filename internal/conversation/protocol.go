@@ -85,6 +85,29 @@ type ServerMsg struct {
 	// catalog infos and the session's activated skill names.
 	Skills         []sessionlog.SkillInfo `json:"skills,omitempty"`
 	SkillActivated []string               `json:"skill_activated,omitempty"`
+	HookList       *HookListMsg           `json:"hook_list,omitempty"`
+	HookReport     *HookReportMsg         `json:"hook_report,omitempty"`
+}
+
+// HookSummary is one loaded hook in the merged view.
+type HookSummary struct {
+	ID     string `json:"id"`
+	Event  string `json:"event"`
+	Action string `json:"action"`
+	Source string `json:"source"`
+	Reject bool   `json:"reject,omitempty"`
+	Once   bool   `json:"once,omitempty"`
+	Async  bool   `json:"async,omitempty"`
+}
+
+type HookListMsg struct {
+	Hooks      []HookSummary `json:"hooks"`
+	Rejections []string      `json:"rejections,omitempty"`
+}
+
+type HookReportMsg struct {
+	Before int `json:"before"`
+	After  int `json:"after"`
 }
 
 // SkillReport kinds for the ServerMsg SkillReport payload.
@@ -108,7 +131,7 @@ type SkillReport struct {
 
 func validOp(op string) bool {
 	switch op {
-	case "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list":
+	case "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list", "hooks_list", "hooks_reload":
 		return true
 	}
 	return false

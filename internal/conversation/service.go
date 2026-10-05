@@ -44,6 +44,7 @@ type Deps struct {
 	// skill_reload and skill_list ops, the load_skill tool provider and the
 	// per-run skill inventory injection. Nil keeps the skill surface closed.
 	Skills    *SkillGate
+	Hooks     *HookGate
 	Refresher core.DependencyRefresher
 	PollEvery time.Duration // goal status poll interval; 0 defaults to 2s
 }
@@ -85,6 +86,7 @@ type Service struct {
 	// the skill surface. The gate itself also keeps a service reference (set
 	// by Bind) so its event appends share the service event mutex.
 	skills *SkillGate
+	hooks  *HookGate
 }
 
 type clientSubscription struct {
@@ -102,9 +104,12 @@ func Serve(ctx context.Context, deps Deps) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{deps: deps, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills}
+	s := &Service{deps: deps, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks}
 	if deps.Skills != nil {
 		deps.Skills.Bind(s)
+	}
+	if deps.Hooks != nil {
+		deps.Hooks.Bind(s)
 	}
 	go s.pollGoals(ctx)
 	go func() {

@@ -109,6 +109,10 @@ func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) 
 		return s.reloadSkills()
 	case "skill_list":
 		return s.listSkills(c)
+	case "hooks_list":
+		return s.listHooks()
+	case "hooks_reload":
+		return s.reloadHooks(c)
 	case "history":
 		history, err := s.deps.Store.ListMessages(ctx)
 		if err != nil {

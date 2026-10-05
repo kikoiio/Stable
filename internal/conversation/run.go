@@ -84,6 +84,12 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 			skillPrefix = append(skillPrefix, llm.Message{Role: "user", Content: deltaText})
 		}
 	}
+	var hookPrefix []llm.Message
+	if s.hooks != nil {
+		if notice := s.hooks.DrainNotifications(msg.SessionID); notice != "" {
+			hookPrefix = append(hookPrefix, llm.Message{Role: "user", Content: notice})
+		}
+	}
 	s.eventMu.Lock()
 	if request.Work.Kind == agent.WorkSession {
 		history := sessionConversationMessages(s.deps.ProjectRoot, msg.SessionID)
@@ -93,6 +99,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		// the stable snapshot sits at a fixed offset) and is deliberately not
 		// appended to the session log — the skill events keep it auditable.
 		prefix = append(prefix, skillPrefix...)
+		prefix = append(prefix, hookPrefix...)
 		if plan.Mode == sessionlog.PlanModePlan && plan.PlanPath != "" {
 			// The plan workflow reminder is per-turn context, not session
 			// history: it is inserted after the replayed conversation and
@@ -138,6 +145,12 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	}
 	s.mu.Unlock()
 	s.eventMu.Unlock()
+	if request.Work.Kind != agent.WorkSession && len(hookPrefix) > 0 {
+		request.Messages = append(hookPrefix, request.Messages...)
+	}
+	if s.hooks != nil {
+		s.hooks.RunStart(msg.SessionID, request.RunID, request.Intent)
+	}
 
 	handle, err := s.deps.Runner.Start(ctx, request)
 	if err != nil {
@@ -264,7 +277,15 @@ func sessionConversationMessages(root, sessionID string) []llm.Message {
 }
 
 func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHandle) {
+	var textOut strings.Builder
 	for event := range handle.Events {
+		if event.Kind == agent.EventTextDelta {
+			var payload struct {
+				Text string `json:"text"`
+			}
+			_ = json.Unmarshal(event.Payload, &payload)
+			textOut.WriteString(payload.Text)
+		}
 		persisted := sessionlog.RunEvent{
 			ID: event.ID, RunID: event.RunID, SessionID: event.SessionID,
 			RunSeq: event.RunSeq, At: event.At, Kind: string(event.Kind), Payload: event.Payload,
@@ -314,6 +335,20 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 		s.broadcastRun(ServerMsg{Type: "run_event", RunID: request.RunID, RunEvent: &persisted, Cursor: stored.Seq}, request.Work.SessionID, request.RunID, stored.Seq)
 	}
 	outcome := <-handle.Done
+	if s.hooks != nil {
+		message := textOut.String()
+		if outcome.Status != agent.RunCompleted {
+			summary := string(outcome.Status)
+			if outcome.Error != nil && outcome.Error.Message != "" {
+				summary += ": " + outcome.Error.Message
+			}
+			message = summary
+		}
+		if len([]rune(message)) > sessionlog.MaxHookOutput {
+			message = string([]rune(message)[:sessionlog.MaxHookOutput])
+		}
+		s.hooks.RunEnd(request.Work.SessionID, request.RunID, string(outcome.Status), message)
+	}
 	if err := s.finalizeRunCandidate(context.Background(), request); err != nil {
 		s.broadcastRun(ServerMsg{Type: "error", RunID: request.RunID, Error: "could not finalize candidate: " + err.Error()}, request.Work.SessionID, request.RunID, 0)
 	}
