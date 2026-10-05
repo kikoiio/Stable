@@ -41,6 +41,10 @@ type Deps struct {
 	// Snapshots is the candidate snapshot store used by snapshot_list and
 	// snapshot_rewind; nil makes both report snapshots as unavailable.
 	Snapshots *candidate.SnapshotStore
+	// Skills, when set, enables the M07-A skill feature: the skill_invoke,
+	// skill_reload and skill_list ops, the load_skill tool provider and the
+	// per-run skill inventory injection. Nil keeps the skill surface closed.
+	Skills    *SkillGate
 	Refresher core.DependencyRefresher
 	PollEvery time.Duration // goal status poll interval; 0 defaults to 2s
 }
@@ -78,6 +82,10 @@ type Service struct {
 	planMu        sync.Mutex
 	planStates    map[string]*PlanState
 	planApprovals map[string]*PlanApproval
+	// skills is the M07-A skill gate copied from deps at Serve; nil closes
+	// the skill surface. The gate itself also keeps a service reference (set
+	// by Bind) so its event appends share the service event mutex.
+	skills *SkillGate
 }
 
 type clientSubscription struct {
@@ -102,7 +110,10 @@ func Serve(ctx context.Context, deps Deps) (*Service, error) {
 		ln.Close()
 		return nil, err
 	}
-	s := &Service{deps: deps, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, notifiedApprovals: map[string]bool{}}
+	s := &Service{deps: deps, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills}
+	if deps.Skills != nil {
+		deps.Skills.Bind(s)
+	}
 	go s.pollGoals(ctx)
 	go func() {
 		<-ctx.Done()
@@ -169,6 +180,11 @@ func (s *Service) readLoop(ctx context.Context, conn net.Conn, updates chan Serv
 		case "run_start":
 			if err := s.startRun(ctx, c, updates); err != nil {
 				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			}
+			continue
+		case "skill_invoke":
+			if err := s.invokeSkill(ctx, c, updates); err != nil {
+				updates <- ServerMsg{Type: "skill_report", SkillReport: &SkillReport{Kind: SkillReportError, SessionID: c.SessionID, Name: c.SkillName, Error: err.Error()}}
 			}
 			continue
 		case "run_subscribe":

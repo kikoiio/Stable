@@ -36,6 +36,8 @@ type ClientMsg struct {
 	ApprovalChoice  string                  `json:"approval_choice,omitempty"`
 	SnapshotID      string                  `json:"snapshot_id,omitempty"`
 	QuestionID      string                  `json:"question_id,omitempty"`
+	SkillName       string                  `json:"skill_name,omitempty"`
+	SkillArgs       string                  `json:"skill_args,omitempty"`
 	Limit           int                     `json:"limit,omitempty"`
 }
 
@@ -75,11 +77,38 @@ type ServerMsg struct {
 	// PlanApprovals is the pending plan approval list pushed by
 	// plan_approval_pending / plan_approval_resolved.
 	PlanApprovals []PlanApprovalRef `json:"plan_approvals,omitempty"`
+	// SkillReport carries skill activation errors, /skills reload counts and
+	// the one-shot skill-delta notice pushed by skill_invoke / skill_reload /
+	// skill_delta.
+	SkillReport *SkillReport `json:"skill_report,omitempty"`
+	// Skills and SkillActivated carry the skill_list response: the current
+	// catalog infos and the session's activated skill names.
+	Skills         []sessionlog.SkillInfo `json:"skills,omitempty"`
+	SkillActivated []string               `json:"skill_activated,omitempty"`
+}
+
+// SkillReport kinds for the ServerMsg SkillReport payload.
+const (
+	SkillReportError  = "error"
+	SkillReportReload = "reload"
+	SkillReportDelta  = "delta"
+)
+
+// SkillReport is the M07-A skill feedback message: activation errors, reload
+// count changes and one-shot delta notices for newly added skills.
+type SkillReport struct {
+	Kind      string   `json:"kind"` // error | reload | delta
+	SessionID string   `json:"session_id,omitempty"`
+	Name      string   `json:"name,omitempty"`
+	Error     string   `json:"error,omitempty"`
+	Before    int      `json:"before,omitempty"`
+	After     int      `json:"after,omitempty"`
+	Added     []string `json:"added,omitempty"`
 }
 
 func validOp(op string) bool {
 	switch op {
-	case "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve":
+	case "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list":
 		return true
 	}
 	return false
@@ -201,6 +230,16 @@ func validateClient(m ClientMsg) error {
 		if m.SessionID == "" {
 			return fmt.Errorf("op plan_mode requires session_id")
 		}
+	case "skill_invoke":
+		if m.SessionID == "" || strings.TrimSpace(m.SkillName) == "" {
+			return fmt.Errorf("op skill_invoke requires session_id and skill_name")
+		}
+	case "skill_list":
+		if m.SessionID == "" {
+			return fmt.Errorf("op skill_list requires session_id")
+		}
+	case "skill_reload":
+		// The reload rescans the catalog service-wide; no fields required.
 	case "plan_resolve":
 		if m.SessionID == "" {
 			return fmt.Errorf("op plan_resolve requires session_id")
