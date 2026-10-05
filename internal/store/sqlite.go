@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"stable/internal/core"
 )
 
@@ -24,6 +23,9 @@ var ErrRevision = errors.New("goal revision changed")
 type Store struct{ db *sql.DB }
 
 func Open(path string) (*Store, error) {
+	if !driverAvailable {
+		return nil, errors.New("store: sqlite is unsupported on this platform")
+	}
 	db, err := sql.Open("sqlite3", "file:"+path+"?_foreign_keys=on&_busy_timeout=5000&_journal_mode=WAL")
 	if err != nil {
 		return nil, err

@@ -125,14 +125,22 @@ func Load() (AppConfig, error) {
 		if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
 			return c, errors.New("config file must be private (chmod 600)")
 		}
-		if st.Sys() != nil && !ownedByCurrentUser(st) {
+		owned, ownerErr := ownedByCurrentUser(st)
+		if ownerErr != nil {
+			return c, ownerErr
+		}
+		if st.Sys() != nil && !owned {
 			return c, errors.New("config file must be owned by current user")
 		}
 		dir, err := os.Stat(filepath.Dir(p))
 		if err != nil {
 			return c, err
 		}
-		if dir.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(dir) {
+		dirOwned, ownerErr := ownedByCurrentUser(dir)
+		if ownerErr != nil {
+			return c, ownerErr
+		}
+		if dir.Mode().Perm()&0077 != 0 || !dirOwned {
 			return c, errors.New("config directory must be private and owned by current user (chmod 700)")
 		}
 		data, err := os.ReadFile(p)
