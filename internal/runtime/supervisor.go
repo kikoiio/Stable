@@ -262,15 +262,24 @@ func snapshotCredentials(apiKey string) []string {
 
 func runtimeToolSchemas() []llm.ToolSchema {
 	nameMap := map[string]string{
-		"read_file":  "read_file",
-		"write_file": "write_file",
-		"edit_file":  "edit_file",
-		"glob":       "glob",
-		"grep":       "grep",
+		"read_file":      "read_file",
+		"write_file":     "write_file",
+		"edit_file":      "edit_file",
+		"glob":           "glob",
+		"grep":           "grep",
+		"ask_user":       "ask_user",
+		"exit_plan_mode": "exit_plan_mode",
+		"task_create":    "task_create",
+		"task_get":       "task_get",
+		"task_list":      "task_list",
+		"task_update":    "task_update",
 	}
 	registry := tools.CreateDefaultTools().Registry
+	// M06 tools live outside the default registry; the copy keeps append from
+	// aliasing the registry slice.
+	sources := append(append([]map[string]any{}, registry.GetAllSchemas()...), execution.M06ToolSchemas()...)
 	schemas := make([]llm.ToolSchema, 0, len(nameMap)+1)
-	for _, schema := range registry.GetAllSchemas() {
+	for _, schema := range sources {
 		internalName, _ := schema["name"].(string)
 		name, ok := nameMap[internalName]
 		if !ok {
@@ -328,6 +337,12 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 	var executorFactory agent.ExecutorFactory
 	var toolSchemas []llm.ToolSchema
 	var snapshotStore *candidate.SnapshotStore
+	// The interaction sinks need the conversation service, which only exists
+	// once Serve returns, so they are built unbound here and bound right
+	// after Serve — no run can reach a tool call before that.
+	askSink := conversation.NewAskAdapter(nil)
+	todoProvider := conversation.NewTodoProvider(nil)
+	planSink := conversation.NewPlanApprovalSink(nil)
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
 		snapshotStore, err = candidate.NewSnapshotStore(p.Share, c.Snapshots.ProjectBytes(), c.Snapshots.ManifestsPerCandidate(), snapshotCredentials(c.Model.APIKey))
 		if err != nil {
@@ -342,7 +357,9 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 			SessionRoot:        p.Share,
 			ProviderCredential: c.Model.APIKey,
 			Snapshots:          snapshotStore,
-		})
+			QuestionSink:       askSink,
+			TodoProvider:       todoProvider,
+		}, execution.WithPlanSink(planSink))
 		toolSchemas = runtimeToolSchemas()
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, chatProvider)
 		if fellBack {
@@ -363,6 +380,9 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 	if err != nil {
 		return err
 	}
+	askSink.Bind(svc)
+	todoProvider.Bind(svc)
+	planSink.Bind(svc)
 	defer svc.Close()
 	select {}
 }

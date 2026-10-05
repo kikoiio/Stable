@@ -8,22 +8,25 @@ import (
 // scanState summarizes validated history so a newly observed event can be
 // checked for ownership and ordering without re-decoding every caller side.
 type scanState struct {
-	openCalls  map[string]uint64            // call ID -> session seq of the call
-	runs       map[string]RunStarted        // run ID -> start record
-	runSeq     map[string]uint64            // run ID -> last observed run seq
-	runEventAt map[string]map[uint64]uint64 // run ID -> run seq -> session seq
-	snapshots  map[string]SnapshotRef       // snapshot ID -> recorded ref
-	questions  map[string]string            // question ID -> current status
+	openCalls     map[string]uint64            // call ID -> session seq of the call
+	runs          map[string]RunStarted        // run ID -> start record
+	runSeq        map[string]uint64            // run ID -> last observed run seq
+	runEventAt    map[string]map[uint64]uint64 // run ID -> run seq -> session seq
+	snapshots     map[string]SnapshotRef       // snapshot ID -> recorded ref
+	questions     map[string]string            // question ID -> current status
+	planApprovals map[string]string            // request ID -> last recorded status
+	todoRev       int                          // last observed todo snapshot revision
 }
 
 func scanEvents(events []Event) scanState {
 	st := scanState{
-		openCalls:  map[string]uint64{},
-		runs:       map[string]RunStarted{},
-		runSeq:     map[string]uint64{},
-		runEventAt: map[string]map[uint64]uint64{},
-		snapshots:  map[string]SnapshotRef{},
-		questions:  map[string]string{},
+		openCalls:     map[string]uint64{},
+		runs:          map[string]RunStarted{},
+		runSeq:        map[string]uint64{},
+		runEventAt:    map[string]map[uint64]uint64{},
+		snapshots:     map[string]SnapshotRef{},
+		questions:     map[string]string{},
+		planApprovals: map[string]string{},
 	}
 	for _, e := range events {
 		switch e.Type {
@@ -67,6 +70,16 @@ func scanEvents(events []Event) scanState {
 			var reply QuestionReply
 			if decodeData(e.Data, &reply) == nil {
 				st.questions[reply.QuestionID] = QuestionReplied
+			}
+		case EventPlanApproval:
+			var record PlanApprovalRecord
+			if decodeData(e.Data, &record) == nil {
+				st.planApprovals[record.RequestID] = record.Status
+			}
+		case EventTodo:
+			var update TodoUpdate
+			if decodeData(e.Data, &update) == nil {
+				st.todoRev = update.Revision
 			}
 		}
 	}
@@ -180,9 +193,80 @@ func checkReply(r QuestionReply, st scanState) error {
 	return nil
 }
 
-// validateOwnedAppend checks boundary, snapshot, rewind, question, and reply
-// events before they are appended. selfSeq is the sequence number the new
-// event will occupy.
+func checkPlanMode(m PlanMode) error {
+	if m.At.IsZero() {
+		return errors.New("plan mode event requires a time")
+	}
+	switch m.Mode {
+	case PlanModePlan, PlanModeDefault:
+	default:
+		return fmt.Errorf("plan mode has invalid mode %q", m.Mode)
+	}
+	switch m.Reason {
+	case PlanModeReasonUserToggle, PlanModeReasonPlanApproved, PlanModeReasonPlanCancelled:
+	default:
+		return fmt.Errorf("plan mode has invalid reason %q", m.Reason)
+	}
+	return nil
+}
+
+// planApprovalTerminal reports whether the status ends a request lifecycle.
+func planApprovalTerminal(status string) bool {
+	switch status {
+	case PlanApprovalApprovedAuto, PlanApprovalApprovedManual, PlanApprovalFeedback, PlanApprovalCancelled:
+		return true
+	}
+	return false
+}
+
+func checkPlanApproval(r PlanApprovalRecord, st scanState) error {
+	if r.RequestID == "" || r.RunID == "" || r.PlanPath == "" || r.CreatedAt.IsZero() {
+		return errors.New("plan approval event requires request_id, run_id, plan_path, and created_at")
+	}
+	switch {
+	case r.Status == PlanApprovalSubmitted:
+		if !r.ResolvedAt.IsZero() {
+			return errors.New("submitted plan approval cannot carry a resolution time")
+		}
+	case planApprovalTerminal(r.Status):
+		if r.ResolvedAt.IsZero() {
+			return errors.New("resolved plan approval requires a resolution time")
+		}
+	default:
+		return fmt.Errorf("plan approval has invalid status %q", r.Status)
+	}
+	status, seen := st.planApprovals[r.RequestID]
+	if !seen {
+		if r.Status != PlanApprovalSubmitted {
+			return errors.New("plan approval must start submitted")
+		}
+		return nil
+	}
+	if status != PlanApprovalSubmitted {
+		return errors.New("plan approval request is already resolved")
+	}
+	if r.Status == PlanApprovalSubmitted {
+		return errors.New("plan approval request is already submitted")
+	}
+	return nil
+}
+
+func checkTodoUpdate(u TodoUpdate, st scanState) error {
+	if u.Revision <= 0 {
+		return errors.New("todo update requires a positive revision")
+	}
+	if u.Revision <= st.todoRev {
+		return errors.New("todo revision must strictly increase")
+	}
+	if len(u.Tasks) > MaxTodoTasks {
+		return fmt.Errorf("todo update carries %d tasks, limit is %d", len(u.Tasks), MaxTodoTasks)
+	}
+	return nil
+}
+
+// validateOwnedAppend checks boundary, snapshot, rewind, question, reply,
+// plan mode, plan approval, and todo events before they are appended.
+// selfSeq is the sequence number the new event will occupy.
 func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSeq uint64) error {
 	st := scanEvents(events)
 	switch typ {
@@ -216,6 +300,24 @@ func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSe
 			return errors.New("reply event has invalid shape")
 		}
 		return checkReply(r, st)
+	case EventPlanMode:
+		var m PlanMode
+		if err := decodeData(data, &m); err != nil {
+			return errors.New("plan mode event has invalid shape")
+		}
+		return checkPlanMode(m)
+	case EventPlanApproval:
+		var r PlanApprovalRecord
+		if err := decodeData(data, &r); err != nil {
+			return errors.New("plan approval event has invalid shape")
+		}
+		return checkPlanApproval(r, st)
+	case EventTodo:
+		var u TodoUpdate
+		if err := decodeData(data, &u); err != nil {
+			return errors.New("todo update event has invalid shape")
+		}
+		return checkTodoUpdate(u, st)
 	}
 	return nil
 }

@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"stable/internal/agent"
 	"stable/internal/candidate"
+	"stable/internal/commands"
 	"stable/internal/conversation"
 	"stable/internal/core"
 	"stable/internal/inputhistory"
@@ -69,15 +72,50 @@ type Model struct {
 	Approvals           []permission.ApprovalPrompt
 	SelectedApproval    int
 	approvalPollStarted bool
-	Err                 error
-	ActiveRunID         string
-	LastCursor          uint64
-	stream              *conversation.StreamClient
-	history             *inputhistory.Store
-	historyErr          error
-	histCursor          *inputhistory.Cursor
-	histDraft           string
+	// Plan is the session plan-mode runtime state restored by session_load
+	// and refreshed by plan_state pushes; it only feeds the status line.
+	Plan              *conversation.PlanState
+	PlanApprovals     []conversation.PlanApprovalRef
+	SelectedPlan      int
+	PlanFeedback      string
+	Todos             []sessionlog.TaskSnapshot
+	QuestionCursor    int
+	QuestionPicked    map[int]bool
+	QuestionOther     bool
+	questionDialogID  string
+	questionOtherText string
+	questionDismissed map[string]bool
+	liveQuestions     map[string]bool
+	proposalDismissed map[string]bool
+	liveProposals     map[string]bool
+	Err               error
+	ActiveRunID       string
+	LastCursor        uint64
+	stream            *conversation.StreamClient
+	history           *inputhistory.Store
+	historyErr        error
+	histCursor        *inputhistory.Cursor
+	histDraft         string
+	registry          *commands.Registry
+	loader            *commands.Loader
+	host              *commandHost
+	// commandReportShown marks that the loader's rejected-file report has
+	// already been surfaced once in the status line.
+	commandReportShown bool
 }
+
+// commandHost bridges built-in Local closures with the live model: a
+// commands.Command.Local only receives the raw arguments, so dispatchCommand
+// points host at the model copy it is about to return, the closures mutate it
+// through host.model, queue their tea.Cmds through send, and read host.raw
+// when they need the exact submitted line for the input history.
+type commandHost struct {
+	model *Model
+	raw   string
+	cmds  []tea.Cmd
+}
+
+func (h *commandHost) send(cmd tea.Cmd) { h.cmds = append(h.cmds, cmd) }
 
 type resultMsg struct {
 	op   string
@@ -138,6 +176,7 @@ func New(socket, root string) Model {
 	c := NewComposer()
 	_ = c.Focus()
 	m := Model{Socket: socket, Root: root, Width: 120, Height: 32, Composer: c, Navigation: NavigationState{Mode: ChatView}}
+	m.initCommands(root)
 	// Input history is per-project and private; an unavailable store must not
 	// block the TUI, only surface an explicit status when used.
 	history, err := inputhistory.Open(root)
@@ -147,6 +186,201 @@ func New(socket, root string) Model {
 		m.history = history
 	}
 	return m
+}
+
+// initCommands builds the command host, the initial built-in registry, and
+// the custom command loader. Custom commands are loaded lazily by
+// refreshCommands on the first completion or dispatch, never at startup.
+func (m *Model) initCommands(root string) {
+	m.host = &commandHost{}
+	m.registry = commands.NewRegistry()
+	registerBuiltins(m.host, m.registry)
+	m.loader = commands.NewLoader(
+		filepath.Join(root, ".stable", "commands"),
+		userCommandsDir(),
+	)
+}
+
+// userCommandsDir returns the user-level custom command directory; an
+// unavailable home directory simply contributes no user commands.
+func userCommandsDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "stable", "commands")
+}
+
+// refreshCommands rebuilds the registry from the fixed built-in set plus the
+// loader's custom commands. Built-ins register first, so a custom file that
+// shadows a built-in name is skipped by RegisterOptional and the built-in
+// stays authoritative. Rebuilding instead of accumulating also lets a deleted
+// custom file disappear from completion and dispatch.
+func (m *Model) refreshCommands() {
+	if m.host == nil || m.loader == nil || m.registry == nil {
+		m.initCommands(m.Root)
+		return
+	}
+	registry := commands.NewRegistry()
+	registerBuiltins(m.host, registry)
+	if custom, rejected, err := m.loader.Commands(); err == nil {
+		for _, c := range custom {
+			registry.RegisterOptional(c)
+		}
+		m.surfaceCommandReport(rejected)
+	}
+	m.registry = registry
+}
+
+// surfaceCommandReport shows the loader's rejected-file report once in the
+// status line, the same channel every other one-off hint uses. Later loads
+// with the same report stay quiet.
+func (m *Model) surfaceCommandReport(rejected []string) {
+	if len(rejected) == 0 || m.commandReportShown {
+		return
+	}
+	m.commandReportShown = true
+	m.Status = "部分自定义命令未加载：" + strings.Join(rejected, "；")
+}
+
+// registerBuiltins registers the built-in commands on a fresh registry. The
+// Local closures act through the command host and replicate the historical
+// hardcoded submitComposer branches one to one, so dispatching through the
+// registry keeps user-visible behavior unchanged.
+func registerBuiltins(host *commandHost, registry *commands.Registry) {
+	set := func(name, description, argPrompt string, local func(args string)) {
+		registry.Register(&commands.Command{Name: name, Description: description, ArgPrompt: argPrompt, Kind: commands.KindLocal, Local: local})
+	}
+	set("sessions", "浏览会话", "", func(string) {
+		m := host.model
+		m.Composer.SetValue("")
+		m.Navigation = NavigationState{Mode: SessionPickerView, Cursor: m.sessionIndex()}
+	})
+	set("goals", "浏览目标", "", func(string) {
+		m := host.model
+		m.Composer.SetValue("")
+		m.Navigation = NavigationState{Mode: GoalPickerView, Cursor: m.SelectedGoal}
+	})
+	set("search", "搜索会话内容", "关键词", func(args string) {
+		m := host.model
+		query := strings.TrimSpace(args)
+		if query == "" {
+			m.Status = "用法：/search 关键词"
+			return
+		}
+		m.Pending = true
+		m.Status = "正在搜索会话…"
+		m.Composer.SetValue("")
+		m.recordHistory(host.raw)
+		host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "session_search", ProjectRoot: m.Root, Text: query}))
+	})
+	set("review", "预览候选变更", "候选ID", func(args string) {
+		m := host.model
+		candidateID := strings.TrimSpace(args)
+		if candidateID == "" || strings.ContainsAny(candidateID, " \t\n") {
+			m.Status = "用法：/review 候选ID"
+			return
+		}
+		m.Pending = true
+		m.Status = "正在生成候选预览…"
+		m.Composer.SetValue("")
+		m.recordHistory(host.raw)
+		host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "review_get", CandidateID: candidateID, SessionID: m.ActiveSession}))
+	})
+	set("say", "为目标排队补充指令", "补充指令", func(args string) {
+		m := host.model
+		sayText := strings.TrimSpace(args)
+		if sayText == "" {
+			m.Status = "用法：/say 补充指令"
+			return
+		}
+		if len(m.Goals) == 0 {
+			m.Status = "先用 Ctrl+G 选择目标，再 /say。"
+			return
+		}
+		req := conversation.ClientMsg{Op: "say", ProjectRoot: m.Root, SessionID: m.ActiveSession, Goal: m.Goals[clamp(m.SelectedGoal, 0, len(m.Goals)-1)].ID, Text: sayText}
+		m.Pending = true
+		m.Status = "正在排队补充指令…"
+		m.Composer.SetValue("")
+		m.recordHistory(host.raw)
+		host.send(requestCmd(m.Socket, req))
+	})
+	set("reply", "答复待答问题", "答复内容", func(args string) {
+		m := host.model
+		replyText := strings.TrimSpace(args)
+		if replyText == "" {
+			m.Status = "用法：/reply 答复内容"
+			return
+		}
+		question, ok := m.pendingQuestion()
+		if !ok {
+			m.Status = "当前没有待回答的问题。"
+			return
+		}
+		req := conversation.ClientMsg{Op: "reply", SessionID: m.ActiveSession, QuestionID: question.QuestionID, Text: replyText}
+		m.Pending = true
+		m.Status = "正在记录答复…"
+		m.Composer.SetValue("")
+		m.recordHistory(host.raw)
+		host.send(requestCmd(m.Socket, req))
+	})
+	set("confirm", "确认待定提案", "提案ID", func(args string) {
+		m := host.model
+		id := strings.TrimSpace(args)
+		if id == "" || strings.ContainsAny(id, " \t\n") {
+			m.Status = "用法：/confirm 提案ID"
+			return
+		}
+		m.Pending = true
+		m.Status = "正在记录提案确认…"
+		m.Composer.SetValue("")
+		m.recordHistory(host.raw)
+		host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "confirm", ID: id, SessionID: m.ActiveSession}))
+	})
+	set("reject", "拒绝待定提案", "提案ID", func(args string) {
+		m := host.model
+		id := strings.TrimSpace(args)
+		if id == "" || strings.ContainsAny(id, " \t\n") {
+			m.Status = "用法：/reject 提案ID"
+			return
+		}
+		m.Pending = true
+		m.Status = "正在记录提案拒绝…"
+		m.Composer.SetValue("")
+		m.recordHistory(host.raw)
+		host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "reject", ID: id, SessionID: m.ActiveSession}))
+	})
+	// /plan only constructs the plan_mode op here; the service grows the
+	// handler in a later task, and until then the request fails through the
+	// ordinary error path, which is the intended placeholder behavior.
+	set("plan", "切换计划模式", "", func(string) {
+		m := host.model
+		m.Pending = true
+		m.Status = "正在切换计划模式…"
+		m.Composer.SetValue("")
+		m.recordHistory(host.raw)
+		host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "plan_mode", SessionID: m.ActiveSession}))
+	})
+	set("help", "显示可用命令", "", func(string) {
+		m := host.model
+		m.Composer.SetValue("")
+		m.Events = append(m.Events, sessionlog.Event{Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "系统", Text: renderHelp(m.registry.List()), Kind: "text"}})
+		m.Transcript.SetEvents(m.Events)
+	})
+}
+
+// renderHelp formats the merged command list for the /help transcript note;
+// commands that document an argument prompt show it as a hint.
+func renderHelp(cmds []*commands.Command) string {
+	var b strings.Builder
+	b.WriteString("可用命令：")
+	for _, c := range cmds {
+		fmt.Fprintf(&b, "\n- /%s %s", c.Name, c.Description)
+		if c.ArgPrompt != "" {
+			fmt.Fprintf(&b, "（参数：%s）", c.ArgPrompt)
+		}
+	}
+	return b.String()
 }
 func (m Model) Init() tea.Cmd {
 	return requestCmd(m.Socket, conversation.ClientMsg{Op: "session_list", ProjectRoot: m.Root})
@@ -158,6 +392,44 @@ func requestCmd(socket string, req conversation.ClientMsg) tea.Cmd {
 		msgs, err := conversation.Request(ctx, socket, req)
 		return resultMsg{op: req.Op, msgs: msgs, err: err}
 	}
+}
+
+// DialogKind identifies the modal layer that currently claims the keyboard
+// and the view. Zero means no dialog is pending.
+type DialogKind uint8
+
+const (
+	DialogNone DialogKind = iota
+	DialogApproval
+	DialogQuestion
+	DialogPlan
+	DialogReview
+	DialogProposal
+)
+
+// pendingDialog returns the dialog that should claim the keyboard and the
+// view right now, in the decision-queue order of spec AC7: permission
+// approvals first, then pending questions, plan approvals, the user-opened
+// candidate review, and finally goal proposals. Both the Update key dispatch
+// and the View render short-circuit through this function, so closing the
+// top layer automatically drops the next one into place.
+func (m Model) pendingDialog() DialogKind {
+	if len(m.Approvals) > 0 {
+		return DialogApproval
+	}
+	if _, ok := m.popupQuestion(); ok {
+		return DialogQuestion
+	}
+	if _, ok := m.activePlanApproval(); ok {
+		return DialogPlan
+	}
+	if m.Review != nil {
+		return DialogReview
+	}
+	if _, ok := m.popupProposal(); ok {
+		return DialogProposal
+	}
+	return DialogNone
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -252,11 +524,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.Navigation.Mode != ChatView {
 			return m.handleNavigationKey(v)
 		}
-		if len(m.Approvals) > 0 {
+		// The pending decision queue claims the keyboard in priority order
+		// (AC7): closing or resolving the top layer drops the next one into
+		// place on the following key.
+		switch m.pendingDialog() {
+		case DialogApproval:
 			return m.handleApprovalKey(v)
-		}
-		if m.Review != nil {
+		case DialogQuestion:
+			return m.handleQuestionKey(v)
+		case DialogPlan:
+			return m.handlePlanKey(v)
+		case DialogReview:
 			return m.handleReviewKey(v)
+		case DialogProposal:
+			return m.handleProposalKey(v)
 		}
 		return m.handleChatKey(v)
 	}
@@ -306,10 +587,38 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "questions":
-			m.Questions = append([]sessionlog.PendingQuestion(nil), x.Questions...)
+			// A question_list result is the full session list (session
+			// restore or post-reply refresh): it replaces the stored set and
+			// never marks questions live, so a restored session stays quiet.
+			// The same message type interleaved into another request while a
+			// run blocks inside ask_user is a live arrival and opens the
+			// dialog through the decision queue.
+			m.applyQuestions(x.Questions, r.op == "question_list")
 		case "reply":
 			if x.Reply != nil {
 				m.Status = "答复已记录。"
+				if m.questionDismissed == nil {
+					m.questionDismissed = map[string]bool{}
+				}
+				m.questionDismissed[x.Reply.QuestionID] = true
+				delete(m.liveQuestions, x.Reply.QuestionID)
+			}
+		case "todo":
+			// The transcript projection renders todo snapshots; the TUI only
+			// stores the latest list here.
+			m.Todos = append([]sessionlog.TaskSnapshot(nil), x.Tasks...)
+		case "plan_state":
+			if x.PlanState != nil {
+				m.Plan = x.PlanState
+			}
+		case "plan_approval_pending", "plan_approvals":
+			for _, ref := range x.PlanApprovals {
+				m.upsertPlanApproval(ref)
+			}
+		case "plan_approval_resolved":
+			m.clearPlanApprovals()
+			if x.PlanState != nil {
+				m.Plan = x.PlanState
 			}
 		case "search":
 			if x.Search != nil {
@@ -377,6 +686,14 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 			if x.Goals != nil {
 				m.Goals = x.Goals
 			}
+			// Plan mode is session runtime state echoed by session_load; the
+			// status line shows it, nothing else depends on it here.
+			if x.Plan != nil {
+				m.Plan = x.Plan
+			}
+			// Proposals rebuilt from the transcript are restore state: they
+			// never open the proposal dialog (spec F6), /confirm and /reject
+			// stay the way to handle them.
 			m.Proposals = proposalsFromEvents(m.Events)
 			if m.Err == nil {
 				m.Status = "会话已加载。"
@@ -389,6 +706,10 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 		case "proposal":
 			if x.Proposal != nil {
 				m.upsertProposal(*x.Proposal)
+				if m.liveProposals == nil {
+					m.liveProposals = map[string]bool{}
+				}
+				m.liveProposals[x.Proposal.ID] = true
 			}
 		}
 	}
@@ -416,6 +737,12 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 	}
 	if r.op == "reply" {
 		return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "question_list", SessionID: m.ActiveSession})
+	}
+	if r.op == "plan_resolve" {
+		// The resolve response reports the new plan state; the resolved
+		// broadcast may never reach a one-shot connection, so the pending
+		// plan dialog is dropped here as well.
+		m.clearPlanApprovals()
 	}
 	if r.op == "session_load" && m.ActiveSession != "" {
 		list := requestCmd(m.Socket, conversation.ClientMsg{Op: "approval_list", SessionID: m.ActiveSession})
@@ -459,6 +786,78 @@ func (m *Model) upsertProposal(p core.CriteriaProposal) {
 		}
 	}
 	m.Proposals = append(m.Proposals, p)
+}
+
+// applyQuestions stores one questions update. fullList marks a question_list
+// result — the complete session list, so it replaces the stored set and never
+// marks questions live (restore and post-reply refreshes stay quiet). A live
+// arrival upserts into the stored set and marks the pending questions live so
+// the decision queue opens the dialog.
+func (m *Model) applyQuestions(questions []sessionlog.PendingQuestion, fullList bool) {
+	if fullList {
+		m.Questions = append([]sessionlog.PendingQuestion(nil), questions...)
+	} else {
+		for _, q := range questions {
+			m.upsertQuestion(q)
+			if q.Status == sessionlog.QuestionPending {
+				if m.liveQuestions == nil {
+					m.liveQuestions = map[string]bool{}
+				}
+				m.liveQuestions[q.QuestionID] = true
+			}
+		}
+	}
+	pending := map[string]bool{}
+	for _, q := range m.Questions {
+		if q.Status == sessionlog.QuestionPending {
+			pending[q.QuestionID] = true
+		}
+	}
+	for id := range m.liveQuestions {
+		if !pending[id] {
+			delete(m.liveQuestions, id)
+		}
+	}
+	// The dialog state belongs to one question; a different popup starts
+	// clean so toggles never leak across questions.
+	if q, ok := m.popupQuestion(); ok && q.QuestionID != m.questionDialogID {
+		m.resetQuestionDialog()
+		m.questionDialogID = q.QuestionID
+	}
+}
+
+func (m *Model) upsertQuestion(q sessionlog.PendingQuestion) {
+	for i := range m.Questions {
+		if m.Questions[i].QuestionID == q.QuestionID {
+			m.Questions[i] = q
+			return
+		}
+	}
+	m.Questions = append(m.Questions, q)
+}
+
+func (m *Model) upsertPlanApproval(ref conversation.PlanApprovalRef) {
+	for i := range m.PlanApprovals {
+		if m.PlanApprovals[i].ID == ref.ID {
+			m.PlanApprovals[i] = ref
+			return
+		}
+	}
+	m.PlanApprovals = append(m.PlanApprovals, ref)
+	// A fresh approval opens the dialog from the first choice.
+	m.SelectedPlan, m.PlanFeedback = 0, ""
+}
+
+// clearPlanApprovals drops the pending plan approvals of the active session;
+// plan_resolve answers the session's single pending request.
+func (m *Model) clearPlanApprovals() {
+	kept := make([]conversation.PlanApprovalRef, 0, len(m.PlanApprovals))
+	for _, approval := range m.PlanApprovals {
+		if approval.SessionID != m.ActiveSession {
+			kept = append(kept, approval)
+		}
+	}
+	m.PlanApprovals = kept
 }
 func (m *Model) upsertApproval(a permission.ApprovalPrompt) {
 	for i := range m.Approvals {
@@ -630,7 +1029,8 @@ func (m Model) handleInput(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) refreshCompletions() {
 	value := m.Composer.Value()
 	if strings.HasPrefix(value, "/") && !strings.ContainsAny(value, " \n") {
-		m.Candidates = builtinCommands{}.List(value)
+		m.refreshCommands()
+		m.Candidates = FilterCompletions(CommandItems(m.registry.List()), value)
 		return
 	}
 	if at := strings.LastIndex(value, "@"); at >= 0 && !strings.ContainsAny(value[at:], " \n") {
@@ -645,6 +1045,11 @@ func (m Model) submitComposer() (tea.Model, tea.Cmd) {
 	if text == "" {
 		m.Status = "请输入非空内容。"
 		return m, nil
+	}
+	if strings.HasPrefix(text, "/") {
+		if model, cmd, handled := m.dispatchCommand(text); handled {
+			return model, cmd
+		}
 	}
 	if text == "/sessions" {
 		m.Composer.SetValue("")
@@ -715,6 +1120,14 @@ func (m Model) submitComposer() (tea.Model, tea.Cmd) {
 		m.recordHistory(text)
 		return m, requestCmd(m.Socket, req)
 	}
+	return m.submitChatPath(text, text)
+}
+
+// submitChatPath is the shared submission tail of the composer: text goes
+// through the ordinary request path (chat opens a run; other ops go through
+// requestCmd). history is the line recorded in the input history, which lets
+// expanded prompt commands record the typed command instead of its expansion.
+func (m Model) submitChatPath(text, history string) (tea.Model, tea.Cmd) {
 	req := conversation.ClientMsg{ProjectRoot: m.Root, SessionID: m.ActiveSession, Text: text}
 	if len(m.Goals) > 0 && m.Navigation.Mode == GoalPickerView {
 		req.Goal = m.Goals[clamp(m.SelectedGoal, 0, len(m.Goals)-1)].ID
@@ -738,7 +1151,7 @@ func (m Model) submitComposer() (tea.Model, tea.Cmd) {
 	m.Mode = ""
 	m.Composer.SetValue("")
 	m.Composer.Blur()
-	m.recordHistory(text)
+	m.recordHistory(history)
 	if req.Op == "chat" {
 		runID, err := sessionlog.NewID()
 		if err != nil {
@@ -753,6 +1166,41 @@ func (m Model) submitComposer() (tea.Model, tea.Cmd) {
 		return m, openRunCmd(m.Socket, request)
 	}
 	return m, requestCmd(m.Socket, req)
+}
+
+// dispatchCommand runs a registered slash command and reports whether the
+// input was handled. Input without a command name and unknown commands
+// ("/xyz") return handled=false so the ordinary submission path keeps its
+// historical behavior. KindLocal commands run their closure in place;
+// KindPrompt commands expand and re-enter the ordinary chat path.
+func (m Model) dispatchCommand(text string) (tea.Model, tea.Cmd, bool) {
+	name, args := commands.Parse(text)
+	if name == "" {
+		return m, nil, false
+	}
+	m.refreshCommands()
+	cmd, ok := m.registry.Find(name)
+	if !ok {
+		return m, nil, false
+	}
+	if cmd.Kind == commands.KindPrompt {
+		m.Candidates = nil
+		model, submit := m.submitChatPath(commands.ExpandPrompt(cmd.Body, args), text)
+		return model, submit, true
+	}
+	m.host.model, m.host.raw, m.host.cmds = &m, text, nil
+	cmd.Local(args)
+	m.Candidates = nil
+	queued := m.host.cmds
+	m.host.model, m.host.raw, m.host.cmds = nil, "", nil
+	switch len(queued) {
+	case 0:
+		return m, nil, true
+	case 1:
+		return m, queued[0], true
+	default:
+		return m, tea.Batch(queued...), true
+	}
 }
 
 // recordHistory appends one submitted input to the project history. The
@@ -1001,6 +1449,28 @@ func (m *Model) applyRunMessage(message conversation.ServerMsg) {
 			id = message.Decision.ApprovalID
 		}
 		m.removeApproval(id)
+	case "questions":
+		// A run blocked inside ask_user pushes its pending questions; they
+		// arrive live and open the question dialog through the queue.
+		m.applyQuestions(message.Questions, false)
+	case "todo":
+		m.Todos = append([]sessionlog.TaskSnapshot(nil), message.Tasks...)
+	case "plan_state":
+		if message.PlanState != nil {
+			m.Plan = message.PlanState
+		}
+	case "plan_approval_pending", "plan_approvals":
+		for _, ref := range message.PlanApprovals {
+			m.upsertPlanApproval(ref)
+		}
+		if _, ok := m.activePlanApproval(); ok {
+			m.Status = "计划等待审批：自动接受、逐次确认或提供反馈。"
+		}
+	case "plan_approval_resolved":
+		m.clearPlanApprovals()
+		if message.PlanState != nil {
+			m.Plan = message.PlanState
+		}
 	case "run_started":
 		if m.Pending {
 			m.ActiveRunID = message.RunID
@@ -1115,25 +1585,36 @@ func (m Model) View() string {
 		return "Stable · 共用对话\n终端窗口较小，请放大窗口。 Ctrl+C 退出。"
 	}
 	if m.Navigation.Mode == SessionPickerView {
-		return "会话\n" + renderSessions(m.Sessions, m.ActiveSession, m.Navigation.Cursor, m.Width, m.Navigation.Filter) + "\n" + renderStatus(m.statusState(), m.ActiveSession, m.Navigation.Mode, m.Width)
+		return "会话\n" + renderSessions(m.Sessions, m.ActiveSession, m.Navigation.Cursor, m.Width, m.Navigation.Filter) + "\n" + renderStatus(m.statusState(), m.ActiveSession, m.Navigation.Mode, m.Width, m.planModeActive())
 	}
 	if m.Navigation.Mode == GoalPickerView {
-		return "目标\n" + renderGoals(m.Goals, m.Navigation.Cursor, m.Width) + "\n" + renderStatus(m.statusState(), m.ActiveSession, m.Navigation.Mode, m.Width)
+		return "目标\n" + renderGoals(m.Goals, m.Navigation.Cursor, m.Width) + "\n" + renderStatus(m.statusState(), m.ActiveSession, m.Navigation.Mode, m.Width, m.planModeActive())
 	}
 	if m.Navigation.Mode == SearchResultsView {
-		return "会话搜索\n" + renderSearchResults(m.SearchHits, m.SearchCorrupt, m.Navigation.Cursor, m.Width) + "\n" + renderStatus(m.statusState(), m.ActiveSession, m.Navigation.Mode, m.Width)
+		return "会话搜索\n" + renderSearchResults(m.SearchHits, m.SearchCorrupt, m.Navigation.Cursor, m.Width) + "\n" + renderStatus(m.statusState(), m.ActiveSession, m.Navigation.Mode, m.Width, m.planModeActive())
 	}
 	var b strings.Builder
-	if len(m.Approvals) > 0 {
+	// The same decision queue that owns the keyboard owns the view: the
+	// highest-priority pending dialog renders in place of the chat view.
+	switch m.pendingDialog() {
+	case DialogApproval:
 		return renderApprovalDialog(m.Approvals, m.SelectedApproval, m.Width)
-	}
-	if m.Review != nil {
+	case DialogQuestion:
+		question, _ := m.popupQuestion()
+		return renderQuestionDialog(question, m.QuestionCursor, m.QuestionPicked, m.QuestionOther, m.questionOtherText, m.Width)
+	case DialogPlan:
+		approval, _ := m.activePlanApproval()
+		return renderPlanDialog(approval, m.SelectedPlan, m.PlanFeedback, m.Width)
+	case DialogReview:
 		errorText := ""
 		if m.Err != nil {
 			errorText = m.Err.Error()
 		}
 		runActive := m.ActiveRunID != "" || m.Pending
 		return renderReview(*m.Review, m.ReviewConfirmed, m.ReviewCursor, m.ReviewSnapshots, m.RewindPick, m.RewindCursor, m.RewindArmed, runActive, m.Status, errorText, m.Width)
+	case DialogProposal:
+		proposal, _ := m.popupProposal()
+		return renderProposalDialog(proposal, m.Width)
 	}
 	fmt.Fprintf(&b, "%s\n", m.Transcript.View())
 	b.WriteString("\n")
@@ -1144,7 +1625,7 @@ func (m Model) View() string {
 	if m.Err != nil {
 		fmt.Fprintf(&b, "\n错误：%s", m.Err.Error())
 	}
-	b.WriteString("\n" + renderStatus(m.statusState(), m.ActiveSession, m.Navigation.Mode, m.Width))
+	b.WriteString("\n" + renderStatus(m.statusState(), m.ActiveSession, m.Navigation.Mode, m.Width, m.planModeActive()))
 	return b.String()
 }
 func (m Model) statusState() StatusState {
@@ -1155,6 +1636,12 @@ func (m Model) statusState() StatusState {
 		return StatusState{Phase: StatusLoading, Text: "等待服务响应"}
 	}
 	return StatusState{Phase: StatusIdle, Text: m.Status}
+}
+
+// planModeActive reports whether the session runs in plan mode. The state is
+// restored by session_load and refreshed by plan_state pushes.
+func (m Model) planModeActive() bool {
+	return m.Plan != nil && m.Plan.Mode == sessionlog.PlanModePlan
 }
 
 func Run(socket, root string) error {

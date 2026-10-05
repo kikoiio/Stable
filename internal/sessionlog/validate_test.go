@@ -2,6 +2,7 @@ package sessionlog
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -274,5 +275,187 @@ func TestQuestionAndReplyValidation(t *testing.T) {
 	}
 	if got.QuestionID != "q1" || got.WorkRef != "goal:g1/work:w1" || got.Status != QuestionPending {
 		t.Fatalf("question round-trip = %+v", got)
+	}
+}
+
+func TestPlanModeValidation(t *testing.T) {
+	root := t.TempDir()
+	s, err := Create(root, "plan-mode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+
+	if _, err = Append(root, s.ID, EventPlanMode, PlanMode{Mode: PlanModePlan, Reason: PlanModeReasonUserToggle, At: now}); err != nil {
+		t.Fatalf("valid plan_mode rejected: %v", err)
+	}
+	if _, err = Append(root, s.ID, EventPlanMode, PlanMode{Mode: PlanModeDefault, Reason: PlanModeReasonPlanCancelled, At: now}); err != nil {
+		t.Fatalf("valid plan_mode toggle back rejected: %v", err)
+	}
+	bad := []struct {
+		name string
+		m    PlanMode
+	}{
+		{"invalid mode", PlanMode{Mode: "auto", Reason: PlanModeReasonUserToggle, At: now}},
+		{"invalid reason", PlanMode{Mode: PlanModePlan, Reason: "because", At: now}},
+		{"missing time", PlanMode{Mode: PlanModePlan, Reason: PlanModeReasonUserToggle}},
+	}
+	for _, tc := range bad {
+		if _, err = Append(root, s.ID, EventPlanMode, tc.m); err == nil {
+			t.Fatalf("%s: invalid plan_mode accepted", tc.name)
+		}
+	}
+	replayed, err := Replay(root, s.ID)
+	if err != nil {
+		t.Fatalf("replay of plan_mode log: %v", err)
+	}
+	var got PlanMode
+	if err = decodeData(replayed.Events[1].Data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Mode != PlanModePlan || got.Reason != PlanModeReasonUserToggle {
+		t.Fatalf("plan_mode round-trip = %+v", got)
+	}
+}
+
+func TestPlanApprovalValidation(t *testing.T) {
+	root := t.TempDir()
+	s, err := Create(root, "plan-approval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	path := "/proj/.stable/plans/session.md"
+
+	submitted := PlanApprovalRecord{RequestID: "pa-1", RunID: "r1", PlanPath: path, Status: PlanApprovalSubmitted, CreatedAt: now}
+	if _, err = Append(root, s.ID, EventPlanApproval, submitted); err != nil {
+		t.Fatalf("valid submitted rejected: %v", err)
+	}
+	resolved := submitted
+	resolved.Status = PlanApprovalApprovedAuto
+	resolved.ResolvedAt = now
+	bad := []struct {
+		name string
+		r    PlanApprovalRecord
+	}{
+		{"duplicate submitted", submitted},
+		{"terminal without submitted", PlanApprovalRecord{RequestID: "pa-2", RunID: "r1", PlanPath: path, Status: PlanApprovalApprovedManual, CreatedAt: now, ResolvedAt: now}},
+		{"invalid status", PlanApprovalRecord{RequestID: "pa-2", RunID: "r1", PlanPath: path, Status: "maybe", CreatedAt: now}},
+		{"missing request id", PlanApprovalRecord{RunID: "r1", PlanPath: path, Status: PlanApprovalSubmitted, CreatedAt: now}},
+		{"missing run id", PlanApprovalRecord{RequestID: "pa-2", PlanPath: path, Status: PlanApprovalSubmitted, CreatedAt: now}},
+		{"missing plan path", PlanApprovalRecord{RequestID: "pa-2", RunID: "r1", Status: PlanApprovalSubmitted, CreatedAt: now}},
+		{"missing created at", PlanApprovalRecord{RequestID: "pa-2", RunID: "r1", PlanPath: path, Status: PlanApprovalSubmitted}},
+		{"submitted with resolution time", PlanApprovalRecord{RequestID: "pa-2", RunID: "r1", PlanPath: path, Status: PlanApprovalSubmitted, CreatedAt: now, ResolvedAt: now}},
+		{"terminal without resolution time", PlanApprovalRecord{RequestID: "pa-1", RunID: "r1", PlanPath: path, Status: PlanApprovalApprovedAuto, CreatedAt: now}},
+	}
+	for _, tc := range bad {
+		if _, err = Append(root, s.ID, EventPlanApproval, tc.r); err == nil {
+			t.Fatalf("%s: invalid plan_approval accepted", tc.name)
+		}
+	}
+
+	if _, err = Append(root, s.ID, EventPlanApproval, resolved); err != nil {
+		t.Fatalf("valid submitted->approved_auto rejected: %v", err)
+	}
+	after := []struct {
+		name string
+		r    PlanApprovalRecord
+	}{
+		{"second terminal after terminal", PlanApprovalRecord{RequestID: "pa-1", RunID: "r1", PlanPath: path, Status: PlanApprovalCancelled, CreatedAt: now, ResolvedAt: now}},
+		{"resubmit after terminal", submitted},
+	}
+	for _, tc := range after {
+		if _, err = Append(root, s.ID, EventPlanApproval, tc.r); err == nil {
+			t.Fatalf("%s: invalid plan_approval accepted", tc.name)
+		}
+	}
+
+	// A second request runs the full lifecycle including a feedback terminal.
+	feedbackSubmitted := PlanApprovalRecord{RequestID: "pa-3", RunID: "r1", PlanPath: path, Status: PlanApprovalSubmitted, CreatedAt: now}
+	if _, err = Append(root, s.ID, EventPlanApproval, feedbackSubmitted); err != nil {
+		t.Fatalf("valid second submitted rejected: %v", err)
+	}
+	feedback := feedbackSubmitted
+	feedback.Status = PlanApprovalFeedback
+	feedback.Feedback = "add a rollback step"
+	feedback.ResolvedAt = now
+	if _, err = Append(root, s.ID, EventPlanApproval, feedback); err != nil {
+		t.Fatalf("valid feedback terminal rejected: %v", err)
+	}
+
+	replayed, err := Replay(root, s.ID)
+	if err != nil {
+		t.Fatalf("replay of plan_approval log: %v", err)
+	}
+	var got PlanApprovalRecord
+	if err = decodeData(replayed.Events[2].Data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RequestID != "pa-1" || got.Status != PlanApprovalApprovedAuto || got.ResolvedAt.IsZero() {
+		t.Fatalf("plan_approval round-trip = %+v", got)
+	}
+	var gotFeedback PlanApprovalRecord
+	if err = decodeData(replayed.Events[4].Data, &gotFeedback); err != nil {
+		t.Fatal(err)
+	}
+	if gotFeedback.RequestID != "pa-3" || gotFeedback.Status != PlanApprovalFeedback || gotFeedback.Feedback == "" {
+		t.Fatalf("feedback round-trip = %+v", gotFeedback)
+	}
+}
+
+func TestTodoUpdateValidation(t *testing.T) {
+	root := t.TempDir()
+	s, err := Create(root, "todo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task := TaskSnapshot{ID: "t1", Subject: "Explore", ActiveForm: "Exploring", Status: "in_progress"}
+	if _, err = Append(root, s.ID, EventTodo, TodoUpdate{Revision: 2, Tasks: []TaskSnapshot{task}}); err != nil {
+		t.Fatalf("valid first todo_update rejected: %v", err)
+	}
+	bad := []struct {
+		name string
+		u    TodoUpdate
+	}{
+		{"equal revision", TodoUpdate{Revision: 2, Tasks: []TaskSnapshot{task}}},
+		{"lower revision", TodoUpdate{Revision: 1, Tasks: []TaskSnapshot{task}}},
+		{"zero revision", TodoUpdate{Revision: 0, Tasks: []TaskSnapshot{task}}},
+	}
+	for _, tc := range bad {
+		if _, err = Append(root, s.ID, EventTodo, tc.u); err == nil {
+			t.Fatalf("%s: invalid todo_update accepted", tc.name)
+		}
+	}
+	// Strictly increasing does not require consecutive revisions.
+	if _, err = Append(root, s.ID, EventTodo, TodoUpdate{Revision: 5, Tasks: []TaskSnapshot{task}}); err != nil {
+		t.Fatalf("revision gap rejected: %v", err)
+	}
+
+	tooMany := make([]TaskSnapshot, MaxTodoTasks+1)
+	for i := range tooMany {
+		tooMany[i] = TaskSnapshot{ID: fmt.Sprintf("t%d", i), Subject: "x", Status: "pending"}
+	}
+	if _, err = Append(root, s.ID, EventTodo, TodoUpdate{Revision: 6, Tasks: tooMany}); err == nil {
+		t.Fatal("todo_update over the task limit accepted")
+	}
+	exact := tooMany[:MaxTodoTasks]
+	if _, err = Append(root, s.ID, EventTodo, TodoUpdate{Revision: 6, Tasks: exact}); err != nil {
+		t.Fatalf("todo_update at the task limit rejected: %v", err)
+	}
+	if _, err = Append(root, s.ID, EventTodo, TodoUpdate{Revision: 7, Tasks: []TaskSnapshot{}}); err != nil {
+		t.Fatalf("empty todo_update (clear) rejected: %v", err)
+	}
+
+	replayed, err := Replay(root, s.ID)
+	if err != nil {
+		t.Fatalf("replay of todo log: %v", err)
+	}
+	var got TodoUpdate
+	if err = decodeData(replayed.Events[1].Data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Revision != 2 || len(got.Tasks) != 1 || got.Tasks[0].ID != "t1" || got.Tasks[0].ActiveForm != "Exploring" {
+		t.Fatalf("todo round-trip = %+v", got)
 	}
 }

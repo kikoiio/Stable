@@ -9,7 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
+	"time"
 
 	"go.temporal.io/sdk/client"
 	"stable/internal/core"
@@ -57,6 +57,9 @@ func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) 
 		if err != nil {
 			return nil, err
 		}
+		// Plan mode is session runtime state: a fresh session starts in the
+		// default mode with no plan file.
+		s.initPlanState(info.ID)
 		return []ServerMsg{{Type: "session", Session: &info}}, nil
 	case "session_load":
 		root, err := s.trustedSessionRoot(c.ProjectRoot)
@@ -96,7 +99,12 @@ func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) 
 		if err != nil {
 			return nil, err
 		}
-		return []ServerMsg{{Type: "transcript", Transcript: &replay, Goals: goals}}, nil
+		plan := s.PlanStateOf(c.SessionID)
+		return []ServerMsg{{Type: "transcript", Transcript: &replay, Goals: goals, Plan: &plan}}, nil
+	case "plan_mode":
+		return s.planMode(c)
+	case "plan_resolve":
+		return s.planResolve(c)
 	case "history":
 		history, err := s.deps.Store.ListMessages(ctx)
 		if err != nil {
@@ -188,7 +196,7 @@ func redactProviderCredential(text string, providers ...any) string {
 		if !ok || p == nil || p.Config.APIKey == "" {
 			continue
 		}
-		text = strings.ReplaceAll(text, p.Config.APIKey, "[credential redacted]")
+		text = redactRunCredential(text, p.Config.APIKey)
 	}
 	return text
 }
@@ -515,6 +523,34 @@ func (s *Service) reject(ctx context.Context, c ClientMsg) ([]ServerMsg, error) 
 		return nil, err
 	}
 	return []ServerMsg{{Type: "message", Message: &msg}}, nil
+}
+
+// planMode toggles the plan mode of the session and reports the new runtime
+// state. The first toggle into plan mode creates the session plan file; every
+// toggle records a plan_mode event with reason user_toggle.
+func (s *Service) planMode(c ClientMsg) ([]ServerMsg, error) {
+	next := sessionlog.PlanModePlan
+	if s.PlanStateOf(c.SessionID).Mode == sessionlog.PlanModePlan {
+		next = sessionlog.PlanModeDefault
+	}
+	state, err := s.SetPlanMode(c.SessionID, next, sessionlog.PlanModeReasonUserToggle)
+	if err != nil {
+		return nil, err
+	}
+	return []ServerMsg{{Type: "plan_state", PlanState: &state}}, nil
+}
+
+// planResolve answers the session's pending plan approval and reports the
+// resulting plan state plus the ordinary user message that was inserted into
+// the session context.
+func (s *Service) planResolve(c ClientMsg) ([]ServerMsg, error) {
+	feedback := redactProviderCredential(c.Text, s.deps.ChatProvider, s.deps.Provider)
+	_, state, text, err := s.ResolvePlanApproval(c.SessionID, c.ApprovalChoice, feedback)
+	if err != nil {
+		return nil, err
+	}
+	msg := core.SessionMessage{ID: goalrun.RandomID("msg"), Role: core.MessageRoleUser, Kind: core.MessageKindText, Text: text, CreatedAt: time.Now().UTC()}
+	return []ServerMsg{{Type: "plan_state", PlanState: &state}, {Type: "message", Message: &msg}}, nil
 }
 
 // signal wakes the workflow; on any Temporal failure the event stays queued

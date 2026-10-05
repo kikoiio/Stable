@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"stable/internal/agent"
 	"stable/internal/candidate"
@@ -63,11 +64,22 @@ type ServerMsg struct {
 	Rewind     *sessionlog.RewindRecord       `json:"rewind,omitempty"`
 	Questions  []sessionlog.PendingQuestion   `json:"questions,omitempty"`
 	Reply      *sessionlog.QuestionReply      `json:"reply,omitempty"`
+	// Tasks is the full task-list snapshot pushed by every todo_update
+	// event (TodoProvider onChange).
+	Tasks []sessionlog.TaskSnapshot `json:"tasks,omitempty"`
+	// Plan carries the restored plan state of a session_load response.
+	Plan *PlanState `json:"plan,omitempty"`
+	// PlanState is the session plan state pushed by plan_mode, plan_resolve,
+	// and the plan_approval_resolved broadcast.
+	PlanState *PlanState `json:"plan_state,omitempty"`
+	// PlanApprovals is the pending plan approval list pushed by
+	// plan_approval_pending / plan_approval_resolved.
+	PlanApprovals []PlanApprovalRef `json:"plan_approvals,omitempty"`
 }
 
 func validOp(op string) bool {
 	switch op {
-	case "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list":
+	case "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve":
 		return true
 	}
 	return false
@@ -184,6 +196,23 @@ func validateClient(m ClientMsg) error {
 	case "approval_cancel":
 		if m.SessionID == "" || m.ApprovalID == "" {
 			return fmt.Errorf("op approval_cancel requires session_id and approval_id")
+		}
+	case "plan_mode":
+		if m.SessionID == "" {
+			return fmt.Errorf("op plan_mode requires session_id")
+		}
+	case "plan_resolve":
+		if m.SessionID == "" {
+			return fmt.Errorf("op plan_resolve requires session_id")
+		}
+		switch m.ApprovalChoice {
+		case PlanResolveAuto, PlanResolveManual, PlanResolveCancel:
+		case PlanResolveFeedback:
+			if strings.TrimSpace(m.Text) == "" {
+				return fmt.Errorf("op plan_resolve with feedback choice requires text")
+			}
+		default:
+			return fmt.Errorf("invalid plan approval choice")
 		}
 	}
 	return nil

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"stable/internal/commands"
 )
 
 type CompletionKind uint8
@@ -44,21 +46,21 @@ func (o Overlay) Render(items []CompletionItem, selected int) string {
 type PathCompleter interface {
 	Complete(projectRoot, prefix string) ([]CompletionItem, error)
 }
-type CommandSource interface {
-	List(prefix string) []CompletionItem
-}
-type builtinCommands struct{}
 
-func (builtinCommands) List(prefix string) []CompletionItem {
-	all := []CompletionItem{
-		{Kind: CommandCompletion, Label: "/sessions", Detail: "浏览会话", InsertText: "/sessions"},
-		{Kind: CommandCompletion, Label: "/goals", Detail: "浏览目标", InsertText: "/goals"},
-		{Kind: CommandCompletion, Label: "/search", Detail: "搜索会话内容", InsertText: "/search "},
-		{Kind: CommandCompletion, Label: "/review", Detail: "预览候选变更", InsertText: "/review "},
-		{Kind: CommandCompletion, Label: "/say", Detail: "为目标排队补充指令", InsertText: "/say "},
-		{Kind: CommandCompletion, Label: "/reply", Detail: "答复待答问题", InsertText: "/reply "},
+// CommandItems renders registry commands as completion entries. The insert
+// text carries a trailing space exactly when the command documents an
+// argument prompt, which reproduces the historical built-in list: bare view
+// switches insert without a space, argument-taking commands with one.
+func CommandItems(cmds []*commands.Command) []CompletionItem {
+	items := make([]CompletionItem, 0, len(cmds))
+	for _, c := range cmds {
+		insert := "/" + c.Name
+		if c.ArgPrompt != "" {
+			insert += " "
+		}
+		items = append(items, CompletionItem{Kind: CommandCompletion, Label: "/" + c.Name, Detail: c.Description, InsertText: insert})
 	}
-	return FilterCompletions(all, prefix)
+	return items
 }
 func FilterCompletions(items []CompletionItem, prefix string) []CompletionItem {
 	out := items[:0]

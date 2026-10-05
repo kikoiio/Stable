@@ -9,8 +9,8 @@ import (
 )
 
 type Paths struct {
-	Root, Bin, Libexec, Share, State, Goals, Database, TemporalDB                                   string
-	Socket, ChatSocket, Lock, SupervisorLog, TemporalLog, WorkerLog, ChatLog                        string
+	Root, Bin, Libexec, Share, State, Goals, Database, TemporalDB            string
+	Socket, ChatSocket, Lock, SupervisorLog, TemporalLog, WorkerLog, ChatLog string
 }
 
 func Resolve(c appconfig.AppConfig) (Paths, error) {

@@ -81,6 +81,9 @@ const (
 	EventRewind         = "candidate_rewind"
 	EventQuestion       = "pending_question"
 	EventReply          = "question_reply"
+	EventPlanMode       = "plan_mode"
+	EventPlanApproval   = "plan_approval"
+	EventTodo           = "todo_update"
 )
 
 // SnapshotRef records a candidate file snapshot owned by this session.
@@ -131,6 +134,72 @@ type QuestionReply struct {
 	QuestionID string    `json:"question_id"`
 	ReplyText  string    `json:"reply_text"`
 	RepliedAt  time.Time `json:"replied_at"`
+}
+
+// Plan mode values recorded by plan_mode events.
+const (
+	PlanModePlan    = "plan"
+	PlanModeDefault = "default"
+)
+
+// Reasons a session switches between plan and default mode.
+const (
+	PlanModeReasonUserToggle    = "user_toggle"
+	PlanModeReasonPlanApproved  = "plan_approved"
+	PlanModeReasonPlanCancelled = "plan_cancelled"
+)
+
+// PlanMode records one plan-mode transition. The mode itself is session
+// runtime state; the event only keeps the transcript auditable.
+type PlanMode struct {
+	Mode   string    `json:"mode"`
+	Reason string    `json:"reason"`
+	At     time.Time `json:"at"`
+}
+
+// Plan approval request statuses. A request is submitted once and then
+// resolved exactly once with a terminal status.
+const (
+	PlanApprovalSubmitted      = "submitted"
+	PlanApprovalApprovedAuto   = "approved_auto"
+	PlanApprovalApprovedManual = "approved_manual"
+	PlanApprovalFeedback       = "feedback"
+	PlanApprovalCancelled      = "cancelled"
+)
+
+// PlanApprovalRecord is one lifecycle step of a plan approval request.
+type PlanApprovalRecord struct {
+	RequestID  string    `json:"request_id"`
+	RunID      string    `json:"run_id"`
+	PlanPath   string    `json:"plan_path"`
+	Status     string    `json:"status"`
+	Feedback   string    `json:"feedback,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	ResolvedAt time.Time `json:"resolved_at"`
+}
+
+// MaxTodoTasks bounds the task count of one todo_update snapshot.
+const MaxTodoTasks = 100
+
+// TaskSnapshot mirrors one task of the session todo list. It is declared
+// here instead of importing internal/todo so sessionlog keeps zero
+// business dependencies; the conversation layer converts between them.
+type TaskSnapshot struct {
+	ID          string            `json:"id"`
+	Subject     string            `json:"subject"`
+	Description string            `json:"description"`
+	ActiveForm  string            `json:"active_form"`
+	Status      string            `json:"status"`
+	Owner       string            `json:"owner,omitempty"`
+	Blocks      []string          `json:"blocks,omitempty"`
+	BlockedBy   []string          `json:"blocked_by,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
+}
+
+// TodoUpdate is a full task-list snapshot written on every todo change.
+type TodoUpdate struct {
+	Revision int            `json:"revision"`
+	Tasks    []TaskSnapshot `json:"tasks"`
 }
 
 type RunStarted struct {

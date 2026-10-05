@@ -35,6 +35,21 @@ func TestTranscriptProjectionAndSessionReset(t *testing.T) {
 	}
 }
 
+func TestTranscriptRendersM06Events(t *testing.T) {
+	events := []sessionlog.Event{
+		{Type: sessionlog.EventPlanMode, Data: sessionlog.PlanMode{Mode: sessionlog.PlanModePlan, Reason: sessionlog.PlanModeReasonUserToggle}},
+		{Type: sessionlog.EventPlanApproval, Data: sessionlog.PlanApprovalRecord{RequestID: "plan-1", Status: sessionlog.PlanApprovalSubmitted, PlanPath: "/p/.stable/plans/s1.md"}},
+		{Type: sessionlog.EventPlanApproval, Data: sessionlog.PlanApprovalRecord{RequestID: "plan-1", Status: sessionlog.PlanApprovalFeedback, PlanPath: "/p/.stable/plans/s1.md", Feedback: "补充验证章节"}},
+		{Type: sessionlog.EventTodo, Data: sessionlog.TodoUpdate{Revision: 1, Tasks: []sessionlog.TaskSnapshot{{ID: "task-1", Subject: "调研现状", Status: "in_progress"}, {ID: "task-2", Subject: "写计划", Status: "pending"}}}},
+	}
+	out := projectTranscript(events, 80, false)
+	for _, want := range []string{"进入计划模式（用户切换）", "待审批：/p/.stable/plans/s1.md", "反馈继续改", "补充验证章节", "[in_progress] 调研现状", "[pending] 写计划"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in transcript:\n%s", want, out)
+		}
+	}
+}
+
 func TestTranscriptViewportScrollAndResize(t *testing.T) {
 	events := make([]sessionlog.Event, 0, 20)
 	for i := 0; i < 20; i++ {
