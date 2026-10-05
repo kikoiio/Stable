@@ -6,12 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"golang.org/x/sys/unix"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"stable/internal/platform/secfile"
 )
 
 var ErrUnsafePath = errors.New("unsafe candidate path")
@@ -142,15 +143,11 @@ func CreateCandidate(id, formalRoot, candidatesParent string) (Candidate, error)
 	if filepath.Clean(resolvedParent) != filepath.Clean(candidatesParent) {
 		return Candidate{}, fmt.Errorf("candidate parent must not traverse a symlink")
 	}
-	var formalStat, candidateStat unix.Stat_t
-	if err = unix.Stat(formalRoot, &formalStat); err != nil {
+	if err = secfile.SameDevice(formalRoot, candidatesParent); err != nil {
+		if errors.Is(err, secfile.ErrDifferentDevice) {
+			return Candidate{}, errors.New("candidate must be created on the formal project's filesystem")
+		}
 		return Candidate{}, err
-	}
-	if err = unix.Stat(candidatesParent, &candidateStat); err != nil {
-		return Candidate{}, err
-	}
-	if formalStat.Dev != candidateStat.Dev {
-		return Candidate{}, errors.New("candidate must be created on the formal project's filesystem")
 	}
 	base, digest, err := BuildManifest(formalRoot)
 	if err != nil {
@@ -215,24 +212,12 @@ func secureOpen(root, rel string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	rootFD, err := unix.Open(root, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	file, err := secfile.SecureOpen(root, clean)
 	if err != nil {
+		if errors.Is(err, secfile.ErrUnsafePath) {
+			return nil, ErrUnsafePath
+		}
 		return nil, err
-	}
-	defer unix.Close(rootFD)
-	fd, err := unix.Openat2(rootFD, clean, &unix.OpenHow{Flags: unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW, Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS})
-	if err != nil {
-		return nil, err
-	}
-	file := os.NewFile(uintptr(fd), clean)
-	info, err := file.Stat()
-	if err != nil {
-		file.Close()
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		file.Close()
-		return nil, ErrUnsafePath
 	}
 	return file, nil
 }

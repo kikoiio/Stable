@@ -14,7 +14,7 @@ import (
 	"stable/internal/agent"
 	"stable/internal/llm"
 	"stable/internal/permission"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 	"stable/internal/sessionlog"
 )
 

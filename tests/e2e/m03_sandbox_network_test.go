@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"stable/internal/permission"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 	"stable/internal/sessionlog"
 )
 
@@ -26,7 +26,7 @@ func TestM03SandboxNetwork(t *testing.T) {
 	modelSecret := requiredEnv(t, "M03_SECRET")
 	sessionRoot := requiredEnv(t, "M03_SESSION_ROOT")
 	secrets := []string{modelSecret, string(readFixture(t, sentinel)), string(readFixture(t, hostSecret))}
-	manager := sandbox.LinuxManager{}
+	manager := sandbox.New()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	probeSecretBoundary(t, ctx, manager, sandbox.SandboxProfile{
@@ -141,7 +141,7 @@ func probeSessionLog(t *testing.T, root string, secrets []string) {
 	assertNoSecretMarkersInTree(t, secrets, dir)
 }
 
-func probeSecretBoundary(t *testing.T, ctx context.Context, manager sandbox.LinuxManager, profile sandbox.SandboxProfile, sentinel, hostSecret string, secrets []string) {
+func probeSecretBoundary(t *testing.T, ctx context.Context, manager sandbox.SandboxManager, profile sandbox.SandboxProfile, sentinel, hostSecret string, secrets []string) {
 	t.Helper()
 	probe := `import os,sys
 print("\\n".join(os.environ.values()))

@@ -2,9 +2,7 @@ package conversation
 
 import (
 	"context"
-	"errors"
 	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -14,6 +12,7 @@ import (
 	"stable/internal/decision"
 	"stable/internal/llm"
 	"stable/internal/permission"
+	"stable/internal/platform/ipc"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
 )
@@ -99,15 +98,8 @@ func Serve(ctx context.Context, deps Deps) (*Service, error) {
 	if deps.PollEvery <= 0 {
 		deps.PollEvery = 2 * time.Second
 	}
-	if err := os.Remove(deps.SocketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	ln, err := net.Listen("unix", deps.SocketPath)
+	ln, err := ipc.ListenPrivate(deps.SocketPath, true)
 	if err != nil {
-		return nil, err
-	}
-	if err = os.Chmod(deps.SocketPath, 0600); err != nil {
-		ln.Close()
 		return nil, err
 	}
 	s := &Service{deps: deps, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills}

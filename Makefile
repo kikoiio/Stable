@@ -1,11 +1,14 @@
 # Stable — 统一入口。版本号唯一来源是 ./VERSION。
-.PHONY: check test e2e m03-e2e m04-e2e m05-e2e cases package test-package install-dev run clean
+.PHONY: check test e2e m03-e2e m04-e2e m05-e2e cases package test-package install-dev run clean platform-check
 
 check: ## 检查开发环境依赖
 	bash scripts/check_env.sh
 
 test: ## Go 单元测试
 	go test ./...
+
+platform-check: ## 平台边界门禁（业务包无 syscall/unix/GOOS；双 GOOS 编译）
+	bash scripts/check-platform.sh
 
 e2e: ## 源码级端到端测试（含 V01 标准变化与 V02 工程依赖变化）
 	bash tests/e2e/run.sh

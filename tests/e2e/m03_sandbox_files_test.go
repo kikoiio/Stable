@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 )
 
 func TestM03SandboxFiles(t *testing.T) {
@@ -35,7 +35,7 @@ func TestM03SandboxFiles(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Remove(linkPath) })
 
-	manager := sandbox.LinuxManager{}
+	manager := sandbox.New()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	profile := sandbox.SandboxProfile{

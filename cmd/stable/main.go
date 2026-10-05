@@ -13,9 +13,9 @@ import (
 
 	"stable/internal/appconfig"
 	"stable/internal/platform/paths"
+	"stable/internal/platform/sandbox"
 	"stable/internal/prototype"
 	"stable/internal/runtime"
-	"stable/internal/sandbox"
 	"stable/internal/tui"
 )
 
@@ -161,7 +161,7 @@ func run(args []string) error {
 		if err = c.Validate(true); err != nil {
 			return err
 		}
-		return runtime.Supervise(c, p)
+		return runtime.Supervise(c, p, sandbox.New())
 	case "up":
 		if len(args) != 1 {
 			return errors.New("up takes no arguments")

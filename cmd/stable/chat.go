@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"stable/internal/core"
+	"stable/internal/platform/ipc"
 	"stable/internal/platform/paths"
 )
 
@@ -80,7 +81,7 @@ func chat(args []string, p paths.Paths) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	conn, err := net.DialTimeout("unix", p.ChatSocket, time.Second)
+	conn, err := ipc.DialPrivate(p.ChatSocket, time.Second)
 	if err != nil {
 		return errors.New("session service is not reachable; is the runtime running? (stable up)")
 	}

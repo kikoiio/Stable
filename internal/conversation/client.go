@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"stable/internal/agent"
+	"stable/internal/platform/ipc"
 )
 
 type StreamClient struct {
@@ -59,8 +60,7 @@ func SubscribeRun(ctx context.Context, socket, sessionID, runID string, afterSeq
 }
 
 func openStream(ctx context.Context, socket string) (*StreamClient, error) {
-	d := net.Dialer{Timeout: 2 * time.Second}
-	conn, err := d.DialContext(ctx, "unix", socket)
+	conn, err := ipc.DialPrivate(socket, 2*time.Second)
 	if err != nil {
 		return nil, errors.New("session service is not reachable; start the runtime with stable")
 	}
@@ -164,8 +164,7 @@ func (c GoalSocketClient) RunGoal(ctx context.Context, request agent.ExecutionRe
 // Request opens a short-lived socket client, performs one operation and returns
 // all messages produced by that operation. The UI calls it in a background cmd.
 func Request(ctx context.Context, socket string, request ClientMsg) ([]ServerMsg, error) {
-	d := net.Dialer{Timeout: 2 * time.Second}
-	conn, err := d.DialContext(ctx, "unix", socket)
+	conn, err := ipc.DialPrivate(socket, 2*time.Second)
 	if err != nil {
 		return nil, errors.New("session service is not reachable; start the runtime with stable")
 	}

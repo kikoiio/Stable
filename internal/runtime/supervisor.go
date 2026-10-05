@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"stable/internal/agent"
@@ -26,8 +25,11 @@ import (
 	"stable/internal/execution"
 	"stable/internal/llm"
 	"stable/internal/permission"
+	"stable/internal/platform/ipc"
+	"stable/internal/platform/lock"
 	"stable/internal/platform/paths"
-	"stable/internal/sandbox"
+	"stable/internal/platform/proc"
+	"stable/internal/platform/sandbox"
 	"stable/internal/sessioncontext"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
@@ -47,7 +49,7 @@ type Status struct {
 
 func Control(p paths.Paths, cmd string) (Status, error) {
 	var s Status
-	conn, err := net.DialTimeout("unix", p.Socket, 500*time.Millisecond)
+	conn, err := ipc.DialPrivate(p.Socket, 500*time.Millisecond)
 	if err != nil {
 		return s, errors.New("runtime is not running")
 	}
@@ -74,7 +76,7 @@ func Up(ctx context.Context, c appconfig.AppConfig, p paths.Paths) (Status, erro
 		return Status{}, err
 	}
 	defer f.Close()
-	cmd := exec.Command(p.Root+"/bin/stable", "supervise")
+	cmd := exec.Command(filepath.Join(p.Bin, "stable"), "supervise")
 	cmd.Env = os.Environ()
 	cmd.Stdout = f
 	cmd.Stderr = f
@@ -117,20 +119,18 @@ func ReconcileBeforeDispatch(ctx context.Context, dbPath string) error {
 	return s.ReconcileAcceptances(ctx)
 }
 
-func Supervise(c appconfig.AppConfig, p paths.Paths) error {
+func Supervise(c appconfig.AppConfig, p paths.Paths, sbx sandbox.SandboxManager) error {
 	if err := p.Prepare(); err != nil {
 		return err
 	}
-	lock, err := os.OpenFile(p.Lock, os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
 	// A previous supervisor may still be releasing children after a crash or
 	// down; wait for the lock instead of failing the fresh start outright.
 	lockDeadline := time.Now().Add(20 * time.Second)
+	var guard lock.Guard
 	for {
-		if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+		acquired, acquireErr := lock.TryAcquire(p.Lock)
+		if acquireErr == nil {
+			guard = acquired
 			break
 		}
 		if time.Now().After(lockDeadline) {
@@ -141,29 +141,25 @@ func Supervise(c appconfig.AppConfig, p paths.Paths) error {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	defer guard.Release()
 	if _, err := Control(p, "status"); err == nil {
 		return errors.New("runtime already running")
 	}
 	if err := ReconcileBeforeDispatch(context.Background(), p.Database); err != nil {
 		return fmt.Errorf("reconcile interrupted acceptances: %w", err)
 	}
-	_ = os.Remove(p.Socket)
 	address := "127.0.0.1:" + strconv.Itoa(c.TemporalPort)
 	if conn, err := net.DialTimeout("tcp", address, 200*time.Millisecond); err == nil {
 		conn.Close()
 		return fmt.Errorf("Temporal port %d is occupied", c.TemporalPort)
 	}
-	listener, err := net.Listen("unix", p.Socket)
+	listener, err := ipc.ListenPrivate(p.Socket, true)
 	if err != nil {
 		return err
 	}
 	defer listener.Close()
 	defer os.Remove(p.Socket)
 	defer os.Remove(p.ChatSocket)
-	if err = os.Chmod(p.Socket, 0600); err != nil {
-		return err
-	}
 	temporalLog, err := os.OpenFile(p.TemporalLog, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
@@ -180,7 +176,7 @@ func Supervise(c appconfig.AppConfig, p paths.Paths) error {
 	if err = temporal.Start(); err != nil {
 		return err
 	}
-	defer stopProcess(temporal)
+	defer proc.StopProcess(temporal, 5*time.Second)
 	if err = waitPort(address, temporal, 20*time.Second); err != nil {
 		return fmt.Errorf("Temporal startup: %w; see %s", err, p.TemporalLog)
 	}
@@ -191,11 +187,11 @@ func Supervise(c appconfig.AppConfig, p paths.Paths) error {
 	if err = worker.Start(); err != nil {
 		return err
 	}
-	defer stopProcess(worker)
+	defer proc.StopProcess(worker, 5*time.Second)
 	if err = waitReady(p.WorkerLog, worker, 15*time.Second); err != nil {
 		return fmt.Errorf("Worker startup: %w; see %s", err, p.WorkerLog)
 	}
-	chatDone := startChatService(c, p, address)
+	chatDone := startChatService(c, p, address, sbx)
 	if err := waitChatSocket(p.ChatSocket, chatDone, 10*time.Second); err != nil {
 		return fmt.Errorf("Chat startup: %w; see %s", err, p.ChatLog)
 	}
@@ -210,7 +206,7 @@ func Supervise(c appconfig.AppConfig, p paths.Paths) error {
 			case <-stopWatch:
 				return
 			case <-tick.C:
-				if !processAlive(temporal) || !processAlive(worker) {
+				if !proc.Alive(temporal) || !proc.Alive(worker) {
 					_ = listener.Close()
 					return
 				}
@@ -241,7 +237,7 @@ func Supervise(c appconfig.AppConfig, p paths.Paths) error {
 		} else {
 			conn.Close()
 		}
-		if !processAlive(temporal) || !processAlive(worker) {
+		if !proc.Alive(temporal) || !proc.Alive(worker) {
 			return errors.New("runtime child exited unexpectedly")
 		}
 		select {
@@ -312,11 +308,11 @@ func userSkillsDir() string {
 
 // startChatService runs the persistent conversation service inside the
 // supervisor process. It returns a channel that closes when the service stops.
-func startChatService(c appconfig.AppConfig, p paths.Paths, address string) <-chan struct{} {
+func startChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sandbox.SandboxManager) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := runChatService(c, p, address); err != nil {
+		if err := runChatService(c, p, address, sbx); err != nil {
 			if f, ferr := os.OpenFile(p.ChatLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); ferr == nil {
 				fmt.Fprintf(f, "%s chat session service: %v\n", time.Now().UTC().Format(time.RFC3339), err)
 				f.Close()
@@ -326,7 +322,7 @@ func startChatService(c appconfig.AppConfig, p paths.Paths, address string) <-ch
 	return done
 }
 
-func runChatService(c appconfig.AppConfig, p paths.Paths, address string) error {
+func runChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sandbox.SandboxManager) error {
 	s, err := store.Open(p.Database)
 	if err != nil {
 		return err
@@ -340,7 +336,7 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string) error 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	refresher, err := dependency.NewKiCadRefresher(s, p.Goals, p.Share, address)
+	refresher, err := dependency.NewKiCadRefresher(s, p.Goals, p.Share, address, sbx)
 	if err != nil {
 		return err
 	}
@@ -364,7 +360,7 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string) error 
 			return fmt.Errorf("candidate snapshot store: %w", err)
 		}
 		executorFactory = execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
-			Sandbox:            sandbox.LinuxManager{},
+			Sandbox:            sbx,
 			Gate:               execution.StorePermissionGate{Store: s},
 			Approvals:          s,
 			Candidates:         s,
@@ -388,7 +384,7 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string) error 
 	svc, err := conversation.Serve(ctx, conversation.Deps{
 		Store: s, Provider: provider, ChatProvider: chatProvider, Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: address, ProjectRoot: p.Share, RunRoot: p.Goals, SocketPath: p.ChatSocket,
 		Refresher:           refresher,
-		CandidateCheckers:   []candidate.Checker{candidate.KicadERCChecker{Sandbox: sandbox.LinuxManager{}, RunRoot: p.Goals}},
+		CandidateCheckers:   []candidate.Checker{candidate.KicadERCChecker{Sandbox: sbx, RunRoot: p.Goals}},
 		ContextWindowTokens: c.Model.ContextWindowTokens,
 		Snapshots:           snapshotStore,
 		Skills:              skillGate,
@@ -415,7 +411,7 @@ func waitChatSocket(path string, done <-chan struct{}, limit time.Duration) erro
 		case <-deadline.C:
 			return errors.New("session service readiness timed out")
 		case <-tick.C:
-			conn, err := net.DialTimeout("unix", path, 100*time.Millisecond)
+			conn, err := ipc.DialPrivate(path, 100*time.Millisecond)
 			if err == nil {
 				conn.Close()
 				return nil
@@ -424,35 +420,10 @@ func waitChatSocket(path string, done <-chan struct{}, limit time.Duration) erro
 	}
 }
 
-func processAlive(cmd *exec.Cmd) bool {
-	if cmd.Process == nil || cmd.Process.Signal(syscall.Signal(0)) != nil {
-		return false
-	}
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", cmd.Process.Pid))
-	if err != nil {
-		return false
-	}
-	fields := strings.Fields(string(data))
-	return len(fields) > 2 && fields[2] != "Z"
-}
-func stopProcess(cmd *exec.Cmd) {
-	if cmd.Process == nil {
-		return
-	}
-	_ = cmd.Process.Signal(syscall.SIGTERM)
-	done := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		_ = cmd.Process.Kill()
-		<-done
-	}
-}
 func waitPort(address string, cmd *exec.Cmd, limit time.Duration) error {
 	end := time.Now().Add(limit)
 	for time.Now().Before(end) {
-		if !processAlive(cmd) {
+		if !proc.Alive(cmd) {
 			return errors.New("process exited")
 		}
 		c, err := net.DialTimeout("tcp", address, 200*time.Millisecond)
@@ -467,7 +438,7 @@ func waitPort(address string, cmd *exec.Cmd, limit time.Duration) error {
 func waitReady(path string, cmd *exec.Cmd, limit time.Duration) error {
 	end := time.Now().Add(limit)
 	for time.Now().Before(end) {
-		if !processAlive(cmd) {
+		if !proc.Alive(cmd) {
 			return errors.New("process exited")
 		}
 		b, _ := os.ReadFile(path)

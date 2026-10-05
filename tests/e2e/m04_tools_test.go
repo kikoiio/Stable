@@ -17,7 +17,7 @@ import (
 	"stable/internal/execution"
 	"stable/internal/llm"
 	"stable/internal/permission"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 	"stable/internal/sessionlog"
 )
 
@@ -98,7 +98,7 @@ func m04RealExecutor(t *testing.T, runID, credential string) (agent.RunExecutor,
 	}
 	authority := permission.Authority{RunID: runID, SessionID: session.ID, AllowedRoot: formal, FormalRoot: formal, CandidateRoot: candidate, Mode: permission.ModeBypass}
 	raw, _ := json.Marshal(authority)
-	factory := execution.NewToolExecutorFactory(execution.ToolExecutorDeps{Sandbox: sandbox.LinuxManager{}, Gate: m04AllowGate{}, HelperPath: os.Getenv("STABLE_M04_HELPER"), SessionRoot: sessionRoot, Now: time.Now, ProviderCredential: credential})
+	factory := execution.NewToolExecutorFactory(execution.ToolExecutorDeps{Sandbox: sandbox.New(), Gate: m04AllowGate{}, HelperPath: os.Getenv("STABLE_M04_HELPER"), SessionRoot: sessionRoot, Now: time.Now, ProviderCredential: credential})
 	runner, err := factory.ForRun(agent.ExecutionRequest{RunID: authority.RunID, Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: authority.SessionID}, Intent: "m04", Model: "test", PermissionBounds: raw})
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ func TestM04SandboxPositive(t *testing.T) {
 	}
 	authority := permission.Authority{RunID: "m04-positive", SessionID: "m04-session", AllowedRoot: formal, FormalRoot: formal, CandidateRoot: candidate, Mode: permission.ModeBypass}
 	raw, _ := json.Marshal(authority)
-	factory := execution.NewToolExecutorFactory(execution.ToolExecutorDeps{Sandbox: sandbox.LinuxManager{}, Gate: m04AllowGate{}, HelperPath: os.Getenv("STABLE_M04_HELPER"), Now: time.Now})
+	factory := execution.NewToolExecutorFactory(execution.ToolExecutorDeps{Sandbox: sandbox.New(), Gate: m04AllowGate{}, HelperPath: os.Getenv("STABLE_M04_HELPER"), Now: time.Now})
 	if os.Getenv("STABLE_M04_HELPER") == "" {
 		t.Skip("positive tool path requires STABLE_M04_HELPER")
 	}

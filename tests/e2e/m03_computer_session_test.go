@@ -15,7 +15,7 @@ import (
 	"stable/internal/candidate"
 	"stable/internal/core"
 	"stable/internal/execution"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 )
 
 func fileSHA256(t *testing.T, path string) string {
@@ -48,7 +48,7 @@ func TestM03ComputerIsolatedSessionLifecycle(t *testing.T) {
 	if _, err := exec.LookPath("Xvfb"); err != nil {
 		t.Fatalf("Xvfb unavailable: %v", err)
 	}
-	manager := sandbox.LinuxManager{}
+	manager := sandbox.New()
 	bridge := &execution.PythonBridge{Script: bridgeScript, Sandbox: manager, ProfileFor: func(core.CapabilityRequest) (sandbox.SandboxProfile, error) {
 		return sandbox.SandboxProfile{ProjectRoot: formal, CandidateRoot: candidateRoot, RunRoot: runRoot, Timeout: 90 * time.Second, OutputLimit: 1 << 20, ProxyHelperPath: bridgeBinary}, nil
 	}}

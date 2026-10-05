@@ -13,6 +13,7 @@ import (
 	"stable/internal/candidate"
 	"stable/internal/conversation"
 	"stable/internal/core"
+	"stable/internal/platform/sandbox"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
 )
@@ -21,7 +22,7 @@ import (
 // independent sandbox checker, startup recovery for interrupted acceptances,
 // and a service that only lets the owning session submit decisions.
 func TestChatserveAssembly(t *testing.T) {
-	checkers := chatCandidateCheckers("/run/root")
+	checkers := chatCandidateCheckers("/run/root", sandbox.New())
 	if len(checkers) != 1 {
 		t.Fatalf("checkers=%v", checkers)
 	}

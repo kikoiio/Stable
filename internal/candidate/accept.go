@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"stable/internal/platform/secfile"
 )
 
 type AcceptanceMode string
@@ -200,24 +200,14 @@ func ExchangeProjectDir(formalRoot, candidateRoot string) error {
 	if err != nil {
 		return err
 	}
-	for _, p := range []string{formalRoot, candidateRoot} {
-		info, err := os.Lstat(p)
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	if err = secfile.Exchange(formalRoot, candidateRoot); err != nil {
+		if errors.Is(err, secfile.ErrUnsafePath) {
 			return ErrUnsafePath
 		}
-	}
-	var a, b unix.Stat_t
-	if err = unix.Stat(formalRoot, &a); err != nil {
+		if errors.Is(err, secfile.ErrDifferentDevice) {
+			return errors.New("formal and candidate directories are on different filesystems")
+		}
 		return err
 	}
-	if err = unix.Stat(candidateRoot, &b); err != nil {
-		return err
-	}
-	if a.Dev != b.Dev {
-		return errors.New("formal and candidate directories are on different filesystems")
-	}
-	return unix.Renameat2(unix.AT_FDCWD, formalRoot, unix.AT_FDCWD, candidateRoot, unix.RENAME_EXCHANGE)
+	return nil
 }

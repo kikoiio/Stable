@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"stable/internal/core"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 )
 
 type fakeSandbox struct {

@@ -11,7 +11,7 @@ import (
 
 	"stable/internal/core"
 	"stable/internal/execution"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 )
 
 func profilePayload(t *testing.T, project, candidateRoot, run string) json.RawMessage {

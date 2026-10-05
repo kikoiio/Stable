@@ -16,8 +16,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
+
+	"stable/internal/platform/ipc"
+	"stable/internal/platform/proc"
 )
 
 type sessionState struct {
@@ -115,7 +117,11 @@ func (m LinuxManager) StartIsolatedSession(ctx context.Context, profile SandboxP
 	}
 	sessionCtx, cancel := context.WithCancel(context.Background())
 	cmd := m.command(sessionCtx, args[0], args[1:]...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	if err = proc.ConfigureChild(cmd); err != nil {
+		cancel()
+		cleanupControl()
+		return SandboxSession{}, err
+	}
 	cmd.Stdin = nil
 	logFile, err := openSessionLog(profile.RunRoot, id)
 	if err != nil {
@@ -282,13 +288,13 @@ func stopManagedSession(ctx context.Context, managed *managedSession) error {
 		return nil
 	}
 	pid := managed.cmd.Process.Pid
-	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	_ = proc.KillGroup(pid, false)
 	select {
 	case <-managed.done:
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = proc.KillGroup(pid, true)
 		return nil
 	case <-ctx.Done():
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = proc.KillGroup(pid, true)
 		select {
 		case <-managed.done:
 			return ctx.Err()
@@ -296,7 +302,7 @@ func stopManagedSession(ctx context.Context, managed *managedSession) error {
 			return fmt.Errorf("isolated session process %d did not stop", pid)
 		}
 	case <-time.After(2 * time.Second):
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = proc.KillGroup(pid, true)
 		select {
 		case <-managed.done:
 			return nil
@@ -320,13 +326,8 @@ func createSessionControlSocket(runRoot string) (string, string, net.Listener, e
 		return "", "", nil, err
 	}
 	path := filepath.Join(dir, "session.sock")
-	listener, err := net.Listen("unix", path)
+	listener, err := ipc.ListenPrivate(path, false)
 	if err != nil {
-		_ = os.RemoveAll(dir)
-		return "", "", nil, err
-	}
-	if err = os.Chmod(path, 0600); err != nil {
-		_ = listener.Close()
 		_ = os.RemoveAll(dir)
 		return "", "", nil, err
 	}

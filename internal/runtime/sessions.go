@@ -5,13 +5,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 
 	"stable/internal/platform/paths"
-
-	_ "github.com/mattn/go-sqlite3"
+	"stable/internal/platform/proc"
 )
 
 // sessionHandle mirrors the runtime_handle JSON stored per computer session.
@@ -71,17 +69,16 @@ func terminateIf(pid int, wantPrefix string) bool {
 	if pid <= 1 {
 		return false
 	}
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+	cmdline, err := proc.Cmdline(pid)
 	if err != nil {
 		return false
 	}
-	cmdline := strings.ReplaceAll(string(b), "\x00", " ")
 	if !strings.HasPrefix(cmdline, wantPrefix) {
 		return false
 	}
-	proc, err := os.FindProcess(pid)
+	process, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
-	return proc.Signal(syscall.SIGTERM) == nil
+	return process.Signal(syscall.SIGTERM) == nil
 }

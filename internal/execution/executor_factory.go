@@ -12,7 +12,7 @@ import (
 	"stable/internal/agent"
 	"stable/internal/candidate"
 	"stable/internal/permission"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 	"stable/internal/store"
 	"stable/internal/todo"
 )

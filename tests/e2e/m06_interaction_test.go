@@ -32,7 +32,7 @@ import (
 	"stable/internal/execution"
 	"stable/internal/llm"
 	"stable/internal/planfile"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
 	"stable/internal/tools"
@@ -154,7 +154,7 @@ func m06NewService(t *testing.T, root string, db *store.Store, provider *m06Agen
 	todoProvider := conversation.NewTodoProvider(nil)
 	planSink := conversation.NewPlanApprovalSink(nil)
 	factory := execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
-		Sandbox:            sandbox.LinuxManager{},
+		Sandbox:            sandbox.New(),
 		Gate:               execution.StorePermissionGate{Store: db},
 		Approvals:          db,
 		Candidates:         db,

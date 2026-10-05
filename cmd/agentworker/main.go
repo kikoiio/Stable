@@ -25,8 +25,8 @@ import (
 	"stable/internal/dependency"
 	"stable/internal/execution"
 	"stable/internal/goalrun"
+	"stable/internal/platform/sandbox"
 	"stable/internal/policy"
-	"stable/internal/sandbox"
 	"stable/internal/store"
 	"stable/internal/tools"
 )
@@ -170,7 +170,7 @@ func runConfigured(dbPath, runRoot, address, projectRoot string, appMode bool, c
 		return fmt.Errorf("find isolated proxy helper binary: %w", helperErr)
 	}
 	profileFor := execution.SandboxProfileFor(runRoot, helperPath)
-	isolator := sandbox.LinuxManager{}
+	isolator := sandbox.New()
 	kicad := &execution.PythonBridge{Script: filepath.Join(projectRoot, "workers/kicad/bridge.py"), AllowedRoot: runRoot, Sandbox: isolator, ProfileFor: profileFor, Timeout: 90 * time.Second}
 	computer := &execution.PythonBridge{Script: filepath.Join(projectRoot, "workers/computer/bridge.py"), AllowedRoot: runRoot, Sandbox: isolator, ProfileFor: profileFor, Timeout: 90 * time.Second}
 	coordinator := &execution.Coordinator{Store: state, Artifacts: artifacts, Policy: policyEngine, Permissions: execution.StorePermissionGate{Store: state},

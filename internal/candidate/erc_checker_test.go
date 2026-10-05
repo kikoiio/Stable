@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 )
 
 type checkerSandbox struct {

@@ -16,7 +16,7 @@ import (
 	"stable/internal/candidate"
 	"stable/internal/llm"
 	"stable/internal/permission"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 	"stable/internal/store"
 )
 

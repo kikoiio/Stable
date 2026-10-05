@@ -13,6 +13,7 @@ import (
 	"stable/internal/core"
 	"stable/internal/dependency"
 	"stable/internal/goalrun"
+	"stable/internal/platform/sandbox"
 	"stable/internal/report"
 	"stable/internal/store"
 )
@@ -219,7 +220,7 @@ func export(args []string) error {
 }
 
 func makeRefresher(s *store.Store, runRoot, projectRoot, address string) (*dependency.Refresher, error) {
-	return dependency.NewKiCadRefresher(s, runRoot, projectRoot, address)
+	return dependency.NewKiCadRefresher(s, runRoot, projectRoot, address, sandbox.New())
 }
 
 // refreshedSnapshot persists any newly observed dependency generation before

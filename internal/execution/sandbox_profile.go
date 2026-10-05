@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"stable/internal/core"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 )
 
 // SandboxProfileFor builds the trusted sandbox profile validator shared by the

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"stable/internal/permission"
+	"stable/internal/platform/ipc"
 )
 
 type GrantResolver interface {
@@ -94,18 +95,13 @@ func (p NetworkProxy) Serve(ctx context.Context) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	listener, err := net.Listen("unix", p.SocketPath)
+	listener, err := ipc.ListenPrivate(p.SocketPath, false)
 	if err != nil {
 		return err
 	}
 	createdInfo, err := os.Lstat(p.SocketPath)
 	if err != nil {
 		listener.Close()
-		return err
-	}
-	if err = os.Chmod(p.SocketPath, 0600); err != nil {
-		listener.Close()
-		os.Remove(p.SocketPath)
 		return err
 	}
 	defer func() {

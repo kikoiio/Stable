@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/sys/unix"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
+	"stable/internal/platform/secfile"
 )
 
 // KicadERCChecker runs the installed KiCad ERC against candidate schematics
@@ -145,11 +145,10 @@ func (k KicadERCChecker) Check(ctx context.Context, c Candidate) (Finding, error
 		if result.ExitCode != 0 && result.ExitCode != 5 {
 			return Finding{}, fmt.Errorf("KiCad ERC failed for %s with exit code %d", rel, result.ExitCode)
 		}
-		fd, readErr := unix.Open(report, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		reportFile, readErr := secfile.OpenNoFollow(report)
 		if readErr != nil {
 			return Finding{}, fmt.Errorf("read KiCad ERC report for %s: %w", rel, readErr)
 		}
-		reportFile := os.NewFile(uintptr(fd), report)
 		reportInfo, readErr := reportFile.Stat()
 		if readErr != nil {
 			_ = reportFile.Close()

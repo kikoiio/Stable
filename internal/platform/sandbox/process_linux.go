@@ -38,13 +38,6 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	return original, nil
 }
 
-func (m LinuxManager) command(ctx context.Context, name string, args ...string) *exec.Cmd {
-	if m.NewCommand != nil {
-		return m.NewCommand(ctx, name, args...)
-	}
-	return exec.CommandContext(ctx, name, args...)
-}
-
 func (m LinuxManager) RunIsolated(ctx context.Context, p SandboxProfile, argv []string, stdin io.Reader) (SandboxResult, error) {
 	if err := m.Probe(ctx, p); err != nil {
 		return SandboxResult{}, fmt.Errorf("%w: %v", ErrUnavailable, err)

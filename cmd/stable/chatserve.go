@@ -22,7 +22,7 @@ import (
 	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/platform/paths"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 	"stable/internal/sessioncontext"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
@@ -62,12 +62,13 @@ func chatserve(args []string) error {
 		return err
 	}
 	defer s.Close()
+	sbx := sandbox.New()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err = chatserveRecovery(ctx, s); err != nil {
 		return fmt.Errorf("startup recovery: %w", err)
 	}
-	refresher, err := dependency.NewKiCadRefresher(s, *runRoot, *projectRoot, *temporal)
+	refresher, err := dependency.NewKiCadRefresher(s, *runRoot, *projectRoot, *temporal, sbx)
 	if err != nil {
 		return err
 	}
@@ -100,7 +101,7 @@ func chatserve(args []string) error {
 			return fmt.Errorf("candidate snapshot store: %w", err)
 		}
 		executorFactory = execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
-			Sandbox:            sandbox.LinuxManager{},
+			Sandbox:            sbx,
 			Gate:               execution.StorePermissionGate{Store: s},
 			Approvals:          s,
 			Candidates:         s,
@@ -124,7 +125,7 @@ func chatserve(args []string) error {
 	svc, err := conversation.Serve(ctx, conversation.Deps{
 		Store: s, Provider: provider, ChatProvider: model.(decision.ChatProvider), Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket,
 		Refresher:           refresher,
-		CandidateCheckers:   chatCandidateCheckers(*runRoot),
+		CandidateCheckers:   chatCandidateCheckers(*runRoot, sbx),
 		ContextWindowTokens: c.Model.ContextWindowTokens,
 		Snapshots:           snapshotStore,
 		Skills:              skillGate,
@@ -193,8 +194,8 @@ func chatserveToolSchemas() []llm.ToolSchema {
 // review entry runs inside the verified Linux sandbox. Without one every
 // preview would carry an unavailable finding and normal acceptance would be
 // blocked.
-func chatCandidateCheckers(runRoot string) []candidate.Checker {
-	return []candidate.Checker{candidate.KicadERCChecker{Sandbox: sandbox.LinuxManager{}, RunRoot: runRoot}}
+func chatCandidateCheckers(runRoot string, sbx sandbox.SandboxManager) []candidate.Checker {
+	return []candidate.Checker{candidate.KicadERCChecker{Sandbox: sbx, RunRoot: runRoot}}
 }
 
 // chatserveRecovery settles candidate acceptances that were interrupted before

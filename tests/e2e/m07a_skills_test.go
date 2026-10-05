@@ -17,7 +17,7 @@ import (
 	"stable/internal/conversation"
 	"stable/internal/execution"
 	"stable/internal/llm"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 	"stable/internal/sessionlog"
 	"stable/internal/skills"
 	"stable/internal/store"
@@ -60,7 +60,7 @@ func m07aNewService(t *testing.T, root string, db *store.Store, provider *m06Age
 	// so its event appends share the service event mutex.
 	skillGate := conversation.NewSkillGate(nil, os.Getenv("STABLE_M07A_USER_SKILLS"), filepath.Join(root, ".stable", "skills"))
 	factory := execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
-		Sandbox:            sandbox.LinuxManager{},
+		Sandbox:            sandbox.New(),
 		Gate:               execution.StorePermissionGate{Store: db},
 		Approvals:          db,
 		Candidates:         db,

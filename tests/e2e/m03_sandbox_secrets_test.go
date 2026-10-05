@@ -19,7 +19,7 @@ import (
 	"stable/internal/decision"
 	"stable/internal/llm"
 	"stable/internal/permission"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
 )
@@ -172,7 +172,7 @@ func TestM03SandboxSecretsTrustedFlow(t *testing.T) {
 	assertNoSecretMarkersInTree(t, secrets, root, candidateRoot, runRoot, filepath.Join(filepath.Dir(runRoot), ".stable-sessions", "logs"))
 
 	profile := sandbox.SandboxProfile{ProjectRoot: root, CandidateRoot: candidateRoot, RunRoot: runRoot, Timeout: 10 * time.Second, OutputLimit: 4096}
-	probe, probeErr := (sandbox.LinuxManager{}).RunIsolated(ctx, profile, []string{"python3", "-c", "import os; print(' '.join(os.environ.values())); print(open('/proc/self/mountinfo').read())"}, nil)
+	probe, probeErr := (sandbox.New()).RunIsolated(ctx, profile, []string{"python3", "-c", "import os; print(' '.join(os.environ.values())); print(open('/proc/self/mountinfo').read())"}, nil)
 	assertNoSecretMarkers(t, secrets, string(probe.Stdout), string(probe.Stderr), errorString(probeErr))
 	if probeErr != nil || probe.ExitCode != 0 {
 		t.Fatalf("secret boundary probe failed: exit=%d err=%v", probe.ExitCode, probeErr)

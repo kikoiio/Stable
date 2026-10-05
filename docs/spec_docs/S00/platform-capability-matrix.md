@@ -456,3 +456,22 @@
 - **D12(C02)**:盘点漏列第 4 个 UDS endpoint(internal/sandbox/session.go 会话控制 socket)及其 Linux sun_path 108 字节假设;四处 socket chmod 均发生在 listen 之后,存在短暂 umask 权限窗口(盘点未提及)。
 - **D13(C04)**:盘点把「进程组、Pdeathsig、POSIX signal、/proc 查询和 kill」笼统归为运行时/沙箱逻辑——实况分布不均:进程组+Pdeathsig+组级 kill 仅在沙箱路径;supervisor 的 temporal/worker 无独立进程组、只杀直接子进程;/proc 探测在 supervisor.go、sessions.go 与 workers/computer/bridge.py 三处实现互不相同。
 - **D14(C09)**:「kicad-cli 检测」实为双轨:doctor 查主机 PATH、执行时按沙箱固定 PATH(/usr/bin:/bin)解析——存在 doctor 报 OK 而沙箱内不可用的口径差;另 doctor 检查 kicad/xvfb-run/xprop 但运行时从不使用(超集检查)。
+
+
+## 7. S01 位置更新（不改写历史结论）
+
+S01 把操作系统依赖抽到 `internal/platform/{paths,ipc,lock,proc,secfile,sandbox}`。Linux 各行状态仍为「支持」，未降级。下列是证据路径变更，供阶段 1 之后引用；第 3 节原文保留 S00 审计时的位置。
+
+| 原位置（S00 审计） | S01 之后 |
+| --- | --- |
+| `internal/runtime/paths.go` Resolve/Prepare | `internal/platform/paths`（含 HelperBinary / HelperBinaryResolved；`chatserveHelperPath` 已删除） |
+| supervisor/conversation/sandbox unix listen+chmod | `internal/platform/ipc.ListenPrivate` / `DialPrivate` |
+| `internal/runtime/supervisor.go` syscall.Flock | `internal/platform/lock.TryAcquire`（20s 重试循环仍在 supervisor） |
+| supervisor processAlive/stopProcess；sandbox Setpgid/Pdeathsig/组杀；sessions.go `/proc/.../cmdline` | `internal/platform/proc`（Alive / StopProcess / ConfigureChild / KillGroup / Cmdline） |
+| candidate `secureOpen` / `unix.Open` / `Renameat2` 同设备检查 | `internal/platform/secfile`（SecureOpen / OpenNoFollow / Exchange / SameDevice） |
+| `internal/sandbox` 整包 | `internal/platform/sandbox`；`New()` 为唯一构造入口 |
+| 6 处 `sandbox.LinuxManager{}`（含 `internal/dependency/service.go`） | 0；cmd/stable、chatserve、agentworker 注入 `sandbox.New()` |
+| `internal/appconfig/owner_unix.go` | `owner_linux.go` + `owner_other.go`（非 Linux Load fail-closed） |
+| `internal/store` 空白导入 go-sqlite3 | `driver_linux.go` / `driver_other.go`；非 Linux `Open` 返回明确 unsupported |
+
+可运行验证路径同步：`go test ./internal/sandbox/...` 现为 `go test ./internal/platform/sandbox/...`。S01 回放（2026-10-06）：appconfig TestLoadAndValidate、store TestReconcile、platform/sandbox Bubblewrap/进程组/网络代理/Probe、conversation TestSessionProtocolClientLifecycle、candidate 全包、execution computer bridge、redact、workers/kicad 与 workers/computer unittest 均通过。`make platform-check` 与 `CGO_ENABLED=0 GOOS=windows/darwin go build ./...` 退出码 0。

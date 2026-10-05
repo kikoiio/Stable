@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"stable/internal/core"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 )
 
 var ErrOutcomeUnknown = errors.New("capability outcome unknown")

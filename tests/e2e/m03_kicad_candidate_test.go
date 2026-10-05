@@ -13,7 +13,7 @@ import (
 	"stable/internal/candidate"
 	"stable/internal/core"
 	"stable/internal/execution"
-	"stable/internal/sandbox"
+	"stable/internal/platform/sandbox"
 )
 
 func TestM03KicadRepairRunsOnlyAgainstCandidateInLinuxSandbox(t *testing.T) {
@@ -33,7 +33,7 @@ func TestM03KicadRepairRunsOnlyAgainstCandidateInLinuxSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := sandbox.LinuxManager{}
+	manager := sandbox.New()
 	bridge := &execution.PythonBridge{Script: bridgeScript, Sandbox: manager, ProfileFor: func(core.CapabilityRequest) (sandbox.SandboxProfile, error) {
 		return sandbox.SandboxProfile{ProjectRoot: formal, CandidateRoot: candidateRoot, RunRoot: runRoot, Timeout: 90 * time.Second, OutputLimit: 1 << 20, ProxyHelperPath: bridgeBinary}, nil
 	}}
