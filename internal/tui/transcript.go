@@ -150,6 +150,61 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 			part := &block{role: "问题回复"}
 			part.text.WriteString(truncate(reply.ReplyText, 600))
 			blocks = append(blocks, part)
+		case sessionlog.EventPlanMode:
+			var mode sessionlog.PlanMode
+			if decodeEventData(e.Data, &mode) != nil {
+				continue
+			}
+			part := &block{role: "计划模式"}
+			if mode.Mode == sessionlog.PlanModePlan {
+				part.text.WriteString("进入计划模式")
+			} else {
+				part.text.WriteString("退出计划模式")
+			}
+			switch mode.Reason {
+			case sessionlog.PlanModeReasonUserToggle:
+				part.text.WriteString("（用户切换）")
+			case sessionlog.PlanModeReasonPlanApproved:
+				part.text.WriteString("（计划已批准）")
+			case sessionlog.PlanModeReasonPlanCancelled:
+				part.text.WriteString("（计划审批取消）")
+			}
+			blocks = append(blocks, part)
+		case sessionlog.EventPlanApproval:
+			var approval sessionlog.PlanApprovalRecord
+			if decodeEventData(e.Data, &approval) != nil {
+				continue
+			}
+			part := &block{role: "计划审批"}
+			switch approval.Status {
+			case sessionlog.PlanApprovalSubmitted:
+				fmt.Fprintf(&part.text, "待审批：%s", approval.PlanPath)
+			case sessionlog.PlanApprovalApprovedAuto:
+				fmt.Fprintf(&part.text, "已批准（自动接受）：%s", approval.PlanPath)
+			case sessionlog.PlanApprovalApprovedManual:
+				fmt.Fprintf(&part.text, "已批准（逐次确认）：%s", approval.PlanPath)
+			case sessionlog.PlanApprovalFeedback:
+				fmt.Fprintf(&part.text, "反馈继续改：%s", approval.PlanPath)
+				if approval.Feedback != "" {
+					fmt.Fprintf(&part.text, "\n反馈：%s", truncate(approval.Feedback, 300))
+				}
+			case sessionlog.PlanApprovalCancelled:
+				fmt.Fprintf(&part.text, "已取消：%s", approval.PlanPath)
+			}
+			blocks = append(blocks, part)
+		case sessionlog.EventTodo:
+			var update sessionlog.TodoUpdate
+			if decodeEventData(e.Data, &update) != nil {
+				continue
+			}
+			part := &block{role: "任务清单"}
+			if len(update.Tasks) == 0 {
+				part.text.WriteString("（空）")
+			}
+			for _, task := range update.Tasks {
+				fmt.Fprintf(&part.text, "[%s] %s\n", task.Status, task.Subject)
+			}
+			blocks = append(blocks, part)
 		case sessionlog.EventRunEvent:
 			var run sessionlog.RunEvent
 			if decodeEventData(e.Data, &run) != nil {
