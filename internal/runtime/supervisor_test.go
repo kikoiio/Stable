@@ -138,8 +138,8 @@ func TestRuntimeToolSchemas(t *testing.T) {
 	schemas := runtimeToolSchemas()
 	want := []string{
 		"ask_user", "command", "edit_file", "exit_plan_mode", "glob", "grep",
-		"read_file", "task_create", "task_get", "task_list", "task_update",
-		"write_file",
+		"load_skill", "read_file", "task_create", "task_get", "task_list",
+		"task_update", "write_file",
 	}
 	if len(schemas) != len(want) {
 		t.Fatalf("schema count = %d, want %d", len(schemas), len(want))

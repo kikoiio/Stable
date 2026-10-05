@@ -205,6 +205,37 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 				fmt.Fprintf(&part.text, "[%s] %s\n", task.Status, task.Subject)
 			}
 			blocks = append(blocks, part)
+		case sessionlog.EventSkillInventory:
+			var inv sessionlog.SkillInventory
+			if decodeEventData(e.Data, &inv) != nil {
+				continue
+			}
+			part := &block{role: "技能清单"}
+			if len(inv.Skills) == 0 {
+				part.text.WriteString("（无技能）")
+			}
+			for _, info := range inv.Skills {
+				fmt.Fprintf(&part.text, "- %s（%s）\n", info.Name, info.Source)
+			}
+			blocks = append(blocks, part)
+		case sessionlog.EventSkillDelta:
+			var delta sessionlog.SkillDelta
+			if decodeEventData(e.Data, &delta) != nil {
+				continue
+			}
+			part := &block{role: "技能新增"}
+			for _, info := range delta.Added {
+				fmt.Fprintf(&part.text, "%s ", info.Name)
+			}
+			blocks = append(blocks, part)
+		case sessionlog.EventSkillInvoked:
+			var invoked sessionlog.SkillInvoked
+			if decodeEventData(e.Data, &invoked) != nil {
+				continue
+			}
+			part := &block{role: "技能激活"}
+			fmt.Fprintf(&part.text, "%s（%s·%s）", invoked.Name, invoked.Source, invoked.Entry)
+			blocks = append(blocks, part)
 		case sessionlog.EventRunEvent:
 			var run sessionlog.RunEvent
 			if decodeEventData(e.Data, &run) != nil {

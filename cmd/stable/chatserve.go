@@ -85,6 +85,9 @@ func chatserve(args []string) error {
 	askSink := conversation.NewAskAdapter(nil)
 	todoProvider := conversation.NewTodoProvider(nil)
 	planSink := conversation.NewPlanApprovalSink(nil)
+	// The skill gate reads the same directories the TUI lists; Serve binds it
+	// to the service so its event appends share the service event mutex.
+	skillGate := conversation.NewSkillGate(nil, userSkillsDir(), filepath.Join(*projectRoot, ".stable", "skills"))
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
 		var credentials []string
 		if c.Model.APIKey != "" {
@@ -105,7 +108,7 @@ func chatserve(args []string) error {
 			Snapshots:          snapshotStore,
 			QuestionSink:       askSink,
 			TodoProvider:       todoProvider,
-		}, execution.WithPlanSink(planSink))
+		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate))
 		toolSchemas = chatserveToolSchemas()
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, model.(decision.ChatProvider))
 		if fellBack {
@@ -122,6 +125,7 @@ func chatserve(args []string) error {
 		CandidateCheckers:   chatCandidateCheckers(*runRoot),
 		ContextWindowTokens: c.Model.ContextWindowTokens,
 		Snapshots:           snapshotStore,
+		Skills:              skillGate,
 	})
 	if err != nil {
 		return err
@@ -132,6 +136,16 @@ func chatserve(args []string) error {
 	defer svc.Close()
 	<-ctx.Done()
 	return nil
+}
+
+// userSkillsDir returns the user-level skill directory for the skill gate;
+// an unavailable config base simply contributes no user skills.
+func userSkillsDir() string {
+	dir, err := appconfig.UserSkillsDir()
+	if err != nil {
+		return ""
+	}
+	return dir
 }
 
 func chatserveHelperPath() (string, error) {
@@ -174,11 +188,12 @@ func chatserveToolSchemas() []llm.ToolSchema {
 		"task_get":       "task_get",
 		"task_list":      "task_list",
 		"task_update":    "task_update",
+		"load_skill":     "load_skill",
 	}
 	registry := tools.CreateDefaultTools().Registry
-	// M06 tools live outside the default registry; the copy keeps append from
-	// aliasing the registry slice.
-	sources := append(append([]map[string]any{}, registry.GetAllSchemas()...), execution.M06ToolSchemas()...)
+	// M06/M07 tools live outside the default registry; the copy keeps append
+	// from aliasing the registry slice.
+	sources := append(append(append([]map[string]any{}, registry.GetAllSchemas()...), execution.M06ToolSchemas()...), execution.SkillToolSchemas()...)
 	schemas := make([]llm.ToolSchema, 0, len(nameMap)+1)
 	for _, schema := range sources {
 		internalName, _ := schema["name"].(string)
