@@ -91,6 +91,7 @@ func chatserve(args []string) error {
 	// The skill gate reads the same directories the TUI lists; Serve binds it
 	// to the service so its event appends share the service event mutex.
 	skillGate := conversation.NewSkillGate(nil, userSkillsDir(), filepath.Join(*projectRoot, ".stable", "skills"))
+	hookGate := conversation.NewHookGate(nil, userHooksPath(), filepath.Join(*projectRoot, ".stable", "hooks.yaml"))
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
 		var credentials []string
 		if c.Model.APIKey != "" {
@@ -111,7 +112,7 @@ func chatserve(args []string) error {
 			Snapshots:          snapshotStore,
 			QuestionSink:       askSink,
 			TodoProvider:       todoProvider,
-		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate))
+		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate))
 		toolSchemas = chatserveToolSchemas()
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, model.(decision.ChatProvider))
 		if fellBack {
@@ -129,6 +130,7 @@ func chatserve(args []string) error {
 		ContextWindowTokens: c.Model.ContextWindowTokens,
 		Snapshots:           snapshotStore,
 		Skills:              skillGate,
+		Hooks:               hookGate,
 	})
 	if err != nil {
 		return err
@@ -143,6 +145,14 @@ func chatserve(args []string) error {
 
 // userSkillsDir returns the user-level skill directory for the skill gate;
 // an unavailable config base simply contributes no user skills.
+func userHooksPath() string {
+	path, err := appconfig.UserHooksPath()
+	if err != nil {
+		return ""
+	}
+	return path
+}
+
 func userSkillsDir() string {
 	dir, err := appconfig.UserSkillsDir()
 	if err != nil {

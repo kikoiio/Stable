@@ -298,6 +298,14 @@ func runtimeToolSchemas() []llm.ToolSchema {
 
 // userSkillsDir returns the user-level skill directory for the skill gate;
 // an unavailable config base simply contributes no user skills.
+func userHooksPath() string {
+	path, err := appconfig.UserHooksPath()
+	if err != nil {
+		return ""
+	}
+	return path
+}
+
 func userSkillsDir() string {
 	dir, err := appconfig.UserSkillsDir()
 	if err != nil {
@@ -354,6 +362,7 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sa
 	// The skill gate reads the same directories the TUI lists; Serve binds it
 	// to the service so its event appends share the service event mutex.
 	skillGate := conversation.NewSkillGate(nil, userSkillsDir(), filepath.Join(p.Share, ".stable", "skills"))
+	hookGate := conversation.NewHookGate(nil, userHooksPath(), filepath.Join(p.Share, ".stable", "hooks.yaml"))
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
 		snapshotStore, err = candidate.NewSnapshotStore(p.Share, c.Snapshots.ProjectBytes(), c.Snapshots.ManifestsPerCandidate(), snapshotCredentials(c.Model.APIKey))
 		if err != nil {
@@ -370,7 +379,7 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sa
 			Snapshots:          snapshotStore,
 			QuestionSink:       askSink,
 			TodoProvider:       todoProvider,
-		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate))
+		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate))
 		toolSchemas = runtimeToolSchemas()
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, chatProvider)
 		if fellBack {
@@ -388,6 +397,7 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sa
 		ContextWindowTokens: c.Model.ContextWindowTokens,
 		Snapshots:           snapshotStore,
 		Skills:              skillGate,
+		Hooks:               hookGate,
 	})
 	if err != nil {
 		return err

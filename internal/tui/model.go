@@ -466,6 +466,20 @@ func registerBuiltins(host *commandHost, registry *commands.Registry) {
 			host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "skill_list", SessionID: m.ActiveSession}))
 		}
 	})
+	set("hooks", "列出 hooks（服务侧合并视图）", "reload", func(args string) {
+		m := host.model
+		m.Composer.SetValue("")
+		if strings.TrimSpace(args) == "reload" {
+			m.Pending = true
+			m.Status = "正在重载 hooks…"
+			m.recordHistory(host.raw)
+			host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "hooks_reload", SessionID: m.ActiveSession}))
+			return
+		}
+		m.Pending = true
+		m.Status = "正在列出 hooks…"
+		host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "hooks_list", SessionID: m.ActiveSession}))
+	})
 }
 
 // renderHelp formats the merged command list for the /help transcript note;
@@ -723,6 +737,35 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 				m.Transcript.SetEvents(m.Events)
 			} else {
 				m.Status = "当前会话没有已激活技能。"
+			}
+		case "hook_list":
+			if x.HookList != nil {
+				var b strings.Builder
+				if len(x.HookList.Hooks) == 0 {
+					b.WriteString("（无 hook）\n提示：把 hooks.yaml 放到项目的 .stable/hooks.yaml 或用户级 ~/.config/stable/hooks.yaml。")
+				}
+				for _, h := range x.HookList.Hooks {
+					fmt.Fprintf(&b, "%s  %s  %s  来源:%s", h.ID, h.Event, h.Action, h.Source)
+					if h.Reject {
+						b.WriteString("  reject")
+					}
+					if h.Once {
+						b.WriteString("  once")
+					}
+					if h.Async {
+						b.WriteString("  async")
+					}
+					b.WriteByte('\n')
+				}
+				for _, r := range x.HookList.Rejections {
+					fmt.Fprintf(&b, "跳过：%s\n", r)
+				}
+				m.Events = append(m.Events, sessionlog.Event{Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "系统", Text: strings.TrimRight(b.String(), "\n"), Kind: "text"}})
+				m.Transcript.SetEvents(m.Events)
+			}
+		case "hook_report":
+			if x.HookReport != nil {
+				m.Status = fmt.Sprintf("Hooks 重载: %d → %d", x.HookReport.Before, x.HookReport.After)
 			}
 		case "plan_state":
 			if x.PlanState != nil {
@@ -1584,6 +1627,10 @@ func (m *Model) applyRunMessage(message conversation.ServerMsg) {
 			case conversation.SkillReportError:
 				m.Status = "技能调用失败：" + message.SkillReport.Error
 			}
+		}
+	case "hook_report":
+		if message.HookReport != nil {
+			m.Status = fmt.Sprintf("Hooks 重载: %d → %d", message.HookReport.Before, message.HookReport.After)
 		}
 	case "plan_state":
 		if message.PlanState != nil {

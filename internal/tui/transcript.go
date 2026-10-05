@@ -236,6 +236,30 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 			part := &block{role: "技能激活"}
 			fmt.Fprintf(&part.text, "%s（%s·%s）", invoked.Name, invoked.Source, invoked.Entry)
 			blocks = append(blocks, part)
+		case sessionlog.EventHookFired:
+			var fired sessionlog.HookFired
+			if decodeEventData(e.Data, &fired) != nil {
+				continue
+			}
+			part := &block{role: "Hook"}
+			mark := "✓"
+			if !fired.Success {
+				mark = "✗"
+			}
+			reject := ""
+			if fired.Rejected {
+				reject = "[已拒绝]"
+			}
+			fmt.Fprintf(&part.text, "`%s`(%s) %s%s: %s", fired.HookID, fired.Event, mark, reject, fired.Output)
+			blocks = append(blocks, part)
+		case sessionlog.EventHookReload:
+			var reload sessionlog.HookReload
+			if decodeEventData(e.Data, &reload) != nil {
+				continue
+			}
+			part := &block{role: "Hooks 重载"}
+			fmt.Fprintf(&part.text, "%d → %d", reload.Before, reload.After)
+			blocks = append(blocks, part)
 		case sessionlog.EventRunEvent:
 			var run sessionlog.RunEvent
 			if decodeEventData(e.Data, &run) != nil {
