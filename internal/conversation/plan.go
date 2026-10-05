@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"stable/internal/agent"
@@ -417,19 +418,43 @@ func planRunAuthority(state PlanState, workKind agent.WorkKind) (permission.Mode
 // or the run context is cancelled. The factory call site wires it with
 // execution.WithPlanSink.
 type PlanApprovalSink struct {
-	Service *Service
 	// PollEvery is the request status poll interval; zero defaults to 500ms.
 	PollEvery time.Duration
+
+	mu      sync.Mutex
+	Service *Service
 }
 
 // NewPlanApprovalSink builds the plan approval sink for the executor factory.
+// The service may be nil when the factory is built before
+// conversation.Serve returns; call Bind once the service exists.
 func NewPlanApprovalSink(service *Service) *PlanApprovalSink {
 	return &PlanApprovalSink{Service: service}
 }
 
+// Bind attaches the conversation service after construction. The executor
+// factory is built before Serve starts listening, so the call sites bind the
+// service right after Serve returns; the hand-off is mutex-guarded.
+func (p *PlanApprovalSink) Bind(service *Service) {
+	p.mu.Lock()
+	p.Service = service
+	p.mu.Unlock()
+}
+
+// current returns the bound service, or nil before Bind.
+func (p *PlanApprovalSink) current() *Service {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.Service
+}
+
 // SubmitPlan implements execution.PlanSink.
 func (p *PlanApprovalSink) SubmitPlan(ctx context.Context, sessionID, runID, planPath string) (string, error) {
-	approval, err := p.Service.SubmitPlanApproval(sessionID, runID, planPath)
+	svc := p.current()
+	if svc == nil {
+		return "", errors.New("plan approval sink is not bound to a session service")
+	}
+	approval, err := svc.SubmitPlanApproval(sessionID, runID, planPath)
 	if err != nil {
 		return "", err
 	}
@@ -443,11 +468,11 @@ func (p *PlanApprovalSink) SubmitPlan(ctx context.Context, sessionID, runID, pla
 		select {
 		case <-ctx.Done():
 			// The run is gone: drop the dialog instead of leaving it pending.
-			_ = p.Service.CancelPlanApproval(sessionID, approval.ID)
+			_ = svc.CancelPlanApproval(sessionID, approval.ID)
 			return "", execution.PlanCancelledError{}
 		case <-ticker.C:
 		}
-		status, feedback, ok := p.Service.PlanApprovalStatus(approval.ID)
+		status, feedback, ok := svc.PlanApprovalStatus(approval.ID)
 		if !ok {
 			continue
 		}

@@ -98,5 +98,18 @@ func (s *Service) replyQuestion(ctx context.Context, c ClientMsg) ([]ServerMsg, 
 	if err != nil {
 		return nil, fmt.Errorf("record reply: %w", err)
 	}
+	if s.askWaiterCount(c.SessionID) == 0 {
+		// No run is waiting for this answer: the question outlived its run
+		// (cancel, crash, completion). Queue the reply as an ordinary user
+		// message so the next run picks it up from the conversation history,
+		// matching the /say semantics.
+		message := sessionlog.Message{Role: "user", Kind: "text", Text: reply.ReplyText}
+		s.eventMu.Lock()
+		_, err = sessionlog.Append(root, c.SessionID, sessionlog.EventMessage, message)
+		s.eventMu.Unlock()
+		if err != nil {
+			return nil, fmt.Errorf("queue reply as message: %w", err)
+		}
+	}
 	return []ServerMsg{{Type: "reply", Reply: &reply}}, nil
 }

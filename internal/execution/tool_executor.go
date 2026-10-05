@@ -813,7 +813,7 @@ func (e *toolRunExecutor) executeAskUser(ctx context.Context, call llm.ToolUse, 
 		outcome.Content = "Error: " + askErr.Error()
 		return outcome
 	}
-	outcome.Status, outcome.IsError, outcome.Content = agent.ToolSucceeded, false, formatAskAnswers(questions, response.Answers)
+	outcome.Status, outcome.IsError, outcome.Content = agent.ToolSucceeded, false, formatAskAnswers(questions, response)
 	return outcome
 }
 
@@ -885,12 +885,29 @@ func parseAskQuestions(args map[string]any) ([]QuestionSpec, error) {
 }
 
 // formatAskAnswers renders the answers as one "Q:/A:" pair per question.
-func formatAskAnswers(questions []QuestionSpec, answers [][]string) string {
+// A free-text response (the /reply or dialog overall answer) lists every
+// question once and shows the single reply text as the shared answer.
+func formatAskAnswers(questions []QuestionSpec, response AskResponse) string {
+	if response.FreeText {
+		text := "(no answer)"
+		if len(response.Answers) > 0 && len(response.Answers[0]) > 0 && strings.TrimSpace(response.Answers[0][0]) != "" {
+			text = response.Answers[0][0]
+		}
+		var b strings.Builder
+		for i, question := range questions {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			fmt.Fprintf(&b, "Q: %s", question.Question)
+		}
+		fmt.Fprintf(&b, "\nA: %s", text)
+		return b.String()
+	}
 	var b strings.Builder
 	for i, question := range questions {
 		answer := "(no answer)"
-		if i < len(answers) && len(answers[i]) > 0 {
-			answer = strings.Join(answers[i], ", ")
+		if i < len(response.Answers) && len(response.Answers[i]) > 0 {
+			answer = strings.Join(response.Answers[i], ", ")
 		}
 		if i > 0 {
 			b.WriteString("\n")

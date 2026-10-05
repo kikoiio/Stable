@@ -64,6 +64,9 @@ type ServerMsg struct {
 	Rewind     *sessionlog.RewindRecord       `json:"rewind,omitempty"`
 	Questions  []sessionlog.PendingQuestion   `json:"questions,omitempty"`
 	Reply      *sessionlog.QuestionReply      `json:"reply,omitempty"`
+	// Tasks is the full task-list snapshot pushed by every todo_update
+	// event (TodoProvider onChange).
+	Tasks []sessionlog.TaskSnapshot `json:"tasks,omitempty"`
 	// Plan carries the restored plan state of a session_load response.
 	Plan *PlanState `json:"plan,omitempty"`
 	// PlanState is the session plan state pushed by plan_mode, plan_resolve,

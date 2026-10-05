@@ -328,6 +328,12 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 	var executorFactory agent.ExecutorFactory
 	var toolSchemas []llm.ToolSchema
 	var snapshotStore *candidate.SnapshotStore
+	// The interaction sinks need the conversation service, which only exists
+	// once Serve returns, so they are built unbound here and bound right
+	// after Serve — no run can reach a tool call before that.
+	askSink := conversation.NewAskAdapter(nil)
+	todoProvider := conversation.NewTodoProvider(nil)
+	planSink := conversation.NewPlanApprovalSink(nil)
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
 		snapshotStore, err = candidate.NewSnapshotStore(p.Share, c.Snapshots.ProjectBytes(), c.Snapshots.ManifestsPerCandidate(), snapshotCredentials(c.Model.APIKey))
 		if err != nil {
@@ -342,7 +348,9 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 			SessionRoot:        p.Share,
 			ProviderCredential: c.Model.APIKey,
 			Snapshots:          snapshotStore,
-		})
+			QuestionSink:       askSink,
+			TodoProvider:       todoProvider,
+		}, execution.WithPlanSink(planSink))
 		toolSchemas = runtimeToolSchemas()
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, chatProvider)
 		if fellBack {
@@ -363,6 +371,9 @@ func runChatService(c appconfig.AppConfig, p Paths, address string) error {
 	if err != nil {
 		return err
 	}
+	askSink.Bind(svc)
+	todoProvider.Bind(svc)
+	planSink.Bind(svc)
 	defer svc.Close()
 	select {}
 }

@@ -75,10 +75,17 @@ type AskRequest struct {
 	Questions []QuestionSpec
 }
 
-// AskResponse holds one answer per question, aligned with AskRequest.Questions:
-// each entry lists the selected labels (several when multiSelect) or the free
-// text typed for the auto-provided "Other" option.
-type AskResponse struct{ Answers [][]string }
+// AskResponse holds the reply to one ask_user interaction. In the structured
+// form, Answers is aligned with AskRequest.Questions and each entry lists the
+// selected labels (several when multiSelect) or the free text typed for the
+// auto-provided "Other" option. In the free-text form (FreeText is true) the
+// user answered with one overall reply text — a /reply line or a dialog text
+// answer — so Answers carries exactly one entry with the raw text and the
+// renderer shows it once for the whole question set.
+type AskResponse struct {
+	Answers  [][]string
+	FreeText bool
+}
 
 // QuestionSink delivers ask_user questions to the host interface and blocks
 // until the user answers or the run context is cancelled.

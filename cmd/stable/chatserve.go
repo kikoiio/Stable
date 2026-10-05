@@ -79,6 +79,12 @@ func chatserve(args []string) error {
 	var toolSchemas []llm.ToolSchema
 	var runnerError string
 	var snapshotStore *candidate.SnapshotStore
+	// The interaction sinks need the conversation service, which only exists
+	// once Serve returns, so they are built unbound here and bound right
+	// after Serve — no run can reach a tool call before that.
+	askSink := conversation.NewAskAdapter(nil)
+	todoProvider := conversation.NewTodoProvider(nil)
+	planSink := conversation.NewPlanApprovalSink(nil)
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
 		var credentials []string
 		if c.Model.APIKey != "" {
@@ -97,7 +103,9 @@ func chatserve(args []string) error {
 			SessionRoot:        *projectRoot,
 			ProviderCredential: c.Model.APIKey,
 			Snapshots:          snapshotStore,
-		})
+			QuestionSink:       askSink,
+			TodoProvider:       todoProvider,
+		}, execution.WithPlanSink(planSink))
 		toolSchemas = chatserveToolSchemas()
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, model.(decision.ChatProvider))
 		if fellBack {
@@ -118,6 +126,9 @@ func chatserve(args []string) error {
 	if err != nil {
 		return err
 	}
+	askSink.Bind(svc)
+	todoProvider.Bind(svc)
+	planSink.Bind(svc)
 	defer svc.Close()
 	<-ctx.Done()
 	return nil

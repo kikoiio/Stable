@@ -14,6 +14,7 @@ import (
 	"stable/internal/decision"
 	"stable/internal/llm"
 	"stable/internal/permission"
+	"stable/internal/sessionlog"
 	"stable/internal/store"
 )
 
@@ -57,6 +58,19 @@ type Service struct {
 	activeRuns        map[string]string
 	notifiedApprovals map[string]bool
 	eventMu           sync.Mutex
+	// askMu guards the per-session count of runs blocked inside the question
+	// adapter (see AskAdapter) and the poll-loop delivery dedup state below.
+	askMu sync.Mutex
+	// askWaiters counts, per session, the in-flight AskAdapter waits so
+	// replyQuestion can tell a live waiting run from a leftover question.
+	askWaiters map[string]int
+	// notifiedQuestions and notifiedPlanApprovals remember which pending
+	// dialog was already delivered to a session client, so the poll loop
+	// pushes each pending question and plan approval once instead of
+	// re-sending the full set every tick. Entries are pruned when the
+	// underlying request is no longer pending.
+	notifiedQuestions     map[string]bool
+	notifiedPlanApprovals map[string]bool
 	// planMu guards the plan mode runtime state below. Plan state and plan
 	// approvals are service-lifetime memory: a restart drops sessions back to
 	// the default mode and clears pending dialogs (the session log keeps the
@@ -297,6 +311,8 @@ func (s *Service) pollGoals(ctx context.Context) {
 		}
 		s.deliverPermissionWakes(ctx)
 		s.pushPendingApprovals(ctx)
+		s.pushPendingQuestions()
+		s.pushPendingPlanApprovals()
 		if s.deps.Store == nil {
 			continue
 		}
@@ -338,5 +354,117 @@ func (s *Service) pushPendingApprovals(ctx context.Context) {
 		for _, request := range requests {
 			s.pushApproval(ctx, request.ID, sessionID)
 		}
+	}
+}
+
+// pushPendingQuestions mirrors pushPendingApprovals for the ask_user
+// lifecycle: sessions with bound clients get their still-pending questions
+// pushed once, tracked by question id so the poll never re-sends the same
+// dialog. Delivery is re-attempted while the send fails, and the dedup
+// entries are dropped once the question is answered.
+func (s *Service) pushPendingQuestions() {
+	s.mu.Lock()
+	seen := map[string]bool{}
+	for _, sub := range s.clients {
+		if sub.sessionID != "" {
+			seen[sub.sessionID] = true
+		}
+	}
+	s.mu.Unlock()
+	for sessionID := range seen {
+		questions, err := s.listQuestions(ClientMsg{SessionID: sessionID})
+		if err != nil {
+			continue
+		}
+		pending := map[string]bool{}
+		s.mu.Lock()
+		var fresh []sessionlog.PendingQuestion
+		for _, question := range questions {
+			if question.Status == sessionlog.QuestionReplied {
+				continue
+			}
+			pending[question.QuestionID] = true
+			if !s.notifiedQuestions[question.QuestionID] {
+				fresh = append(fresh, question)
+			}
+		}
+		for id := range s.notifiedQuestions {
+			if !pending[id] {
+				delete(s.notifiedQuestions, id)
+			}
+		}
+		s.mu.Unlock()
+		if len(fresh) > 0 {
+			s.pushQuestions(sessionID, fresh)
+		}
+	}
+}
+
+// pushPendingPlanApprovals mirrors pushPendingQuestions for the plan approval
+// lifecycle. The pending set is service-lifetime memory (a restart clears
+// pending dialogs), matching the PlanApprovalService; the broadcast reuses
+// the plan_approvals message shape.
+func (s *Service) pushPendingPlanApprovals() {
+	s.mu.Lock()
+	seen := map[string]bool{}
+	for _, sub := range s.clients {
+		if sub.sessionID != "" {
+			seen[sub.sessionID] = true
+		}
+	}
+	s.mu.Unlock()
+	for sessionID := range seen {
+		s.planMu.Lock()
+		pending := map[string]bool{}
+		var refs []PlanApprovalRef
+		for _, approval := range s.planApprovals {
+			if approval == nil || approval.SessionID != sessionID || approval.Status != sessionlog.PlanApprovalSubmitted {
+				continue
+			}
+			pending[approval.ID] = true
+			refs = append(refs, planApprovalRef(*approval))
+		}
+		s.planMu.Unlock()
+		if len(refs) == 0 {
+			s.mu.Lock()
+			for id := range s.notifiedPlanApprovals {
+				delete(s.notifiedPlanApprovals, id)
+			}
+			s.mu.Unlock()
+			continue
+		}
+		s.mu.Lock()
+		var fresh []PlanApprovalRef
+		for _, ref := range refs {
+			if !s.notifiedPlanApprovals[ref.ID] {
+				fresh = append(fresh, ref)
+			}
+		}
+		s.mu.Unlock()
+		if len(fresh) == 0 {
+			continue
+		}
+		msg := ServerMsg{Type: "plan_approvals", PlanApprovals: fresh}
+		s.mu.Lock()
+		delivered := false
+		for ch, sub := range s.clients {
+			if sub.sessionID != sessionID {
+				continue
+			}
+			select {
+			case ch <- msg:
+				delivered = true
+			default:
+			}
+		}
+		if delivered {
+			if s.notifiedPlanApprovals == nil {
+				s.notifiedPlanApprovals = map[string]bool{}
+			}
+			for _, ref := range fresh {
+				s.notifiedPlanApprovals[ref.ID] = true
+			}
+		}
+		s.mu.Unlock()
 	}
 }
