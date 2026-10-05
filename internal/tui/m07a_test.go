@@ -88,9 +88,9 @@ func TestSkillDispatchSendsInvokeOp(t *testing.T) {
 	if got.Composer.Value() != "" {
 		t.Fatalf("composer not cleared: %q", got.Composer.Value())
 	}
-	msg, ok := cmd().(resultMsg)
-	if !ok || msg.op != "skill_invoke" {
-		t.Fatalf("expected skill_invoke op, got %T", cmd())
+	// The skill command opens a run stream, exactly like the chat path.
+	if _, ok := cmd().(runStreamStartedMsg); !ok {
+		t.Fatalf("expected run stream command, got %T", cmd())
 	}
 	entries, err := got.history.List()
 	if err != nil || len(entries) != 1 || entries[0].Text != "/beta 审查重点" {

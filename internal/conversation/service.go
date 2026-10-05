@@ -183,8 +183,13 @@ func (s *Service) readLoop(ctx context.Context, conn net.Conn, updates chan Serv
 			}
 			continue
 		case "skill_invoke":
+			// On success the stream stays open: startRun binds this connection
+			// to the run, so run events flow to the invoking client until the
+			// outcome closes it. On failure the activation error is a plain
+			// error + done, so both streaming and one-shot clients terminate.
 			if err := s.invokeSkill(ctx, c, updates); err != nil {
-				updates <- ServerMsg{Type: "skill_report", SkillReport: &SkillReport{Kind: SkillReportError, SessionID: c.SessionID, Name: c.SkillName, Error: err.Error()}}
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+				updates <- ServerMsg{Type: "done"}
 			}
 			continue
 		case "run_subscribe":

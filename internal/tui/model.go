@@ -162,6 +162,17 @@ func receiveRunCmd(client *conversation.StreamClient) tea.Cmd {
 		return runStreamMsg{client: client, message: message, err: err}
 	}
 }
+
+// openSkillRunCmd starts a skill run; the same connection streams the run
+// events and closes at the outcome, mirroring the chat run path.
+func openSkillRunCmd(socket, sessionID, name, args string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		client, err := conversation.InvokeSkill(ctx, socket, sessionID, name, args)
+		return runStreamStartedMsg{client: client, err: err}
+	}
+}
 func resumeRunCmd(socket, sessionID, runID string, cursor uint64) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -249,32 +260,31 @@ func (m *Model) refreshCommands() {
 		}
 		m.surfaceCommandReport(rejected)
 	}
-	var conflicts []string
-	if m.skills != nil {
-		if m.skills.NeedsReload() {
-			m.skills.Reload()
-		}
-		for _, s := range m.skills.List() {
-			name, description := s.Meta.Name, s.Meta.Description
-			command := &commands.Command{
-				Name:        name,
-				Description: "（技能）" + description,
-				Kind:        commands.KindLocal,
-				Local: func(args string) {
-					m2 := m.host.model
-					req := conversation.ClientMsg{Op: "skill_invoke", SessionID: m2.ActiveSession, SkillName: name, SkillArgs: args}
-					m2.Pending = true
-					m2.Status = "正在激活技能 " + name + "…"
-					m2.Composer.SetValue("")
-					m2.recordHistory(m.host.raw)
-					m.host.send(requestCmd(m2.Socket, req))
-				},
+		var conflicts []string
+		if m.skills != nil {
+			if m.skills.NeedsReload() {
+				m.skills.Reload()
 			}
-			if !registry.RegisterOptional(command) {
-				conflicts = append(conflicts, name)
+			for _, s := range m.skills.List() {
+				name, description := s.Meta.Name, s.Meta.Description
+				command := &commands.Command{
+					Name:        name,
+					Description: "（技能）" + description,
+					Kind:        commands.KindLocal,
+					Local: func(args string) {
+						m2 := m.host.model
+						m2.Pending = true
+						m2.Status = "正在激活技能 " + name + "…"
+						m2.Composer.SetValue("")
+						m2.recordHistory(m.host.raw)
+						m.host.send(openSkillRunCmd(m2.Socket, m2.ActiveSession, name, args))
+					},
+				}
+				if !registry.RegisterOptional(command) {
+					conflicts = append(conflicts, name)
+				}
 			}
 		}
-	}
 	if len(conflicts) > 0 && !m.skillConflictShown {
 		m.skillConflictShown = true
 		if m.Status == "" {
@@ -1562,6 +1572,19 @@ func (m *Model) applyRunMessage(message conversation.ServerMsg) {
 		m.applyQuestions(message.Questions, false)
 	case "todo":
 		m.Todos = append([]sessionlog.TaskSnapshot(nil), message.Tasks...)
+	case "skill_report":
+		// Live skill pushes on a run stream: the one-shot delta notice and
+		// reload confirmations surface in the status line.
+		if message.SkillReport != nil {
+			switch message.SkillReport.Kind {
+			case conversation.SkillReportDelta:
+				m.Status = "新增可用技能：" + strings.Join(message.SkillReport.Added, "、")
+			case conversation.SkillReportReload:
+				m.Status = fmt.Sprintf("服务端技能已重载：%d → %d。", message.SkillReport.Before, message.SkillReport.After)
+			case conversation.SkillReportError:
+				m.Status = "技能调用失败：" + message.SkillReport.Error
+			}
+		}
 	case "plan_state":
 		if message.PlanState != nil {
 			m.Plan = message.PlanState
