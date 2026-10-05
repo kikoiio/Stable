@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"stable/internal/agent"
 	"stable/internal/candidate"
+	"stable/internal/commands"
 	"stable/internal/conversation"
 	"stable/internal/core"
 	"stable/internal/inputhistory"
@@ -77,7 +80,26 @@ type Model struct {
 	historyErr          error
 	histCursor          *inputhistory.Cursor
 	histDraft           string
+	registry            *commands.Registry
+	loader              *commands.Loader
+	host                *commandHost
+	// commandReportShown marks that the loader's rejected-file report has
+	// already been surfaced once in the status line.
+	commandReportShown bool
 }
+
+// commandHost bridges built-in Local closures with the live model: a
+// commands.Command.Local only receives the raw arguments, so dispatchCommand
+// points host at the model copy it is about to return, the closures mutate it
+// through host.model, queue their tea.Cmds through send, and read host.raw
+// when they need the exact submitted line for the input history.
+type commandHost struct {
+	model *Model
+	raw   string
+	cmds  []tea.Cmd
+}
+
+func (h *commandHost) send(cmd tea.Cmd) { h.cmds = append(h.cmds, cmd) }
 
 type resultMsg struct {
 	op   string
@@ -138,6 +160,7 @@ func New(socket, root string) Model {
 	c := NewComposer()
 	_ = c.Focus()
 	m := Model{Socket: socket, Root: root, Width: 120, Height: 32, Composer: c, Navigation: NavigationState{Mode: ChatView}}
+	m.initCommands(root)
 	// Input history is per-project and private; an unavailable store must not
 	// block the TUI, only surface an explicit status when used.
 	history, err := inputhistory.Open(root)
@@ -147,6 +170,201 @@ func New(socket, root string) Model {
 		m.history = history
 	}
 	return m
+}
+
+// initCommands builds the command host, the initial built-in registry, and
+// the custom command loader. Custom commands are loaded lazily by
+// refreshCommands on the first completion or dispatch, never at startup.
+func (m *Model) initCommands(root string) {
+	m.host = &commandHost{}
+	m.registry = commands.NewRegistry()
+	registerBuiltins(m.host, m.registry)
+	m.loader = commands.NewLoader(
+		filepath.Join(root, ".stable", "commands"),
+		userCommandsDir(),
+	)
+}
+
+// userCommandsDir returns the user-level custom command directory; an
+// unavailable home directory simply contributes no user commands.
+func userCommandsDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "stable", "commands")
+}
+
+// refreshCommands rebuilds the registry from the fixed built-in set plus the
+// loader's custom commands. Built-ins register first, so a custom file that
+// shadows a built-in name is skipped by RegisterOptional and the built-in
+// stays authoritative. Rebuilding instead of accumulating also lets a deleted
+// custom file disappear from completion and dispatch.
+func (m *Model) refreshCommands() {
+	if m.host == nil || m.loader == nil || m.registry == nil {
+		m.initCommands(m.Root)
+		return
+	}
+	registry := commands.NewRegistry()
+	registerBuiltins(m.host, registry)
+	if custom, rejected, err := m.loader.Commands(); err == nil {
+		for _, c := range custom {
+			registry.RegisterOptional(c)
+		}
+		m.surfaceCommandReport(rejected)
+	}
+	m.registry = registry
+}
+
+// surfaceCommandReport shows the loader's rejected-file report once in the
+// status line, the same channel every other one-off hint uses. Later loads
+// with the same report stay quiet.
+func (m *Model) surfaceCommandReport(rejected []string) {
+	if len(rejected) == 0 || m.commandReportShown {
+		return
+	}
+	m.commandReportShown = true
+	m.Status = "部分自定义命令未加载：" + strings.Join(rejected, "；")
+}
+
+// registerBuiltins registers the built-in commands on a fresh registry. The
+// Local closures act through the command host and replicate the historical
+// hardcoded submitComposer branches one to one, so dispatching through the
+// registry keeps user-visible behavior unchanged.
+func registerBuiltins(host *commandHost, registry *commands.Registry) {
+	set := func(name, description, argPrompt string, local func(args string)) {
+		registry.Register(&commands.Command{Name: name, Description: description, ArgPrompt: argPrompt, Kind: commands.KindLocal, Local: local})
+	}
+	set("sessions", "浏览会话", "", func(string) {
+		m := host.model
+		m.Composer.SetValue("")
+		m.Navigation = NavigationState{Mode: SessionPickerView, Cursor: m.sessionIndex()}
+	})
+	set("goals", "浏览目标", "", func(string) {
+		m := host.model
+		m.Composer.SetValue("")
+		m.Navigation = NavigationState{Mode: GoalPickerView, Cursor: m.SelectedGoal}
+	})
+	set("search", "搜索会话内容", "关键词", func(args string) {
+		m := host.model
+		query := strings.TrimSpace(args)
+		if query == "" {
+			m.Status = "用法：/search 关键词"
+			return
+		}
+		m.Pending = true
+		m.Status = "正在搜索会话…"
+		m.Composer.SetValue("")
+		m.recordHistory(host.raw)
+		host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "session_search", ProjectRoot: m.Root, Text: query}))
+	})
+	set("review", "预览候选变更", "候选ID", func(args string) {
+		m := host.model
+		candidateID := strings.TrimSpace(args)
+		if candidateID == "" || strings.ContainsAny(candidateID, " \t\n") {
+			m.Status = "用法：/review 候选ID"
+			return
+		}
+		m.Pending = true
+		m.Status = "正在生成候选预览…"
+		m.Composer.SetValue("")
+		m.recordHistory(host.raw)
+		host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "review_get", CandidateID: candidateID, SessionID: m.ActiveSession}))
+	})
+	set("say", "为目标排队补充指令", "补充指令", func(args string) {
+		m := host.model
+		sayText := strings.TrimSpace(args)
+		if sayText == "" {
+			m.Status = "用法：/say 补充指令"
+			return
+		}
+		if len(m.Goals) == 0 {
+			m.Status = "先用 Ctrl+G 选择目标，再 /say。"
+			return
+		}
+		req := conversation.ClientMsg{Op: "say", ProjectRoot: m.Root, SessionID: m.ActiveSession, Goal: m.Goals[clamp(m.SelectedGoal, 0, len(m.Goals)-1)].ID, Text: sayText}
+		m.Pending = true
+		m.Status = "正在排队补充指令…"
+		m.Composer.SetValue("")
+		m.recordHistory(host.raw)
+		host.send(requestCmd(m.Socket, req))
+	})
+	set("reply", "答复待答问题", "答复内容", func(args string) {
+		m := host.model
+		replyText := strings.TrimSpace(args)
+		if replyText == "" {
+			m.Status = "用法：/reply 答复内容"
+			return
+		}
+		question, ok := m.pendingQuestion()
+		if !ok {
+			m.Status = "当前没有待回答的问题。"
+			return
+		}
+		req := conversation.ClientMsg{Op: "reply", SessionID: m.ActiveSession, QuestionID: question.QuestionID, Text: replyText}
+		m.Pending = true
+		m.Status = "正在记录答复…"
+		m.Composer.SetValue("")
+		m.recordHistory(host.raw)
+		host.send(requestCmd(m.Socket, req))
+	})
+	set("confirm", "确认待定提案", "提案ID", func(args string) {
+		m := host.model
+		id := strings.TrimSpace(args)
+		if id == "" || strings.ContainsAny(id, " \t\n") {
+			m.Status = "用法：/confirm 提案ID"
+			return
+		}
+		m.Pending = true
+		m.Status = "正在记录提案确认…"
+		m.Composer.SetValue("")
+		m.recordHistory(host.raw)
+		host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "confirm", ID: id, SessionID: m.ActiveSession}))
+	})
+	set("reject", "拒绝待定提案", "提案ID", func(args string) {
+		m := host.model
+		id := strings.TrimSpace(args)
+		if id == "" || strings.ContainsAny(id, " \t\n") {
+			m.Status = "用法：/reject 提案ID"
+			return
+		}
+		m.Pending = true
+		m.Status = "正在记录提案拒绝…"
+		m.Composer.SetValue("")
+		m.recordHistory(host.raw)
+		host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "reject", ID: id, SessionID: m.ActiveSession}))
+	})
+	// /plan only constructs the plan_mode op here; the service grows the
+	// handler in a later task, and until then the request fails through the
+	// ordinary error path, which is the intended placeholder behavior.
+	set("plan", "切换计划模式", "", func(string) {
+		m := host.model
+		m.Pending = true
+		m.Status = "正在切换计划模式…"
+		m.Composer.SetValue("")
+		m.recordHistory(host.raw)
+		host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "plan_mode", SessionID: m.ActiveSession}))
+	})
+	set("help", "显示可用命令", "", func(string) {
+		m := host.model
+		m.Composer.SetValue("")
+		m.Events = append(m.Events, sessionlog.Event{Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "系统", Text: renderHelp(m.registry.List()), Kind: "text"}})
+		m.Transcript.SetEvents(m.Events)
+	})
+}
+
+// renderHelp formats the merged command list for the /help transcript note;
+// commands that document an argument prompt show it as a hint.
+func renderHelp(cmds []*commands.Command) string {
+	var b strings.Builder
+	b.WriteString("可用命令：")
+	for _, c := range cmds {
+		fmt.Fprintf(&b, "\n- /%s %s", c.Name, c.Description)
+		if c.ArgPrompt != "" {
+			fmt.Fprintf(&b, "（参数：%s）", c.ArgPrompt)
+		}
+	}
+	return b.String()
 }
 func (m Model) Init() tea.Cmd {
 	return requestCmd(m.Socket, conversation.ClientMsg{Op: "session_list", ProjectRoot: m.Root})
@@ -630,7 +848,8 @@ func (m Model) handleInput(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) refreshCompletions() {
 	value := m.Composer.Value()
 	if strings.HasPrefix(value, "/") && !strings.ContainsAny(value, " \n") {
-		m.Candidates = builtinCommands{}.List(value)
+		m.refreshCommands()
+		m.Candidates = FilterCompletions(CommandItems(m.registry.List()), value)
 		return
 	}
 	if at := strings.LastIndex(value, "@"); at >= 0 && !strings.ContainsAny(value[at:], " \n") {
@@ -645,6 +864,11 @@ func (m Model) submitComposer() (tea.Model, tea.Cmd) {
 	if text == "" {
 		m.Status = "请输入非空内容。"
 		return m, nil
+	}
+	if strings.HasPrefix(text, "/") {
+		if model, cmd, handled := m.dispatchCommand(text); handled {
+			return model, cmd
+		}
 	}
 	if text == "/sessions" {
 		m.Composer.SetValue("")
@@ -715,6 +939,14 @@ func (m Model) submitComposer() (tea.Model, tea.Cmd) {
 		m.recordHistory(text)
 		return m, requestCmd(m.Socket, req)
 	}
+	return m.submitChatPath(text, text)
+}
+
+// submitChatPath is the shared submission tail of the composer: text goes
+// through the ordinary request path (chat opens a run; other ops go through
+// requestCmd). history is the line recorded in the input history, which lets
+// expanded prompt commands record the typed command instead of its expansion.
+func (m Model) submitChatPath(text, history string) (tea.Model, tea.Cmd) {
 	req := conversation.ClientMsg{ProjectRoot: m.Root, SessionID: m.ActiveSession, Text: text}
 	if len(m.Goals) > 0 && m.Navigation.Mode == GoalPickerView {
 		req.Goal = m.Goals[clamp(m.SelectedGoal, 0, len(m.Goals)-1)].ID
@@ -738,7 +970,7 @@ func (m Model) submitComposer() (tea.Model, tea.Cmd) {
 	m.Mode = ""
 	m.Composer.SetValue("")
 	m.Composer.Blur()
-	m.recordHistory(text)
+	m.recordHistory(history)
 	if req.Op == "chat" {
 		runID, err := sessionlog.NewID()
 		if err != nil {
@@ -753,6 +985,41 @@ func (m Model) submitComposer() (tea.Model, tea.Cmd) {
 		return m, openRunCmd(m.Socket, request)
 	}
 	return m, requestCmd(m.Socket, req)
+}
+
+// dispatchCommand runs a registered slash command and reports whether the
+// input was handled. Input without a command name and unknown commands
+// ("/xyz") return handled=false so the ordinary submission path keeps its
+// historical behavior. KindLocal commands run their closure in place;
+// KindPrompt commands expand and re-enter the ordinary chat path.
+func (m Model) dispatchCommand(text string) (tea.Model, tea.Cmd, bool) {
+	name, args := commands.Parse(text)
+	if name == "" {
+		return m, nil, false
+	}
+	m.refreshCommands()
+	cmd, ok := m.registry.Find(name)
+	if !ok {
+		return m, nil, false
+	}
+	if cmd.Kind == commands.KindPrompt {
+		m.Candidates = nil
+		model, submit := m.submitChatPath(commands.ExpandPrompt(cmd.Body, args), text)
+		return model, submit, true
+	}
+	m.host.model, m.host.raw, m.host.cmds = &m, text, nil
+	cmd.Local(args)
+	m.Candidates = nil
+	queued := m.host.cmds
+	m.host.model, m.host.raw, m.host.cmds = nil, "", nil
+	switch len(queued) {
+	case 0:
+		return m, nil, true
+	case 1:
+		return m, queued[0], true
+	default:
+		return m, tea.Batch(queued...), true
+	}
 }
 
 // recordHistory appends one submitted input to the project history. The

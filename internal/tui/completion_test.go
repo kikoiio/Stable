@@ -9,11 +9,14 @@ import (
 )
 
 func TestCommandCompletion(t *testing.T) {
-	got := builtinCommands{}.List("/g")
+	// 补全数据源是注册表；隔离 HOME 让用户级自定义命令不参与断言。
+	t.Setenv("HOME", t.TempDir())
+	m := New("", t.TempDir())
+	got := FilterCompletions(CommandItems(m.registry.List()), "/g")
 	if len(got) != 1 || got[0].InsertText != "/goals" {
 		t.Fatalf("unexpected commands: %+v", got)
 	}
-	if len(builtinCommands{}.List("/unknown")) != 0 {
+	if len(FilterCompletions(CommandItems(m.registry.List()), "/unknown")) != 0 {
 		t.Fatal("unknown command appeared")
 	}
 }
@@ -27,6 +30,7 @@ func TestCompletionOverlayClipsToAvailableArea(t *testing.T) {
 }
 
 func TestTabCompletionInsertsOnlyCommandOrRelativePath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "readme.md"), []byte("private content"), 0600); err != nil {
 		t.Fatal(err)
