@@ -260,31 +260,31 @@ func (m *Model) refreshCommands() {
 		}
 		m.surfaceCommandReport(rejected)
 	}
-		var conflicts []string
-		if m.skills != nil {
-			if m.skills.NeedsReload() {
-				m.skills.Reload()
+	var conflicts []string
+	if m.skills != nil {
+		if m.skills.NeedsReload() {
+			m.skills.Reload()
+		}
+		for _, s := range m.skills.List() {
+			name, description := s.Meta.Name, s.Meta.Description
+			command := &commands.Command{
+				Name:        name,
+				Description: "（技能）" + description,
+				Kind:        commands.KindLocal,
+				Local: func(args string) {
+					m2 := m.host.model
+					m2.Pending = true
+					m2.Status = "正在激活技能 " + name + "…"
+					m2.Composer.SetValue("")
+					m2.recordHistory(m.host.raw)
+					m.host.send(openSkillRunCmd(m2.Socket, m2.ActiveSession, name, args))
+				},
 			}
-			for _, s := range m.skills.List() {
-				name, description := s.Meta.Name, s.Meta.Description
-				command := &commands.Command{
-					Name:        name,
-					Description: "（技能）" + description,
-					Kind:        commands.KindLocal,
-					Local: func(args string) {
-						m2 := m.host.model
-						m2.Pending = true
-						m2.Status = "正在激活技能 " + name + "…"
-						m2.Composer.SetValue("")
-						m2.recordHistory(m.host.raw)
-						m.host.send(openSkillRunCmd(m2.Socket, m2.ActiveSession, name, args))
-					},
-				}
-				if !registry.RegisterOptional(command) {
-					conflicts = append(conflicts, name)
-				}
+			if !registry.RegisterOptional(command) {
+				conflicts = append(conflicts, name)
 			}
 		}
+	}
 	if len(conflicts) > 0 && !m.skillConflictShown {
 		m.skillConflictShown = true
 		if m.Status == "" {
