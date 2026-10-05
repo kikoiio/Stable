@@ -8,3 +8,6 @@ run/
 __pycache__/
 *.pyc
 /docs/
+!/docs/
+/docs/**
+!/docs/platform-portability-roadmap.md
