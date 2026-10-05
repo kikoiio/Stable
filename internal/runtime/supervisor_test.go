@@ -130,3 +130,31 @@ func TestReconcileBeforeDispatchBlocksConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The runtime tool whitelist covers the five file tools, the controlled
+// command executor and the six M06 interaction/task tools, sorted by name
+// without duplicates.
+func TestRuntimeToolSchemas(t *testing.T) {
+	schemas := runtimeToolSchemas()
+	want := []string{
+		"ask_user", "command", "edit_file", "exit_plan_mode", "glob", "grep",
+		"read_file", "task_create", "task_get", "task_list", "task_update",
+		"write_file",
+	}
+	if len(schemas) != len(want) {
+		t.Fatalf("schema count = %d, want %d", len(schemas), len(want))
+	}
+	seen := map[string]bool{}
+	for i, schema := range schemas {
+		if schema.Name != want[i] {
+			t.Fatalf("schemas[%d] = %q, want %q", i, schema.Name, want[i])
+		}
+		if seen[schema.Name] {
+			t.Fatalf("duplicate schema name %q", schema.Name)
+		}
+		seen[schema.Name] = true
+		if schema.Description == "" || schema.InputSchema == nil {
+			t.Fatalf("schema %q is missing description or input schema", schema.Name)
+		}
+	}
+}

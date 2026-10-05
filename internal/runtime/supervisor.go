@@ -262,15 +262,24 @@ func snapshotCredentials(apiKey string) []string {
 
 func runtimeToolSchemas() []llm.ToolSchema {
 	nameMap := map[string]string{
-		"read_file":  "read_file",
-		"write_file": "write_file",
-		"edit_file":  "edit_file",
-		"glob":       "glob",
-		"grep":       "grep",
+		"read_file":      "read_file",
+		"write_file":     "write_file",
+		"edit_file":      "edit_file",
+		"glob":           "glob",
+		"grep":           "grep",
+		"ask_user":       "ask_user",
+		"exit_plan_mode": "exit_plan_mode",
+		"task_create":    "task_create",
+		"task_get":       "task_get",
+		"task_list":      "task_list",
+		"task_update":    "task_update",
 	}
 	registry := tools.CreateDefaultTools().Registry
+	// M06 tools live outside the default registry; the copy keeps append from
+	// aliasing the registry slice.
+	sources := append(append([]map[string]any{}, registry.GetAllSchemas()...), execution.M06ToolSchemas()...)
 	schemas := make([]llm.ToolSchema, 0, len(nameMap)+1)
-	for _, schema := range registry.GetAllSchemas() {
+	for _, schema := range sources {
 		internalName, _ := schema["name"].(string)
 		name, ok := nameMap[internalName]
 		if !ok {
