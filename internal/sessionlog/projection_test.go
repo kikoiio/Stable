@@ -219,3 +219,51 @@ func TestProjectionKeepsAuditEvents(t *testing.T) {
 		}
 	}
 }
+
+func TestProjectionPlanAndTodoItems(t *testing.T) {
+	root := t.TempDir()
+	s, err := Create(root, "plan-todo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err = Append(root, s.ID, EventPlanMode, PlanMode{Mode: PlanModePlan, Reason: PlanModeReasonUserToggle, At: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventPlanApproval, PlanApprovalRecord{RequestID: "pa-1", RunID: "r1", PlanPath: "/p/.stable/plans/s.md", Status: PlanApprovalSubmitted, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventPlanApproval, PlanApprovalRecord{RequestID: "pa-1", RunID: "r1", PlanPath: "/p/.stable/plans/s.md", Status: PlanApprovalApprovedAuto, CreatedAt: now, ResolvedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventTodo, TodoUpdate{Revision: 1, Tasks: []TaskSnapshot{{ID: "t1", Subject: "Write plan", Status: "in_progress"}}}); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := Replay(root, s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := Project(replay)
+	got := kinds(p)
+	want := []ItemKind{ItemPlanMode, ItemPlanApproval, ItemPlanApproval, ItemTodo}
+	if len(got) != len(want) {
+		t.Fatalf("kinds = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("kinds = %v, want %v", got, want)
+		}
+	}
+	if p.Items[0].PlanMode == nil || p.Items[0].PlanMode.Mode != PlanModePlan || p.Items[0].PlanMode.Reason != PlanModeReasonUserToggle {
+		t.Fatalf("plan mode item = %+v", p.Items[0])
+	}
+	if p.Items[1].Approval == nil || p.Items[1].Approval.RequestID != "pa-1" || p.Items[1].Approval.Status != PlanApprovalSubmitted {
+		t.Fatalf("submitted approval item = %+v", p.Items[1])
+	}
+	if p.Items[2].Approval == nil || p.Items[2].Approval.Status != PlanApprovalApprovedAuto || p.Items[2].Approval.ResolvedAt.IsZero() {
+		t.Fatalf("resolved approval item = %+v", p.Items[2])
+	}
+	if p.Items[3].Todo == nil || p.Items[3].Todo.Revision != 1 || len(p.Items[3].Todo.Tasks) != 1 || p.Items[3].Todo.Tasks[0].ID != "t1" {
+		t.Fatalf("todo item = %+v", p.Items[3])
+	}
+}

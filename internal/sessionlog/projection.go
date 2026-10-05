@@ -4,15 +4,18 @@ package sessionlog
 type ItemKind string
 
 const (
-	ItemMessage     ItemKind = "message"
-	ItemToolCall    ItemKind = "tool_call"
-	ItemToolResult  ItemKind = "tool_result"
-	ItemSummary     ItemKind = "summary"
-	ItemRunTerminal ItemKind = "run_terminal"
-	ItemSnapshot    ItemKind = "snapshot"
-	ItemRewind      ItemKind = "rewind"
-	ItemQuestion    ItemKind = "question"
-	ItemReply       ItemKind = "reply"
+	ItemMessage      ItemKind = "message"
+	ItemToolCall     ItemKind = "tool_call"
+	ItemToolResult   ItemKind = "tool_result"
+	ItemSummary      ItemKind = "summary"
+	ItemRunTerminal  ItemKind = "run_terminal"
+	ItemSnapshot     ItemKind = "snapshot"
+	ItemRewind       ItemKind = "rewind"
+	ItemQuestion     ItemKind = "question"
+	ItemReply        ItemKind = "reply"
+	ItemPlanMode     ItemKind = "plan_mode"
+	ItemPlanApproval ItemKind = "plan_approval"
+	ItemTodo         ItemKind = "todo_update"
 )
 
 // Item is one entry of the unified session projection. The pointer field
@@ -29,6 +32,9 @@ type Item struct {
 	Rewind   *RewindRecord
 	Question *PendingQuestion
 	Reply    *QuestionReply
+	PlanMode *PlanMode
+	Approval *PlanApprovalRecord
+	Todo     *TodoUpdate
 	// Matched reports whether a tool call has its result inside the same
 	// projected tail. An unmatched call stays visible for audit but must
 	// not become the recoverable tail of a normal conversation.
@@ -127,6 +133,24 @@ func Project(t Transcript) Projection {
 			if decodeData(e.Data, &reply) == nil {
 				r := reply
 				out.Items = append(out.Items, Item{Seq: e.Seq, Kind: ItemReply, Reply: &r, Matched: true})
+			}
+		case EventPlanMode:
+			var mode PlanMode
+			if decodeData(e.Data, &mode) == nil {
+				m := mode
+				out.Items = append(out.Items, Item{Seq: e.Seq, Kind: ItemPlanMode, PlanMode: &m, Matched: true})
+			}
+		case EventPlanApproval:
+			var record PlanApprovalRecord
+			if decodeData(e.Data, &record) == nil {
+				r := record
+				out.Items = append(out.Items, Item{Seq: e.Seq, Kind: ItemPlanApproval, Approval: &r, Matched: true})
+			}
+		case EventTodo:
+			var update TodoUpdate
+			if decodeData(e.Data, &update) == nil {
+				u := update
+				out.Items = append(out.Items, Item{Seq: e.Seq, Kind: ItemTodo, Todo: &u, Matched: true})
 			}
 		}
 	}
