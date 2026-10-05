@@ -11,3 +11,6 @@ __pycache__/
 !/docs/
 /docs/**
 !/docs/platform-portability-roadmap.md
+!/docs/spec_docs/
+!/docs/spec_docs/S00/
+!/docs/spec_docs/S00/**
