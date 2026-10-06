@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"stable/internal/core"
+	"stable/internal/permission"
 	"stable/internal/platform/sandbox"
 )
 
@@ -99,6 +101,69 @@ func TestBridgeProtocolAndUnknownOutcome(t *testing.T) {
 	fake.err = context.DeadlineExceeded
 	if _, err = bridge.Call(context.Background(), req); !errors.Is(err, ErrOutcomeUnknown) {
 		t.Fatalf("timeout: %v", err)
+	}
+}
+
+func TestBridgePinsConfiguredNetworkGrantForOneShotCall(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	runRoot := filepath.Join(root, "run")
+	for _, path := range []string{candidate, runRoot} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(root, "design.kicad_sch")
+	if err := os.WriteFile(target, []byte("design"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeSandbox{result: sandbox.SandboxResult{Stdout: []byte(`{"protocol_version":1,"operation_id":"op-network","status":"observed","actual_artifact_id":"sha","evidence_paths":[],"postcondition":{}}`)}}
+	resolver := profileResolver{"target.test": {netip.MustParseAddr("127.0.0.1")}}
+	bridge := PythonBridge{
+		Script:          "bridge.py",
+		Sandbox:         fake,
+		Profile:         sandbox.SandboxProfile{ProjectRoot: root, CandidateRoot: candidate, RunRoot: runRoot, ProxyHelperPath: "/bin/true"},
+		NetworkGrants:   []permission.NetworkGrant{{Protocol: "tcp", Host: "target.test", Port: 443}},
+		NetworkResolver: resolver,
+	}
+	req := core.CapabilityRequest{ProtocolVersion: 1, OperationID: "op-network", Kind: "inspect_design", GoalID: "goal", Payload: []byte(`{"path":"` + target + `","allowed_root":"` + root + `"}`)}
+	if _, err := bridge.Call(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.profile.NetworkGrants) != 1 || fake.profile.NetworkGrants[0].Host != "target.test" || len(fake.profile.NetworkGrants[0].ResolvedIPs) != 1 {
+		t.Fatalf("bridge profile did not carry pinned grant: %+v", fake.profile.NetworkGrants)
+	}
+}
+
+func TestComputerBridgeRejectsConfiguredNetworkGrant(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	candidate := filepath.Join(root, "candidate")
+	runRoot := filepath.Join(root, "run")
+	for _, path := range []string{project, candidate, runRoot} {
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(candidate, "design.kicad_sch")
+	if err := os.WriteFile(target, []byte("design"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeSandbox{}
+	resolver := profileResolver{"target.test": {netip.MustParseAddr("127.0.0.1")}}
+	bridge := PythonBridge{
+		Script:          "bridge.py",
+		Sandbox:         fake,
+		Profile:         sandbox.SandboxProfile{ProjectRoot: project, CandidateRoot: candidate, RunRoot: runRoot, ProxyHelperPath: "/bin/true"},
+		NetworkGrants:   []permission.NetworkGrant{{Protocol: "tcp", Host: "target.test", Port: 443}},
+		NetworkResolver: resolver,
+	}
+	req := core.CapabilityRequest{ProtocolVersion: 1, OperationID: "op-session-network", Kind: "computer.observe", GoalID: "goal", Payload: []byte(`{"path":"` + target + `","allowed_root":"` + candidate + `","project_root":"` + project + `","candidate_root":"` + candidate + `","run_root":"` + runRoot + `"}`)}
+	if _, err := bridge.Call(context.Background(), req); !errors.Is(err, sandbox.ErrSessionNetworkUnsupported) {
+		t.Fatalf("persistent bridge grant was not rejected: %v", err)
+	}
+	if fake.sessionStarts != 0 {
+		t.Fatal("persistent session started before network grant rejection")
 	}
 }
 
