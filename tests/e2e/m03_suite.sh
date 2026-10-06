@@ -22,6 +22,6 @@ run 'isolated computer session lifecycle and recovery' bash tests/e2e/m03_comput
 run 'trusted candidate review and acceptance' bash tests/e2e/m03_acceptance.sh
 run 'force acceptance finding confirmation' bash tests/e2e/m03_force_accept.sh
 run 'acceptance interruption and SQLite restart recovery' bash tests/e2e/m03_accept_restart.sh
-run 'M03 service and package regression' go test -p 1 ./internal/permission ./internal/sandbox ./internal/candidate ./internal/conversation ./internal/execution ./internal/store ./internal/runtime ./cmd/stable ./cmd/agentworker -count=1
+run 'M03 service and package regression' go test -p 1 ./internal/permission ./internal/platform/sandbox ./internal/candidate ./internal/conversation ./internal/execution ./internal/store ./internal/runtime ./cmd/stable ./cmd/agentworker -count=1
 run 'full Go test suite' go test -p 1 $(go list ./... | grep -v '^stable/tests/e2e$') -count=1
 printf '\nM03 serialized E2E suite passed.\n'
