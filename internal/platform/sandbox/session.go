@@ -289,26 +289,48 @@ func stopManagedSession(ctx context.Context, managed *managedSession) error {
 		return nil
 	}
 	pid := managed.cmd.Process.Pid
-	_ = proc.KillGroup(pid, false)
-	select {
-	case <-managed.done:
-		_ = proc.KillGroup(pid, true)
-		return nil
-	case <-ctx.Done():
-		_ = proc.KillGroup(pid, true)
+	signalGroup := func(force bool) error {
 		select {
 		case <-managed.done:
-			return ctx.Err()
+			return nil
+		default:
+		}
+		if err := proc.KillGroup(pid, force); err != nil {
+			select {
+			case <-managed.done:
+				return nil
+			default:
+			}
+			return fmt.Errorf("%w: signal session process group %d (force=%t): %v", ErrCleanupFailed, pid, force, err)
+		}
+		return nil
+	}
+	if err := signalGroup(false); err != nil {
+		return err
+	}
+	select {
+	case <-managed.done:
+		if err := signalGroup(true); err != nil {
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		forceErr := signalGroup(true)
+		select {
+		case <-managed.done:
+			return errors.Join(ctx.Err(), forceErr)
 		case <-time.After(2 * time.Second):
-			return fmt.Errorf("isolated session process %d did not stop", pid)
+			return errors.Join(forceErr, fmt.Errorf("%w: isolated session process %d did not stop", ErrCleanupFailed, pid))
 		}
 	case <-time.After(2 * time.Second):
-		_ = proc.KillGroup(pid, true)
+		if err := signalGroup(true); err != nil {
+			return err
+		}
 		select {
 		case <-managed.done:
 			return nil
 		case <-time.After(2 * time.Second):
-			return fmt.Errorf("isolated session process %d did not stop", pid)
+			return fmt.Errorf("%w: isolated session process %d did not stop", ErrCleanupFailed, pid)
 		}
 	}
 }
