@@ -26,3 +26,5 @@ func sameDevice(string, string) error {
 func moveDirectory(string, string, bool) error {
 	return ErrUnsupported
 }
+
+func transactionMode() string { return "unsupported" }

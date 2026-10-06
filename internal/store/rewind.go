@@ -8,30 +8,35 @@ import (
 	"time"
 
 	"stable/internal/candidate"
+	"stable/internal/platform/secfile"
 )
 
 // Rewind journal phases. A rewind commits in one atomic directory exchange;
 // the journal exists so a crash anywhere around that exchange can be
 // reconciled against real digests instead of guessing.
 const (
-	RewindPrepared  = "prepared"
-	RewindSwapped   = "swapped"
-	RewindFinalized = "finalized"
-	RewindBlocked   = "blocked"
+	RewindPrepared        = "prepared"
+	RewindOldSaved        = "old_saved"
+	RewindTargetInstalled = "target_installed"
+	RewindSwapped         = "swapped"
+	RewindFinalized       = "finalized"
+	RewindBlocked         = "blocked"
 )
 
 // RewindJournal tracks one candidate rewind attempt.
 type RewindJournal struct {
-	ID             string
-	CandidateID    string
-	SnapshotID     string
-	Phase          string
-	ExpectedDigest string // candidate digest before the rewind
-	TargetDigest   string // snapshot digest to restore
-	StagingDir     string
-	Reason         string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID              string
+	CandidateID     string
+	SnapshotID      string
+	Phase           string
+	ExpectedDigest  string // candidate digest before the rewind
+	TargetDigest    string // snapshot digest to restore
+	StagingDir      string
+	TransactionMode string
+	RollbackPath    string
+	Reason          string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // BeginRewind records a prepared rewind. Only one unfinished rewind may
@@ -46,7 +51,13 @@ func (s *Store) BeginRewind(ctx context.Context, j RewindJournal) error {
 	if j.UpdatedAt.IsZero() {
 		j.UpdatedAt = j.CreatedAt
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO rewind_journal(id,candidate_id,snapshot_id,phase,expected_digest,target_digest,staging_dir,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, j.ID, j.CandidateID, j.SnapshotID, RewindPrepared, j.ExpectedDigest, j.TargetDigest, j.StagingDir, "", j.CreatedAt.UTC().Format(time.RFC3339Nano), j.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	if j.TransactionMode == "" {
+		j.TransactionMode = secfile.TransactionMode()
+	}
+	if j.RollbackPath == "" {
+		j.RollbackPath = j.StagingDir + ".rollback"
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO rewind_journal(id,candidate_id,snapshot_id,phase,transaction_mode,rollback_path,expected_digest,target_digest,staging_dir,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, j.ID, j.CandidateID, j.SnapshotID, RewindPrepared, j.TransactionMode, j.RollbackPath, j.ExpectedDigest, j.TargetDigest, j.StagingDir, "", j.CreatedAt.UTC().Format(time.RFC3339Nano), j.UpdatedAt.UTC().Format(time.RFC3339Nano))
 	return err
 }
 
@@ -73,7 +84,7 @@ func validRewindTransition(from, to string) bool {
 	switch from + "->" + to {
 	// prepared->finalized marks a crash that happened before the exchange:
 	// the candidate still matches the expected digest, nothing changed.
-	case "prepared->swapped", "prepared->finalized", "prepared->blocked", "swapped->finalized", "swapped->blocked":
+	case "prepared->old_saved", "prepared->swapped", "prepared->finalized", "prepared->blocked", "old_saved->target_installed", "old_saved->blocked", "target_installed->swapped", "target_installed->blocked", "swapped->finalized", "swapped->blocked":
 		return true
 	}
 	return false
@@ -81,7 +92,7 @@ func validRewindTransition(from, to string) bool {
 
 // UnfinishedRewinds lists journals needing recovery, oldest first.
 func (s *Store) UnfinishedRewinds(ctx context.Context) ([]RewindJournal, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,candidate_id,snapshot_id,phase,expected_digest,target_digest,staging_dir,reason,created_at,updated_at FROM rewind_journal WHERE phase IN ('prepared','swapped') ORDER BY updated_at,id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,candidate_id,snapshot_id,phase,expected_digest,target_digest,staging_dir,reason,created_at,updated_at,transaction_mode,rollback_path FROM rewind_journal WHERE phase IN ('prepared','old_saved','target_installed','swapped') ORDER BY updated_at,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +111,7 @@ func (s *Store) UnfinishedRewinds(ctx context.Context) ([]RewindJournal, error) 
 // UnfinishedRewindFor returns the candidate's open rewind, if any. Accept
 // and new rewind requests must refuse while one exists.
 func (s *Store) UnfinishedRewindFor(ctx context.Context, candidateID string) (RewindJournal, bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,candidate_id,snapshot_id,phase,expected_digest,target_digest,staging_dir,reason,created_at,updated_at FROM rewind_journal WHERE candidate_id=? AND phase IN ('prepared','swapped') ORDER BY updated_at DESC LIMIT 1`, candidateID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,candidate_id,snapshot_id,phase,expected_digest,target_digest,staging_dir,reason,created_at,updated_at,transaction_mode,rollback_path FROM rewind_journal WHERE candidate_id=? AND phase IN ('prepared','old_saved','target_installed','swapped') ORDER BY updated_at DESC LIMIT 1`, candidateID)
 	if err != nil {
 		return RewindJournal{}, false, err
 	}
@@ -119,7 +130,7 @@ type rewindScanner interface {
 func scanRewind(rows rewindScanner) (RewindJournal, error) {
 	var j RewindJournal
 	var created, updated string
-	err := rows.Scan(&j.ID, &j.CandidateID, &j.SnapshotID, &j.Phase, &j.ExpectedDigest, &j.TargetDigest, &j.StagingDir, &j.Reason, &created, &updated)
+	err := rows.Scan(&j.ID, &j.CandidateID, &j.SnapshotID, &j.Phase, &j.ExpectedDigest, &j.TargetDigest, &j.StagingDir, &j.Reason, &created, &updated, &j.TransactionMode, &j.RollbackPath)
 	if err != nil {
 		return j, err
 	}
@@ -192,8 +203,41 @@ func (s *Store) reconcileRewind(ctx context.Context, j RewindJournal) error {
 	if err != nil {
 		return s.blockRewind(ctx, j, err)
 	}
+	if j.Phase == RewindOldSaved || j.Phase == RewindTargetInstalled {
+		tx := candidate.DirectoryTransaction{ID: j.ID, Kind: candidate.TransactionRewind, CurrentRoot: rec.Candidate.CandidateRoot, IncomingRoot: j.StagingDir, RollbackRoot: j.RollbackPath, ExpectedDigest: j.ExpectedDigest, TargetDigest: j.TargetDigest, Mode: j.TransactionMode}
+		if tx.Mode == "" {
+			tx.Mode = "atomic-exchange"
+		}
+		if err = candidate.NewTransactionCoordinator().Recover(ctx, tx, candidate.TransactionPhase(j.Phase), rewindJournalAdapter{store: s}); err != nil {
+			return s.blockRewind(ctx, j, err)
+		}
+		_, digest, err = candidate.BuildManifest(rec.Candidate.CandidateRoot)
+		if err != nil {
+			return s.blockRewind(ctx, j, err)
+		}
+	}
 	switch digest {
 	case j.ExpectedDigest:
+		if j.Phase == RewindPrepared {
+			if _, stagedDigest, stagedErr := candidate.BuildManifest(j.StagingDir); stagedErr == nil && stagedDigest == j.TargetDigest {
+				tx := candidate.DirectoryTransaction{ID: j.ID, Kind: candidate.TransactionRewind, CurrentRoot: rec.Candidate.CandidateRoot, IncomingRoot: j.StagingDir, RollbackRoot: j.RollbackPath, ExpectedDigest: j.ExpectedDigest, TargetDigest: j.TargetDigest, Mode: j.TransactionMode}
+				if tx.Mode == "" {
+					tx.Mode = "atomic-exchange"
+				}
+				if err = candidate.NewTransactionCoordinator().Apply(ctx, tx, rewindJournalAdapter{store: s}); err != nil {
+					return s.blockRewind(ctx, j, err)
+				}
+				if err = s.FinalizeRewind(ctx, j); err != nil {
+					return s.blockRewind(ctx, j, err)
+				}
+				_ = os.RemoveAll(j.StagingDir)
+				return nil
+			} else {
+				// The staging directory was never a valid target; discard it.
+				_ = os.RemoveAll(j.StagingDir)
+				return s.SetRewindPhase(ctx, j.ID, j.Phase, RewindFinalized, "interrupted before swap")
+			}
+		}
 		// The exchange never happened (or was rolled back): nothing to
 		// finish, just clean the staging directory.
 		_ = os.RemoveAll(j.StagingDir)
@@ -210,6 +254,12 @@ func (s *Store) reconcileRewind(ctx context.Context, j RewindJournal) error {
 	default:
 		return s.blockRewind(ctx, j, fmt.Errorf("candidate digest %s matches neither the expected nor the target digest", digest))
 	}
+}
+
+type rewindJournalAdapter struct{ store *Store }
+
+func (j rewindJournalAdapter) Advance(ctx context.Context, id string, from, to candidate.TransactionPhase, reason string) error {
+	return j.store.SetRewindPhase(ctx, id, string(from), string(to), reason)
 }
 
 func (s *Store) blockRewind(ctx context.Context, j RewindJournal, cause error) error {

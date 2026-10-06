@@ -21,8 +21,8 @@
 | C03 单实例锁 | 支持 | 待真实环境验证 | 待真实环境验证 |
 | C04 进程树托管 | 支持 | 降级(待真实环境验证) | 降级(待真实环境验证) |
 | C05 私密文件与安全存储 | 支持 | 待真实环境验证 | 待真实环境验证 |
-| C06 安全根目录访问 | 支持 | 未评估(计划评估) | 未评估(计划评估) |
-| C07 候选目录事务(原子验收) | 支持 | 未评估(计划评估) | 未评估(计划评估) |
+| C06 安全根目录访问 | 支持 | 契约已实现(待真实环境验证) | 契约已实现(待真实环境验证) |
+| C07 候选目录事务(原子验收) | 支持 | journaled-move 契约已实现(待真实环境验证) | journaled-move 契约已实现(待真实环境验证) |
 | C08 网络隔离(沙箱执行与网络授权) | 支持 | 未评估(计划评估) | 未评估(计划评估) |
 | C09 无头 KiCad 检查 | 支持 | 未评估(计划评估) | 未评估(计划评估) |
 | C10 交互式 GUI 会话 | 支持(可降级) | 未评估(计划评估) | 未评估(计划评估) |
@@ -224,6 +224,8 @@
 
 **Linux 状态:支持**——根内读取统一经 CleanRelative 词法拒绝 + openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS)+O_NOFOLLOW+fstat 常规文件校验,关键节点(冻结/评审/验收/ERC 前后)有摘要复核,openat2 不可用时错误上抛无静默回退(前提:Linux 内核 ≥ 5.6)。已澄清:openat2 仅存在于 workspace.go secureOpen;ERC 报告读取用末组件 O_NOFOLLOW+fstat+8MB 上限(报告路径服务自建);设备号检查仅承担同文件系统前置判断,防替换由逐次 openat2+摘要复核承担。
 
+**S03 更新(2026-10-06)**：`internal/platform/secfile` 已提供跨平台 `Root`、根身份重新验证、同卷检查和普通文件读取契约。Linux 继续使用 openat2；Darwin 使用逐组件 openat/O_NOFOLLOW；Windows 使用句柄级 reparse point 与卷/文件身份检查。review、snapshot、ERC 报告读取均已接入该边界；Darwin/Windows 真实主机行为留阶段 5 验证。
+
 **证据**:
 - `internal/candidate/workspace.go` `secureOpen`(213–238)— 根 fd(O_PATH|O_DIRECTORY)后 unix.Openat2(OpenHow{O_RDONLY|O_CLOEXEC|O_NOFOLLOW, RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS}),fstat 要求常规文件;RESOLVE_BENEATH 拒绝绝对路径与向上穿越,RESOLVE_NO_SYMLINKS 拒绝任何一级符号链接(含父目录替换与 /proc 魔法链接),O_NOFOLLOW 纵深防御;未用 RESOLVE_NO_XDEV(根内挂载点可跨设备,已知边界)。
 - `internal/candidate/workspace.go` `CleanRelative`(36–45)— 词法拒绝绝对路径、NUL、`.`、`..`;`BuildManifest`(47–117)对根 Lstat 拒绝符号链接根,WalkDir 跳过 `.stable`,符号链接/非常规文件条目直接 ErrUnsafePath,每个文件经 secureOpen 读入做 SHA-256。
@@ -236,7 +238,7 @@
 
 **证据类型与已执行验证**:可运行验证——`go test ./internal/candidate/... -count=1`(ok,含 TestManifestPath 词法穿越、TestManifestRejectsSymlink 根内符号链接、TestMaterializeRejectsTraversalEntry 快照穿越、TestGuardRewindTargetRejectsFormalRoot、TestAcceptRejectsStalePreview、TestCandidateReviewRejectsWritesDuringChecker)。仅代码审阅——openat2 内核层语义无直接命中用例(现有测试在 WalkDir 层即拒绝符号链接;建议补 openat2 层逃逸用例,对应 AC-ROOT-3)。
 
-**macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
+**macOS 状态**:契约已实现，目标编译与 Linux 契约测试通过；真实文件系统行为留阶段 5。**Windows 状态**:契约已实现，目标编译与 Linux 契约测试通过；真实文件系统行为留阶段 5。
 
 **等价机制线索**(未经验证,不构成承诺):macOS——无 openat2;逐组件 openat+O_NOFOLLOW+每级 fstat(dev/ino) 复核的 safe-open 循环;根身份用 st_dev/st_ino 比对。Windows——CreateFileW+FILE_FLAG_OPEN_REPARSE_POINT 拒绝 reparse point;GetFileInformationByHandle 比对卷序列号+File ID;路径规范化后前缀包含校验。旧内核(<5.6)——openat 逐目录下探+每级 fstat+O_NOFOLLOW 模拟。
 
@@ -260,7 +262,9 @@
 
 **范围界定**:含——候选目录准备(CreateCandidate,含同设备号前置与失败回滚)、冻结后的原子交换验收(AcceptCandidate/ExchangeProjectDir)、SQLite 验收 journal(acceptance_apply_journal)与重启 reconcile(ReconcileAcceptances)、快照回滚(SnapshotStore/StageRewind/SwapWithStaging/rewind journal);不含——候选内容生成与沙箱执行、ERC 检查本身(C09)、`.stable` 服务子树常规读写。
 
-**Linux 状态:支持**——验收交换主线(原子 RENAME_EXCHANGE + 交换前持久化 journal + 基于 manifest digest 的崩溃分类恢复 + 冲突即 blocked)在代码与测试中完整闭环,无任何普通覆盖/复制降级路径。已知接线缺口(非平台能力缺失,详见现状与差异记录):ReconcileRewinds 未接入生产启动路径;accept.go 注释承诺的 `.stable` 回移恢复机制不存在。
+**Linux 状态:支持**——验收交换主线(原子 RENAME_EXCHANGE + 交换前持久化 journal + 基于 manifest digest 的崩溃分类恢复 + 冲突即 blocked)在代码与测试中完整闭环,无任何普通覆盖/复制降级路径。S03 将 rewind 同步流程接入同一事务 coordinator，并把 `.stable` 服务目录恢复纳入 acceptance 完成与恢复路径。
+
+**S03 更新(2026-10-06)**：事务 coordinator 已统一 acceptance/rewind 调用链。Linux 使用 `atomic-exchange`；Darwin/Windows 明确使用带 rollback 路径和 `old_saved`/`target_installed` phase 的 `journaled-move`，能力不足、跨卷或摘要不一致时 fail-closed。journal schema 已迁移到 v12；真实 Darwin/Windows 崩溃恢复仍留阶段 5。
 
 **证据**:
 - `internal/candidate/accept.go` — ExchangeProjectDir 对两根 Lstat(拒绝非目录/符号链接)+unix.Stat 同设备号检查后,以 unix.Renameat2(AT_FDCWD,…,RENAME_EXCHANGE) 单次原子交换;AcceptCandidate 流程:journal 幂等检查 → validateAcceptance(状态 reviewed/frozen、决策身份与 digest 匹配、review digest 重算、normal/force 门禁)→ journal 落盘 → 交换前二次 manifest 复核(防 TOCTOU)→ 交换 → `.stable` 回移 → prepared→swapped → FinalizeAcceptance(receipt+状态机一个 SQLite 事务)。
@@ -274,7 +278,7 @@
 
 **证据类型与已执行验证**:可运行验证——`go test ./internal/candidate/... -count=1`(ok)、`go test ./internal/store/ -run 'TestReconcile' -count=1`(10/10 PASS,含交换前/交换后/冲突三类崩溃结局与 rewind 四用例)。仅代码审阅/未执行——tests/e2e 的 m03 验收与重启恢复 e2e(重,含真实沙箱与 SQLite 重开)未在本阶段执行。
 
-**macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
+**macOS 状态**:journaled-move 契约已实现，目标编译与 Linux 状态机测试通过；真实主机崩溃恢复留阶段 5。**Windows 状态**:journaled-move 契约已实现，目标编译与 Linux 状态机测试通过；真实主机崩溃恢复留阶段 5。
 
 **等价机制线索**(未经验证,不构成承诺):macOS——无 renameat2(RENAME_EXCHANGE) 等价 syscall,方向为「journal + 两次 rename(formal→备份、staging→formal)+ 重启按 journal 收尾」的分阶段提交;Windows 10+ NT 内核支持 POSIX 语义重命名(FILE_RENAME_FLAG_POSIX_SEMANTICS)可替换目录但无 exchange 语义,大概率同需分阶段提交;两平台均须保留「磁盘 digest 对照 journal 分类结局」恢复模型;均须通过 AC-CAND-7 故障注入后才能声明等价。
 

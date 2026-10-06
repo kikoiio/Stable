@@ -106,6 +106,8 @@ func moveDirectory(src, dst string, replace bool) error {
 	return os.Rename(src, dst)
 }
 
+func transactionMode() string { return "atomic-exchange" }
+
 // validateLinuxRelative rejects path forms that openat2 would either resolve
 // outside the root or interpret as an empty entry. Keeping this check local to
 // the Linux adapter also lets callers receive the package sentinel instead of

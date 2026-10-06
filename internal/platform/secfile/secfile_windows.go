@@ -118,6 +118,8 @@ func exchange(dirA, dirB string) error {
 // in a journal without importing Windows types.
 func windowsDirectoryMoveMode() string { return windowsJournaledMove }
 
+func transactionMode() string { return windowsJournaledMove }
+
 // sameDevice compares volume serial numbers obtained from handles opened with
 // FILE_FLAG_OPEN_REPARSE_POINT. Opening through a reparse point is rejected so
 // a junction cannot make two paths appear to share a trusted volume.

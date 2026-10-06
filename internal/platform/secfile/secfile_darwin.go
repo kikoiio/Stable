@@ -130,6 +130,8 @@ func moveDirectory(dirA, dirB string, replace bool) error {
 	return nil
 }
 
+func transactionMode() string { return "journaled-move" }
+
 func sameDevice(pathA, pathB string) error {
 	var a, b unix.Stat_t
 	if err := unix.Lstat(pathA, &a); err != nil {

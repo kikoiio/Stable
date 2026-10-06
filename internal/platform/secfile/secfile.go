@@ -123,6 +123,10 @@ func MoveDirectory(pathA, pathB string, replace bool) error {
 	return moveDirectory(pathA, pathB, replace)
 }
 
+// TransactionMode reports the directory transaction primitive guaranteed by
+// the current platform. Callers must persist this choice in their journal.
+func TransactionMode() string { return transactionMode() }
+
 // MkdirAllPrivate creates path and every missing parent with the given mode,
 // then ensures the mode is actually applied (POSIX chmod after mkdir to beat
 // umask; Windows current-user ACL for private modes).
