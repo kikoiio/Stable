@@ -111,7 +111,7 @@ hooks:
     action: {type: prompt, message: once-only}
   - id: http
     event: run_start
-    action: {type: http, url: "https://example.com"}
+    action: {type: http, url: "http://127.0.0.1:1/"}
 `)
 	helper := m06HelperPath(t)
 	provider := &m06Agent{respond: func(int, llm.Request) []llm.Event { return m06TextRound("first") }}
