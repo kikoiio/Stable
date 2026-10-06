@@ -56,14 +56,20 @@ jobs:
           cache-dependency-path: go.sum
       - uses: ./.github/actions/setup-e2e-deps
       - run: make e2e
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          cp -a run ci-logs/run 2>/dev/null || true
+          for d in /tmp/stable-e2e-* /tmp/stable-m04-helper-*; do
+            [[ -d $d ]] && cp -a "$d" ci-logs/ || true
+          done
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-core-logs
-          path: |
-            run/
-            /tmp/stable-e2e-*/
+          path: ci-logs/
           if-no-files-found: ignore
           retention-days: 7
 
@@ -79,14 +85,20 @@ jobs:
           cache-dependency-path: go.sum
       - uses: ./.github/actions/setup-e2e-deps
       - run: make m03-e2e
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          cp -a run ci-logs/run 2>/dev/null || true
+          for d in /tmp/stable-e2e-* /tmp/stable-m04-helper-*; do
+            [[ -d $d ]] && cp -a "$d" ci-logs/ || true
+          done
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-m03-logs
-          path: |
-            run/
-            /tmp/stable-e2e-*/
+          path: ci-logs/
           if-no-files-found: ignore
           retention-days: 7
 
@@ -102,15 +114,20 @@ jobs:
           cache-dependency-path: go.sum
       - uses: ./.github/actions/setup-e2e-deps
       - run: make m04-e2e
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          cp -a run ci-logs/run 2>/dev/null || true
+          for d in /tmp/stable-e2e-* /tmp/stable-m04-helper-*; do
+            [[ -d $d ]] && cp -a "$d" ci-logs/ || true
+          done
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-m04-logs
-          path: |
-            run/
-            /tmp/stable-e2e-*/
-            /tmp/stable-m04-helper-*/
+          path: ci-logs/
           if-no-files-found: ignore
           retention-days: 7
 
@@ -130,14 +147,20 @@ jobs:
       - run: |
           make m05-e2e
           make m07b-e2e
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          cp -a run ci-logs/run 2>/dev/null || true
+          for d in /tmp/stable-e2e-* /tmp/stable-m04-helper-*; do
+            [[ -d $d ]] && cp -a "$d" ci-logs/ || true
+          done
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-sessions-logs
-          path: |
-            run/
-            /tmp/stable-e2e-*/
+          path: ci-logs/
           if-no-files-found: ignore
           retention-days: 7
 
@@ -154,13 +177,19 @@ jobs:
           cache-dependency-path: go.sum
       - uses: ./.github/actions/setup-e2e-deps
       - run: bash tests/cases/run_case.sh S01_missing_wire
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          cp -a run ci-logs/run 2>/dev/null || true
+          for d in /tmp/stable-e2e-* /tmp/stable-m04-helper-*; do
+            [[ -d $d ]] && cp -a "$d" ci-logs/ || true
+          done
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: cases-logs
-          path: |
-            run/
-            /tmp/stable-e2e-*/
+          path: ci-logs/
           if-no-files-found: ignore
           retention-days: 7

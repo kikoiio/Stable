@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -29,6 +31,16 @@ func (doctorSandbox) CallIsolatedSession(context.Context, sandbox.SandboxSession
 func (doctorSandbox) StopIsolatedSession(context.Context, string) error { return nil }
 
 func TestDoctorReportsIsolatedCapabilityFailureWithoutHostFallback(t *testing.T) {
+	// The report only falls through to the isolated-sandbox wording when the
+	// CLI is visible on the host, so give the test a hermetic stub instead of
+	// depending on a host KiCad install (CI runners have none).
+	stubDir := t.TempDir()
+	stub := filepath.Join(stubDir, "kicad-cli")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	checks := DoctorWithSandbox(appconfig.AppConfig{}, paths.Paths{}, doctorSandbox{})
 	var sandboxCheck, cliCheck *Check
 	for i := range checks {
