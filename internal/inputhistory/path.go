@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"stable/internal/platform/secfile"
 	"strings"
 
 	"stable/internal/sessionlog"
@@ -24,10 +25,10 @@ func Prepare(root string) (string, error) {
 	if st, e := os.Lstat(dir); e == nil && st.Mode()&os.ModeSymlink != 0 {
 		return "", errors.New("state directory must not be a symlink")
 	}
-	if err = os.MkdirAll(dir, 0700); err != nil {
+	if err = secfile.MkdirAllPrivate(dir, 0700); err != nil {
 		return "", err
 	}
-	if err = os.Chmod(dir, 0700); err != nil {
+	if err = secfile.ChmodPrivate(dir, 0700); err != nil {
 		return "", err
 	}
 	if err = ignoreInGit(root); err != nil {
@@ -50,7 +51,7 @@ func historyPath(root string) (string, error) {
 			return "", errors.New("input history path must be a regular file")
 		}
 		if st.Mode().Perm()&0077 != 0 {
-			if err = os.Chmod(path, 0600); err != nil {
+			if err = secfile.ChmodPrivate(path, 0600); err != nil {
 				return "", fmt.Errorf("secure input history permissions: %w", err)
 			}
 		}
@@ -78,7 +79,7 @@ func ignoreInGit(root string) error {
 			return nil
 		}
 	}
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	f, err := secfile.OpenFilePrivate(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}

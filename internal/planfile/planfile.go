@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"stable/internal/platform/secfile"
 	"strings"
 )
 
@@ -50,18 +51,18 @@ func Ensure(projectRoot, sessionID string) (string, bool, error) {
 	if st, e := os.Lstat(dir); e == nil && st.Mode()&os.ModeSymlink != 0 {
 		return "", false, errors.New("plans directory must not be a symlink")
 	}
-	if err = os.MkdirAll(dir, 0700); err != nil {
+	if err = secfile.MkdirAllPrivate(dir, 0700); err != nil {
 		return "", false, err
 	}
-	if err = os.Chmod(stable, 0700); err != nil {
+	if err = secfile.ChmodPrivate(stable, 0700); err != nil {
 		return "", false, err
 	}
-	if err = os.Chmod(dir, 0700); err != nil {
+	if err = secfile.ChmodPrivate(dir, 0700); err != nil {
 		return "", false, err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	f, err := secfile.OpenFilePrivate(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err == nil {
-		if err = f.Chmod(0600); err != nil {
+		if err = secfile.ChmodPrivate(f.Name(), 0600); err != nil {
 			_ = f.Close()
 			return "", false, err
 		}
@@ -122,7 +123,7 @@ func secureExisting(path string) error {
 		return errors.New("plan path must be a regular file")
 	}
 	if st.Mode().Perm()&0077 != 0 {
-		if err = os.Chmod(path, 0600); err != nil {
+		if err = secfile.ChmodPrivate(path, 0600); err != nil {
 			return fmt.Errorf("secure plan file permissions: %w", err)
 		}
 	}

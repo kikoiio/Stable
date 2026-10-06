@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"stable/internal/platform/secfile"
 	"strings"
 	"time"
 
@@ -790,10 +791,10 @@ func (a *Activities) requestPayload(g Goal, session *ComputerSession) (json.RawM
 	candidateRoot := filepath.Join(runRoot, ".stable-bridge-candidates", "inspect-"+g.ID)
 	privateRunRoot := filepath.Join(runRoot, ".stable-bridge-runs", g.ID)
 	for _, path := range []string{candidateRoot, privateRunRoot} {
-		if err := os.MkdirAll(path, 0700); err != nil {
+		if err := secfile.MkdirAllPrivate(path, 0700); err != nil {
 			return nil, err
 		}
-		if err := os.Chmod(path, 0700); err != nil {
+		if err := secfile.ChmodPrivate(path, 0700); err != nil {
 			return nil, err
 		}
 	}
@@ -838,10 +839,10 @@ func (a *Activities) computerRequestPayload(g Goal, session *ComputerSession) (j
 	}
 	target := filepath.Join(candidateRoot, cleanArtifact)
 	runRoot := filepath.Join(a.runRoot(g), ".stable-computer-runs", g.ID)
-	if err = os.MkdirAll(runRoot, 0700); err != nil {
+	if err = secfile.MkdirAllPrivate(runRoot, 0700); err != nil {
 		return nil, err
 	}
-	if err = os.Chmod(runRoot, 0700); err != nil {
+	if err = secfile.ChmodPrivate(runRoot, 0700); err != nil {
 		return nil, err
 	}
 	data := map[string]any{"path": target, "allowed_root": candidateRoot, "project_root": formalRoot, "candidate_root": candidateRoot, "run_root": runRoot}

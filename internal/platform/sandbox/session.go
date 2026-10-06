@@ -20,6 +20,7 @@ import (
 
 	"stable/internal/platform/ipc"
 	"stable/internal/platform/proc"
+	"stable/internal/platform/secfile"
 )
 
 type sessionState struct {
@@ -321,7 +322,7 @@ func createSessionControlSocket(runRoot string) (string, string, net.Listener, e
 	if err != nil {
 		return "", "", nil, err
 	}
-	if err = os.Chmod(dir, 0700); err != nil {
+	if err = secfile.ChmodPrivate(dir, 0700); err != nil {
 		_ = os.RemoveAll(dir)
 		return "", "", nil, err
 	}
@@ -380,10 +381,10 @@ func nextSessionGeneration(runRoot, id, candidate string) (uint64, error) {
 		return 0, err
 	}
 	stateDir := filepath.Join(filepath.Dir(root), ".stable-sessions")
-	if err = os.MkdirAll(stateDir, 0700); err != nil {
+	if err = secfile.MkdirAllPrivate(stateDir, 0700); err != nil {
 		return 0, err
 	}
-	if err = os.Chmod(stateDir, 0700); err != nil {
+	if err = secfile.ChmodPrivate(stateDir, 0700); err != nil {
 		return 0, err
 	}
 	sum := sha256.Sum256([]byte(id))
@@ -411,7 +412,7 @@ func nextSessionGeneration(runRoot, id, candidate string) (uint64, error) {
 	}
 	tempName := temp.Name()
 	defer os.Remove(tempName)
-	if err = temp.Chmod(0600); err == nil {
+	if err = secfile.ChmodPrivate(temp.Name(), 0600); err == nil {
 		_, err = temp.Write(encoded)
 	}
 	if closeErr := temp.Close(); err == nil {
@@ -432,14 +433,14 @@ func openSessionLog(runRoot, id string) (*os.File, error) {
 		return nil, err
 	}
 	logDir := filepath.Join(filepath.Dir(root), ".stable-sessions", "logs")
-	if err = os.MkdirAll(logDir, 0700); err != nil {
+	if err = secfile.MkdirAllPrivate(logDir, 0700); err != nil {
 		return nil, err
 	}
-	if err = os.Chmod(logDir, 0700); err != nil {
+	if err = secfile.ChmodPrivate(logDir, 0700); err != nil {
 		return nil, err
 	}
 	sum := sha256.Sum256([]byte(id))
-	return os.OpenFile(filepath.Join(logDir, hex.EncodeToString(sum[:16])+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	return secfile.OpenFilePrivate(filepath.Join(logDir, hex.EncodeToString(sum[:16])+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 }
 
 func newSessionID() (string, error) {

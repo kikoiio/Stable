@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"stable/internal/platform/secfile"
 	"strings"
 	"time"
 
@@ -64,14 +65,14 @@ func SandboxProfileFor(runRoot, helperPath string) func(core.CapabilityRequest) 
 		if absProject == absCandidate || pathWithin(absProject, absCandidate) || pathWithin(absCandidate, absProject) {
 			return sandbox.SandboxProfile{}, fmt.Errorf("project and candidate roots overlap")
 		}
-		if err := os.MkdirAll(absRun, 0700); err != nil {
+		if err := secfile.MkdirAllPrivate(absRun, 0700); err != nil {
 			return sandbox.SandboxProfile{}, err
 		}
 		canonicalRun, err = realDirectory(absRun)
 		if err != nil || canonicalRun != absRun || !pathWithinOrEqual(workerRoot, canonicalRun) {
 			return sandbox.SandboxProfile{}, fmt.Errorf("private run root changed or crosses a symbolic link")
 		}
-		if err := os.Chmod(canonicalRun, 0700); err != nil {
+		if err := secfile.ChmodPrivate(canonicalRun, 0700); err != nil {
 			return sandbox.SandboxProfile{}, err
 		}
 		return sandbox.SandboxProfile{ProjectRoot: absProject, CandidateRoot: absCandidate, RunRoot: canonicalRun, Timeout: 90 * time.Second, OutputLimit: 1 << 20, ProxyHelperPath: helperPath}, nil

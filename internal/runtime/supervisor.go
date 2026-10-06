@@ -30,6 +30,7 @@ import (
 	"stable/internal/platform/paths"
 	"stable/internal/platform/proc"
 	"stable/internal/platform/sandbox"
+	"stable/internal/platform/secfile"
 	"stable/internal/sessioncontext"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
@@ -71,7 +72,7 @@ func Up(ctx context.Context, c appconfig.AppConfig, p paths.Paths) (Status, erro
 	if err := p.Prepare(); err != nil {
 		return Status{}, err
 	}
-	f, err := os.OpenFile(p.SupervisorLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	f, err := secfile.OpenFilePrivate(p.SupervisorLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return Status{}, err
 	}
@@ -160,12 +161,12 @@ func Supervise(c appconfig.AppConfig, p paths.Paths, sbx sandbox.SandboxManager)
 	defer listener.Close()
 	defer os.Remove(p.Socket)
 	defer os.Remove(p.ChatSocket)
-	temporalLog, err := os.OpenFile(p.TemporalLog, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	temporalLog, err := secfile.OpenFilePrivate(p.TemporalLog, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
 	defer temporalLog.Close()
-	workerLog, err := os.OpenFile(p.WorkerLog, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	workerLog, err := secfile.OpenFilePrivate(p.WorkerLog, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
@@ -175,6 +176,9 @@ func Supervise(c appconfig.AppConfig, p paths.Paths, sbx sandbox.SandboxManager)
 	temporal.Stderr = temporalLog
 	if err = temporal.Start(); err != nil {
 		return err
+	}
+	if err = proc.AdoptChild(temporal); err != nil {
+		return fmt.Errorf("adopt Temporal process: %w", err)
 	}
 	defer proc.StopProcess(temporal, 5*time.Second)
 	if err = waitPort(address, temporal, 20*time.Second); err != nil {
@@ -186,6 +190,9 @@ func Supervise(c appconfig.AppConfig, p paths.Paths, sbx sandbox.SandboxManager)
 	worker.Stderr = workerLog
 	if err = worker.Start(); err != nil {
 		return err
+	}
+	if err = proc.AdoptChild(worker); err != nil {
+		return fmt.Errorf("adopt worker process: %w", err)
 	}
 	defer proc.StopProcess(worker, 5*time.Second)
 	if err = waitReady(p.WorkerLog, worker, 15*time.Second); err != nil {
@@ -321,7 +328,7 @@ func startChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx 
 	go func() {
 		defer close(done)
 		if err := runChatService(c, p, address, sbx); err != nil {
-			if f, ferr := os.OpenFile(p.ChatLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); ferr == nil {
+			if f, ferr := secfile.OpenFilePrivate(p.ChatLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); ferr == nil {
 				fmt.Fprintf(f, "%s chat session service: %v\n", time.Now().UTC().Format(time.RFC3339), err)
 				f.Close()
 			}
