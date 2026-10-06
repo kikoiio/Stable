@@ -296,7 +296,7 @@ func FireOne(h Hook, ctx Context) Result {
 	case "prompt":
 		output = h.Action.Message
 	case "http":
-		err = errors.New("http action not enabled (reserved for M07-C)")
+		output, err = runHTTPAction(h.Action, timeout)
 	case "agent":
 		err = errors.New("agent action not enabled (reserved for M09)")
 	case "command":

@@ -54,11 +54,25 @@ func (q SnapshotQuota) ManifestsPerCandidate() int {
 	return q.MaxManifestsPerCandidate
 }
 
+// MCPServerConfig declares one MCP server in the user config. This layer only
+// carries the parsed JSON fields; semantic validation happens in the mcp
+// package.
+type MCPServerConfig struct {
+	Name      string            `json:"name"`
+	Command   string            `json:"command,omitempty"`
+	Args      []string          `json:"args,omitempty"`
+	URL       string            `json:"url,omitempty"`
+	Transport string            `json:"transport,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+}
+
 type AppConfig struct {
-	Model        ModelConfig   `json:"model"`
-	StateDir     string        `json:"state_dir,omitempty"`
-	TemporalPort int           `json:"temporal_port,omitempty"`
-	Snapshots    SnapshotQuota `json:"snapshots,omitempty"`
+	Model        ModelConfig       `json:"model"`
+	StateDir     string            `json:"state_dir,omitempty"`
+	TemporalPort int               `json:"temporal_port,omitempty"`
+	Snapshots    SnapshotQuota     `json:"snapshots,omitempty"`
+	MCPServers   []MCPServerConfig `json:"mcp_servers,omitempty"`
 }
 
 func ConfigPath() (string, error) {
