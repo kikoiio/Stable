@@ -37,11 +37,28 @@ func seedKicadConfig(runRoot string) error {
 	}
 	for _, name := range []string{"sym-lib-table", "fp-lib-table"} {
 		dest := filepath.Join(config, name)
-		if _, err := os.Lstat(dest); err == nil {
+		if info, err := os.Lstat(dest); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return secfile.ErrUnsafePath
+			}
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join("/usr/share/kicad/template", name))
+		template, err := secfile.OpenNoFollow(filepath.Join("/usr/share/kicad/template", name))
 		if err != nil {
+			continue
+		}
+		info, err := template.Stat()
+		if err != nil {
+			_ = template.Close()
+			continue
+		}
+		if !info.Mode().IsRegular() || info.Size() > 1<<20 {
+			_ = template.Close()
+			continue
+		}
+		data, readErr := io.ReadAll(io.LimitReader(template, (1<<20)+1))
+		closeErr := template.Close()
+		if readErr != nil || closeErr != nil || len(data) > 1<<20 {
 			continue
 		}
 		if err := os.WriteFile(dest, data, 0600); err != nil {
@@ -93,12 +110,23 @@ func (k KicadERCChecker) Check(ctx context.Context, c Candidate) (Finding, error
 	if err = secfile.ChmodPrivate(baseRunRoot, 0700); err != nil {
 		return Finding{}, err
 	}
+	baseRoot, err := secfile.OpenRoot(baseRunRoot)
+	if err != nil {
+		return Finding{}, fmt.Errorf("checker run root is unsafe: %w", err)
+	}
 	runRoot, err = os.MkdirTemp(baseRunRoot, "check-")
 	if err != nil {
 		return Finding{}, err
 	}
 	if err = secfile.ChmodPrivate(runRoot, 0700); err != nil {
 		return Finding{}, err
+	}
+	if err := baseRoot.Revalidate(); err != nil {
+		return Finding{}, err
+	}
+	runRootSecure, err := secfile.OpenRoot(runRoot)
+	if err != nil {
+		return Finding{}, fmt.Errorf("checker run directory is unsafe: %w", err)
 	}
 	timeout := k.Timeout
 	if timeout <= 0 {
@@ -145,7 +173,7 @@ func (k KicadERCChecker) Check(ctx context.Context, c Candidate) (Finding, error
 		if result.ExitCode != 0 && result.ExitCode != 5 {
 			return Finding{}, fmt.Errorf("KiCad ERC failed for %s with exit code %d", rel, result.ExitCode)
 		}
-		reportFile, readErr := secfile.OpenNoFollow(report)
+		reportFile, readErr := runRootSecure.Open(filepath.Base(report))
 		if readErr != nil {
 			return Finding{}, fmt.Errorf("read KiCad ERC report for %s: %w", rel, readErr)
 		}
@@ -174,6 +202,9 @@ func (k KicadERCChecker) Check(ctx context.Context, c Candidate) (Finding, error
 		for _, sheet := range parsed.Sheets {
 			violations += len(sheet.Violations)
 		}
+		if err := runRootSecure.Revalidate(); err != nil {
+			return Finding{}, err
+		}
 	}
 	_, formalAfter, err := BuildManifest(c.FormalRoot)
 	if err != nil {
@@ -188,6 +219,9 @@ func (k KicadERCChecker) Check(ctx context.Context, c Candidate) (Finding, error
 	}
 	if candidateAfter != candidateBefore {
 		return Finding{}, errors.New("candidate changed while KiCad ERC was running")
+	}
+	if err := runRootSecure.Revalidate(); err != nil {
+		return Finding{}, err
 	}
 	result := FindingPass
 	reason := "KiCad ERC reported no violations"
