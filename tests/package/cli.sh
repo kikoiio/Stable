@@ -82,7 +82,9 @@ for missing in python3 kicad-cli kicad Xvfb xvfb-run xprop import; do
   [[ "$out" == *"MISSING $missing"* ]] || fail "doctor did not name $missing: $out"
   fakebin_add "$missing"
 done
-PATH="$fakebin:$HOME/.local/bin" stable doctor >/dev/null || fail 'doctor failed with complete PATH'
+# doctor 的 isolated 检查在 bwrap 内探测(bwrap 与工具必须解析到 /usr 等真实系统目录),
+# fakebin 遮蔽 + 裁剪 PATH 会让 probe 全灭;"全量通过"断言必须用真实 PATH。
+PATH="$HOME/.local/bin:/usr/bin:/bin" stable doctor >/dev/null || fail 'doctor failed with complete PATH'
 # missing package file
 cp -a "$HOME/.local/opt/stable/$version" "$test_root/broken"
 rm "$test_root/broken/share/schemas/next_action.schema.json"
