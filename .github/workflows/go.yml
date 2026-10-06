@@ -18,20 +18,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-e2e-deps
+        with:
+          kicad: 'false'
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Verify dependencies
         run: go mod verify
-      - name: Install bubblewrap and enable user namespaces
-        run: |
-          sudo apt-get update && sudo apt-get install -y bubblewrap
-          # Ubuntu 24.04 默认用 AppArmor 限制非特权 userns,bwrap 装了也跑不起来
-          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo "apparmor userns knob absent"
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
-          bwrap --die-with-parent --unshare-net --ro-bind / / true
-          echo "bwrap probe OK"
       - name: Build CLI and workers
         run: go build ./cmd/...
       - name: Run unit tests
@@ -45,11 +40,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-e2e-deps
-      # userns 放开(等 s04 把同名步骤并入 setup-e2e-deps 后移除,见 build-and-test 同名步骤)
-      - name: Enable user namespaces for bwrap
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
-          bwrap --die-with-parent --unshare-net --ro-bind / / true
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod

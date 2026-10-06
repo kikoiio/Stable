@@ -1,16 +1,16 @@
 name: setup-e2e-deps
-description: 安装重型 e2e 套件所需的系统依赖(Temporal CLI 必装;KiCad 9、Xvfb、bwrap 可选)
+description: 安装重型 e2e 套件所需的系统依赖(Temporal CLI、bwrap+userns 必装;KiCad 9、Xvfb 可选)
 
 inputs:
   kicad:
-    description: 是否安装 KiCad 9 与 X/沙箱工具链(kicad-cli、eeschema、Xvfb、bwrap 等)
+    description: 是否安装 KiCad 9 与 X 工具链(kicad-cli、eeschema、Xvfb 等)
     required: false
     default: 'true'
 
 runs:
   using: composite
   steps:
-    - name: Install KiCad 9 and sandbox/display tooling
+    - name: Install KiCad 9 and display tooling
       if: inputs.kicad == 'true'
       shell: bash
       run: |
@@ -19,9 +19,20 @@ runs:
         sudo add-apt-repository -y ppa:kicad/kicad-9.0-releases
         sudo apt-get update
         sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-          kicad xvfb x11-utils imagemagick bubblewrap
+          kicad xvfb x11-utils imagemagick
         kicad-cli version
+
+    - name: Enable unprivileged user namespaces
+      shell: bash
+      run: |
+        # ubuntu-latest 镜像默认由 AppArmor 限制非特权 userns:只装 bwrap 跑不起来
+        # (m07c run 37499409109 实证),必须放开 knob。不写 || true:knob 消失说明
+        # 镜像策略变了,宁可红也不要静默跳过。
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bubblewrap
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
         bwrap --version
+        bwrap --die-with-parent --unshare-net --ro-bind / / true
 
     - name: Install Temporal CLI
       shell: bash
