@@ -1,0 +1,33 @@
+name: setup-e2e-deps
+description: 安装重型 e2e 套件所需的系统依赖(Temporal CLI 必装;KiCad 9、Xvfb、bwrap 可选)
+
+inputs:
+  kicad:
+    description: 是否安装 KiCad 9 与 X/沙箱工具链(kicad-cli、eeschema、Xvfb、bwrap 等)
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Install KiCad 9 and sandbox/display tooling
+      if: inputs.kicad == 'true'
+      shell: bash
+      run: |
+        # 官方 9.0 系列 PPA(支持 Ubuntu 24.04 noble);kicad-cli 与 eeschema 随 kicad 主包附带。
+        # --no-install-recommends 跳过 kicad-libraries:夹具原理图自带符号,ERC 不需要系统库。
+        sudo add-apt-repository -y ppa:kicad/kicad-9.0-releases
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          kicad xvfb x11-utils imagemagick bubblewrap
+        kicad-cli version
+        bwrap --version
+
+    - name: Install Temporal CLI
+      shell: bash
+      run: |
+        # 与 scripts/package_linux.sh 打包所用的版本保持一致。
+        curl -fL --retry 2 -o /tmp/temporal_cli.tar.gz \
+          https://github.com/temporalio/cli/releases/download/v1.9.1/temporal_cli_1.9.1_linux_amd64.tar.gz
+        sudo tar -xzf /tmp/temporal_cli.tar.gz -C /usr/local/bin temporal
+        temporal --version
