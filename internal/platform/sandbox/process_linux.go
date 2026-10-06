@@ -42,12 +42,12 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 
 func (m LinuxManager) RunIsolated(ctx context.Context, p SandboxProfile, argv []string, stdin io.Reader) (SandboxResult, error) {
 	if err := m.Probe(ctx, p); err != nil {
-		return SandboxResult{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return SandboxResult{}, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	return m.run(ctx, p, argv, stdin)
 }
 
-func (m LinuxManager) run(ctx context.Context, p SandboxProfile, argv []string, stdin io.Reader) (SandboxResult, error) {
+func (m LinuxManager) run(ctx context.Context, p SandboxProfile, argv []string, stdin io.Reader) (result SandboxResult, retErr error) {
 	timeout := p.Timeout
 	if timeout <= 0 {
 		timeout = 2 * time.Minute
@@ -58,23 +58,36 @@ func (m LinuxManager) run(ctx context.Context, p SandboxProfile, argv []string, 
 	var proxyDone chan error
 	var proxyDir string
 	defer func() {
+		var cleanupErr error
 		if proxyCancel != nil {
 			proxyCancel()
 			if proxyDone != nil {
-				<-proxyDone
+				select {
+				case proxyErr := <-proxyDone:
+					if proxyErr != nil && !errors.Is(proxyErr, context.Canceled) {
+						cleanupErr = proxyErr
+					}
+				case <-time.After(2 * time.Second):
+					cleanupErr = errors.New("network proxy did not stop")
+				}
 			}
 		}
 		if proxyDir != "" {
-			_ = os.RemoveAll(proxyDir)
+			if err := os.RemoveAll(proxyDir); err != nil && !os.IsNotExist(err) {
+				cleanupErr = errors.Join(cleanupErr, err)
+			}
+		}
+		if cleanupErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("%w: %v", ErrCleanupFailed, cleanupErr))
 		}
 	}()
 	if len(p.NetworkGrants) > 0 {
 		if p.ProxyHelperPath == "" {
-			return SandboxResult{}, fmt.Errorf("%w: network proxy helper is unavailable", ErrUnavailable)
+			return SandboxResult{}, networkGrantMessage("network proxy helper is unavailable")
 		}
 		runRoot, err := filepath.Abs(p.RunRoot)
 		if err != nil {
-			return SandboxResult{}, err
+			return SandboxResult{}, profileError(err)
 		}
 		proxyDir, err = os.MkdirTemp(filepath.Dir(runRoot), ".stable-network-")
 		if err != nil {
@@ -92,7 +105,7 @@ func (m LinuxManager) run(ctx context.Context, p SandboxProfile, argv []string, 
 			proxyDone <- (NetworkProxy{SocketPath: socketPath, Grants: p.NetworkGrants, Resolver: net.DefaultResolver}).Serve(proxyCtx)
 		}()
 		if err = waitForProxySocket(runCtx, socketPath, proxyDone); err != nil {
-			return SandboxResult{}, fmt.Errorf("%w: start network proxy: %v", ErrUnavailable, err)
+			return SandboxResult{}, fmt.Errorf("%w: start network proxy: %w", ErrUnavailable, err)
 		}
 		p.ReadOnlyMounts = append(p.ReadOnlyMounts, ReadOnlyMount{HostPath: proxyDir, GuestPath: "/run/stable-network"})
 		p.ReadOnlyFiles = append(p.ReadOnlyFiles, ReadOnlyFileMount{HostPath: p.ProxyHelperPath, GuestPath: "/workspace/runtime/agentworker"})
@@ -111,10 +124,13 @@ func (m LinuxManager) run(ctx context.Context, p SandboxProfile, argv []string, 
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	err = runProcessGroup(runCtx, cmd)
-	result := SandboxResult{Stdout: stdout.buf.Bytes(), Stderr: stderr.buf.Bytes()}
+	result = SandboxResult{Stdout: stdout.buf.Bytes(), Stderr: stderr.buf.Bytes()}
 	if runCtx.Err() == context.DeadlineExceeded {
 		result.TimedOut = true
-		return result, runCtx.Err()
+		return result, errors.Join(runCtx.Err(), err)
+	}
+	if runCtx.Err() == context.Canceled {
+		return result, errors.Join(runCtx.Err(), err)
 	}
 	if err == nil {
 		result.ExitCode = 0
@@ -142,15 +158,34 @@ func runProcessGroup(ctx context.Context, cmd *exec.Cmd) error {
 		// CommandContext only guarantees that the direct child is signaled. The
 		// sandbox may have started helpers, so terminate the process group before
 		// waiting for the child and all of its descendants to exit.
-		_ = syscall.Kill(-pid, syscall.SIGTERM)
+		termErr := signalProcessGroup(pid, syscall.SIGTERM)
 		select {
 		case err := <-wait:
+			if termErr != nil {
+				return errors.Join(err, fmt.Errorf("%w: terminate process group: %v", ErrCleanupFailed, termErr))
+			}
 			return err
 		case <-time.After(2 * time.Second):
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-			return <-wait
+			killErr := signalProcessGroup(pid, syscall.SIGKILL)
+			if killErr != nil {
+				return fmt.Errorf("%w: kill process group: %v", ErrCleanupFailed, killErr)
+			}
+			select {
+			case err := <-wait:
+				return err
+			case <-time.After(2 * time.Second):
+				return fmt.Errorf("%w: process group %d did not stop", ErrCleanupFailed, pid)
+			}
 		}
 	}
+}
+
+func signalProcessGroup(pid int, signal syscall.Signal) error {
+	err := syscall.Kill(-pid, signal)
+	if errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	return err
 }
 
 func waitForProxySocket(ctx context.Context, path string, done chan error) error {

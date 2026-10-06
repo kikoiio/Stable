@@ -52,16 +52,36 @@ type proxyResponse struct {
 // belongs in the trusted Authority and is rechecked by NetworkProxy on use.
 func PinNetworkGrant(ctx context.Context, grant permission.NetworkGrant, resolver GrantResolver) (permission.NetworkGrant, error) {
 	grant.Protocol = strings.ToLower(strings.TrimSpace(grant.Protocol))
-	grant.Host, _ = normalizeHost(grant.Host)
-	if grant.Protocol != "tcp" || grant.Host == "" || grant.Port == 0 || resolver == nil {
-		return permission.NetworkGrant{}, errors.New("network grant must specify tcp, a host, a port, and a resolver")
+	canonicalHost, err := normalizeHost(grant.Host)
+	if err != nil || grant.Protocol != "tcp" || canonicalHost == "" || grant.Port == 0 || resolver == nil {
+		return permission.NetworkGrant{}, networkGrantMessage("network grant must specify tcp, a host, a port, and a resolver")
 	}
+	grant.Host = canonicalHost
 	ips, err := resolveGrant(ctx, grant.Host, resolver)
 	if err != nil {
-		return permission.NetworkGrant{}, err
+		return permission.NetworkGrant{}, fmt.Errorf("%w: %w: %v", ErrUnavailable, ErrNetworkGrantInvalid, err)
 	}
 	grant.ResolvedIPs = ipStrings(ips)
 	return grant, nil
+}
+
+// validateNetworkGrants checks the trusted representation before a proxy is
+// exposed. A proxy must never start with an unpinned or ambiguous grant set.
+func validateNetworkGrants(grants []permission.NetworkGrant) error {
+	seen := make(map[string]struct{}, len(grants))
+	for _, grant := range grants {
+		host, hostErr := normalizeHost(grant.Host)
+		ips, ipErr := normalizedIPs(grant.ResolvedIPs)
+		if hostErr != nil || ipErr != nil || grant.Host != host || grant.Protocol != "tcp" || grant.Port == 0 || len(ips) == 0 {
+			return networkGrantMessage("network grant is incomplete or unpinned")
+		}
+		key := fmt.Sprintf("%s:%s:%d", grant.Protocol, host, grant.Port)
+		if _, exists := seen[key]; exists {
+			return networkGrantMessage("duplicate network grant")
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
 }
 
 func ValidateNetworkTarget(grant permission.NetworkGrant, protocol, host string, port uint16, resolved []netip.Addr) error {
@@ -86,6 +106,9 @@ func ValidateNetworkTarget(grant permission.NetworkGrant, protocol, host string,
 func (p NetworkProxy) Serve(ctx context.Context) error {
 	if p.SocketPath == "" || !filepath.IsAbs(p.SocketPath) || p.Resolver == nil {
 		return errors.New("network proxy requires an absolute socket path and resolver")
+	}
+	if err := validateNetworkGrants(p.Grants); err != nil {
+		return err
 	}
 	if p.Dialer == nil {
 		p.Dialer = &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}

@@ -96,6 +96,36 @@ func TestNetworkGrantPinsExactResolvedTarget(t *testing.T) {
 	if _, err = PinNetworkGrant(context.Background(), permission.NetworkGrant{Protocol: "tcp", Host: "target.test", Port: 80}, nil); err == nil {
 		t.Fatal("grant without a resolver was accepted")
 	}
+	if _, err = PinNetworkGrant(context.Background(), permission.NetworkGrant{Protocol: "tcp", Host: "bad host", Port: 80}, resolver); !errors.Is(err, ErrNetworkGrantInvalid) {
+		t.Fatalf("malformed grant was not classified: %v", err)
+	}
+}
+
+func TestNetworkProxyRejectsUnpinnedOrAmbiguousGrantsBeforeListening(t *testing.T) {
+	root := t.TempDir()
+	resolver := &mapResolver{byHost: map[string][]netip.Addr{}}
+	resolver.set("target.test", "127.0.0.1")
+	for name, grants := range map[string][]permission.NetworkGrant{
+		"unpinned": {{Protocol: "tcp", Host: "target.test", Port: 443}},
+		"duplicate": {
+			{Protocol: "tcp", Host: "target.test", Port: 443, ResolvedIPs: []string{"127.0.0.1"}},
+			{Protocol: "tcp", Host: "target.test", Port: 443, ResolvedIPs: []string{"127.0.0.1"}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			socket := filepath.Join(root, name, "proxy.sock")
+			if err := os.MkdirAll(filepath.Dir(socket), 0700); err != nil {
+				t.Fatal(err)
+			}
+			err := (NetworkProxy{SocketPath: socket, Grants: grants, Resolver: resolver}).Serve(context.Background())
+			if !errors.Is(err, ErrNetworkGrantInvalid) {
+				t.Fatalf("invalid grants returned wrong error: %v", err)
+			}
+			if _, statErr := os.Lstat(socket); !os.IsNotExist(statErr) {
+				t.Fatalf("invalid grant created proxy socket: %v", statErr)
+			}
+		})
+	}
 }
 
 func TestTrustedProxyPinsAndRechecksBeforeDial(t *testing.T) {

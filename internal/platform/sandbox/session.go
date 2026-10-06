@@ -56,7 +56,7 @@ var activeSessions = struct {
 
 func (m LinuxManager) StartIsolatedSession(ctx context.Context, profile SandboxProfile) (SandboxSession, error) {
 	if len(profile.NetworkGrants) != 0 {
-		return SandboxSession{}, errors.New("network grants are not supported for persistent sessions")
+		return SandboxSession{}, fmt.Errorf("%w: %w", ErrSessionNetworkUnsupported, ErrNetworkGrantInvalid)
 	}
 	if profile.CandidateID == "" || len(profile.SessionArgv) == 0 {
 		return SandboxSession{}, errors.New("isolated session requires a candidate ID and supervised argv")
