@@ -235,5 +235,8 @@ func chatCandidateCheckers(runRoot string, sbx sandbox.SandboxManager) []candida
 // the last shutdown so no trusted decision is served against stale journal
 // state.
 func chatserveRecovery(ctx context.Context, s *store.Store) error {
-	return s.ReconcileAcceptances(ctx)
+	if err := s.ReconcileAcceptances(ctx); err != nil {
+		return err
+	}
+	return s.ReconcileRewinds(ctx)
 }

@@ -15,15 +15,36 @@ CHECKER_ID = 'kicad-cli-erc'
 DEFAULT_MAX_VIOLATIONS = 0
 
 
+def _private_dir(env: dict[str, str], name: str, root: Path, suffix: str) -> Path:
+    """Use a profile-provided private directory only when it stays in root."""
+    value = env.get(name)
+    candidate = Path(value) if value else root / suffix
+    try:
+        candidate.resolve().relative_to(root.resolve())
+    except ValueError as exc:
+        raise ValueError(f'{name} must stay inside the private run root') from exc
+    candidate.mkdir(parents=True, exist_ok=True)
+    return candidate
+
+
+def _template_root(env: dict[str, str]) -> Path:
+    value = env.get('STABLE_KICAD_TEMPLATE_ROOT', '/usr/share/kicad/template')
+    path = Path(value)
+    if not path.is_absolute():
+        raise ValueError('STABLE_KICAD_TEMPLATE_ROOT must be absolute')
+    return path
+
+
 def kicad_environment(root: Path) -> dict[str, str]:
     env = os.environ.copy()
-    env['XDG_CACHE_HOME'] = str(root / '.kicad-cache')
-    env['XDG_CONFIG_HOME'] = str(root / '.kicad-config')
-    env['XDG_DATA_HOME'] = str(root / '.kicad-data')
+    env['XDG_CACHE_HOME'] = str(_private_dir(env, 'XDG_CACHE_HOME', root, '.kicad-cache'))
+    env['XDG_CONFIG_HOME'] = str(_private_dir(env, 'XDG_CONFIG_HOME', root, '.kicad-config'))
+    env['XDG_DATA_HOME'] = str(_private_dir(env, 'XDG_DATA_HOME', root, '.kicad-data'))
+    template_root = _template_root(env)
     config = Path(env['XDG_CONFIG_HOME']) / 'kicad' / '9.0'
     config.mkdir(parents=True, exist_ok=True)
     for name in ('sym-lib-table', 'fp-lib-table'):
-        source = Path('/usr/share/kicad/template') / name
+        source = template_root / name
         dest = config / name
         if source.exists() and not dest.exists():
             shutil.copyfile(source, dest)

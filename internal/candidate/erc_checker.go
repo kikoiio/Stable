@@ -13,35 +13,61 @@ import (
 	"strings"
 	"time"
 
+	"stable/internal/platform/kicad"
 	"stable/internal/platform/sandbox"
 	"stable/internal/platform/secfile"
 )
+
+var discoverKicadCapabilities = kicad.Discover
 
 // KicadERCChecker runs the installed KiCad ERC against candidate schematics
 // inside the verified Linux sandbox. Reports and KiCad user state stay under
 // the private run root.
 type KicadERCChecker struct {
-	Sandbox     sandbox.SandboxManager
-	RunRoot     string
-	Timeout     time.Duration
-	OutputLimit int
+	Sandbox      sandbox.SandboxManager
+	RunRoot      string
+	Timeout      time.Duration
+	OutputLimit  int
+	Capabilities *kicad.Capabilities
 }
 
 // seedKicadConfig prepares a minimal KiCad user configuration inside the
 // private run root, copying the distribution template library tables when
 // available (the same source workers/kicad uses).
-func seedKicadConfig(runRoot string) error {
-	config := filepath.Join(runRoot, ".kicad-config", "kicad", "9.0")
+func seedKicadConfig(runRoot, templateRoot string) error {
+	for _, dir := range []string{"config", "cache", "data", "templates"} {
+		if err := secfile.MkdirAllPrivate(filepath.Join(runRoot, dir), 0700); err != nil {
+			return err
+		}
+	}
+	config := filepath.Join(runRoot, "config", "kicad", "9.0")
 	if err := secfile.MkdirAllPrivate(config, 0700); err != nil {
 		return err
 	}
 	for _, name := range []string{"sym-lib-table", "fp-lib-table"} {
 		dest := filepath.Join(config, name)
-		if _, err := os.Lstat(dest); err == nil {
+		if info, err := os.Lstat(dest); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return secfile.ErrUnsafePath
+			}
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join("/usr/share/kicad/template", name))
+		template, err := secfile.OpenNoFollow(filepath.Join(templateRoot, name))
 		if err != nil {
+			continue
+		}
+		info, err := template.Stat()
+		if err != nil {
+			_ = template.Close()
+			continue
+		}
+		if !info.Mode().IsRegular() || info.Size() > 1<<20 {
+			_ = template.Close()
+			continue
+		}
+		data, readErr := io.ReadAll(io.LimitReader(template, (1<<20)+1))
+		closeErr := template.Close()
+		if readErr != nil || closeErr != nil || len(data) > 1<<20 {
 			continue
 		}
 		if err := os.WriteFile(dest, data, 0600); err != nil {
@@ -49,6 +75,13 @@ func seedKicadConfig(runRoot string) error {
 		}
 	}
 	return nil
+}
+
+func (k KicadERCChecker) resolveCapabilities(ctx context.Context, profile sandbox.SandboxProfile) (kicad.Capabilities, error) {
+	if k.Capabilities != nil {
+		return *k.Capabilities, nil
+	}
+	return discoverKicadCapabilities(ctx, k.Sandbox, profile)
 }
 
 func (k KicadERCChecker) Check(ctx context.Context, c Candidate) (Finding, error) {
@@ -93,12 +126,23 @@ func (k KicadERCChecker) Check(ctx context.Context, c Candidate) (Finding, error
 	if err = secfile.ChmodPrivate(baseRunRoot, 0700); err != nil {
 		return Finding{}, err
 	}
+	baseRoot, err := secfile.OpenRoot(baseRunRoot)
+	if err != nil {
+		return Finding{}, fmt.Errorf("checker run root is unsafe: %w", err)
+	}
 	runRoot, err = os.MkdirTemp(baseRunRoot, "check-")
 	if err != nil {
 		return Finding{}, err
 	}
 	if err = secfile.ChmodPrivate(runRoot, 0700); err != nil {
 		return Finding{}, err
+	}
+	if err := baseRoot.Revalidate(); err != nil {
+		return Finding{}, err
+	}
+	runRootSecure, err := secfile.OpenRoot(runRoot)
+	if err != nil {
+		return Finding{}, fmt.Errorf("checker run directory is unsafe: %w", err)
 	}
 	timeout := k.Timeout
 	if timeout <= 0 {
@@ -108,30 +152,26 @@ func (k KicadERCChecker) Check(ctx context.Context, c Candidate) (Finding, error
 	if outputLimit <= 0 {
 		outputLimit = 1 << 20
 	}
-	// kicad-cli with the sandbox's empty HOME creates an empty symbol library
-	// table and then reports every symbol as a lib_symbol_issues violation.
-	// Seed the standard KiCad template tables into the private run root and
-	// point the XDG dirs at them, mirroring workers/kicad kicad_environment.
-	if err = seedKicadConfig(runRoot); err != nil {
-		return Finding{}, fmt.Errorf("seed KiCad checker config: %w", err)
+	resolverProfile := sandbox.SandboxProfile{ProjectRoot: c.FormalRoot, CandidateRoot: c.CandidateRoot, RunRoot: runRoot, Timeout: timeout, OutputLimit: outputLimit}
+	capabilities, discoverErr := k.resolveCapabilities(ctx, resolverProfile)
+	if discoverErr != nil {
+		return Finding{}, fmt.Errorf("discover KiCad ERC capabilities: %w", discoverErr)
 	}
-	profile := sandbox.SandboxProfile{ProjectRoot: c.FormalRoot, CandidateRoot: c.CandidateRoot, RunRoot: runRoot, Timeout: timeout, OutputLimit: outputLimit,
-		Environment: []string{
-			"XDG_CONFIG_HOME=/workspace/run/.kicad-config",
-			"XDG_CACHE_HOME=/workspace/run/.kicad-cache",
-			"XDG_DATA_HOME=/workspace/run/.kicad-data",
-		}}
-	versionResult, err := k.Sandbox.RunIsolated(ctx, profile, []string{"kicad-cli", "version"}, nil)
-	if err != nil {
-		return Finding{}, fmt.Errorf("probe KiCad checker version: %w", err)
+	if !capabilities.AvailableFor(string(kicad.KindERC)) {
+		return Finding{}, fmt.Errorf("KiCad ERC is unavailable: missing %s", strings.Join(capabilities.Missing(string(kicad.KindERC)), ", "))
 	}
-	if versionResult.ExitCode != 0 {
-		return Finding{}, errors.New("kicad-cli version command failed")
-	}
-	version := strings.TrimSpace(string(versionResult.Stdout))
+	version := strings.TrimSpace(capabilities.CLI.Version)
 	if version == "" || len(version) > 128 {
 		return Finding{}, errors.New("kicad-cli returned an invalid version")
 	}
+	// kicad-cli with the sandbox's empty HOME creates an empty symbol library
+	// table and then reports every symbol as a lib_symbol_issues violation.
+	// Seed the resolver-selected template tables into the private run root.
+	if err = seedKicadConfig(runRoot, capabilities.TemplateRoot); err != nil {
+		return Finding{}, fmt.Errorf("seed KiCad checker config: %w", err)
+	}
+	profile := sandbox.SandboxProfile{ProjectRoot: c.FormalRoot, CandidateRoot: c.CandidateRoot, RunRoot: runRoot, Timeout: timeout, OutputLimit: outputLimit,
+		Environment: capabilities.Environment("/workspace/run")}
 	violations := 0
 	for _, rel := range files {
 		sum := sha256.Sum256([]byte(rel))
@@ -145,7 +185,7 @@ func (k KicadERCChecker) Check(ctx context.Context, c Candidate) (Finding, error
 		if result.ExitCode != 0 && result.ExitCode != 5 {
 			return Finding{}, fmt.Errorf("KiCad ERC failed for %s with exit code %d", rel, result.ExitCode)
 		}
-		reportFile, readErr := secfile.OpenNoFollow(report)
+		reportFile, readErr := runRootSecure.Open(filepath.Base(report))
 		if readErr != nil {
 			return Finding{}, fmt.Errorf("read KiCad ERC report for %s: %w", rel, readErr)
 		}
@@ -174,6 +214,9 @@ func (k KicadERCChecker) Check(ctx context.Context, c Candidate) (Finding, error
 		for _, sheet := range parsed.Sheets {
 			violations += len(sheet.Violations)
 		}
+		if err := runRootSecure.Revalidate(); err != nil {
+			return Finding{}, err
+		}
 	}
 	_, formalAfter, err := BuildManifest(c.FormalRoot)
 	if err != nil {
@@ -188,6 +231,9 @@ func (k KicadERCChecker) Check(ctx context.Context, c Candidate) (Finding, error
 	}
 	if candidateAfter != candidateBefore {
 		return Finding{}, errors.New("candidate changed while KiCad ERC was running")
+	}
+	if err := runRootSecure.Revalidate(); err != nil {
+		return Finding{}, err
 	}
 	result := FindingPass
 	reason := "KiCad ERC reported no violations"

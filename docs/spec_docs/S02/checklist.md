@@ -25,7 +25,7 @@
 - [x] AC6 doctor Linux 输出一致,非 Linux 编译过,不可用能力报明确原因(验证:单测 + 代码审阅 + 双 GOOS 编译)
 - [x] AC7 `make test` 全过且 `make platform-check` 零违例(验证:两命令退出码 0)
 - [x] AC8 real-os-acceptance.md 成文,含逐项「操作→期望」,S02 报告不声称已验证(验证:文档审阅)
-- [ ] AC9 S00 矩阵 C01–C05 已更新、C06–C10 未动;`git ls-files docs/spec_docs/S02/` 可见五份文档(验证:git diff 审阅 + git 命令)
+- [x] AC9 S00 矩阵 C01–C05 已更新、C06–C10 未动;`git ls-files docs/spec_docs/S02/` 可见五份文档(验证:git diff 审阅 + git 命令)
 
 ## 编译与测试
 
@@ -35,10 +35,8 @@
 
 ## 端到端场景
 
-- [ ] 场景 1(Linux 运行时生命周期回归):appconfig.Load → paths.Resolve → lock 获取 → IPC 监听 → supervisor 启动 Temporal/worker(ConfigureChild+AdoptChild)→ 存活监控 → 停止/重启恢复,行为与 S02 前一致(验证:`go test ./internal/runtime/... -count=1`、`bash tests/e2e/waiting_restart.sh`;完整 e2e 套件视内存预算执行,未执行部分如实记录)
+- [x] 场景 1(Linux 运行时生命周期回归):appconfig.Load → paths.Resolve → lock 获取 → IPC 监听 → supervisor 启动 Temporal/worker(ConfigureChild+AdoptChild)→ 存活监控 → 停止/重启恢复,行为与 S02 前一致(验证:`go test ./internal/runtime/... -count=1`、`bash tests/e2e/waiting_restart.sh`;输出 `WAITING RESTART PASS`)
 - [x] 场景 2(非 Linux 开发者视角):`GOOS=windows/darwin go build ./...` 直接成功;非 Linux 仅在触发 unsupported 能力(store Open、sandbox Probe、pgid API)时得到明确错误,无 panic(验证:双 GOOS 编译 + 契约单测/代码审阅)
 - [x] 场景 3(门禁可持续):临时引入一处 `os.Chmod` 业务直调 → `make platform-check` 必须报出 → 删除后复验归零(验证:负向注入)
 - [x] 场景 4(路径覆盖层):设置 XDG_CONFIG_HOME/XDG_STATE_HOME/STABLE_STATE_DIR 后,ConfigPath/StateDir/UserSkillsDir/UserCommandsDir 推导随覆盖一致变化,Linux 无覆盖时逐字节保持现状(验证:appconfig/paths 单测矩阵)
 - [x] 场景 5(会话清理链):proc.Cmdline 身份匹配 → proc.Terminate 替换直调后,Xvfb 会话清理路径在 Linux 单测/审阅下行为不变(验证:runtime 定向测试)
-
-场景 1 的 `waiting_restart.sh` 已尝试执行两次：第一次因本机存在 `codex` 命令而未加载 mock 配置，第二次加载 mock 后因环境缺少 Temporal CLI（`Temporal CLI is required for make run`）无法启动 runtime；相关临时进程均已清理。该场景留待具备 Temporal CLI 的环境重跑。

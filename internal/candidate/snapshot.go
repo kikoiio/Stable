@@ -36,6 +36,7 @@ type FileSnapshot struct {
 // touches the formal project tree.
 type SnapshotStore struct {
 	root         string // <project>/.stable/candidate-snapshots
+	serviceRoot  secfile.Root
 	projectID    string
 	maxBytes     int64
 	maxManifests int
@@ -60,14 +61,11 @@ func NewSnapshotStore(projectRoot string, maxBytes int64, maxManifests int, cred
 	if maxManifests <= 0 {
 		return nil, errors.New("snapshot manifest quota is required")
 	}
-	abs, err := filepath.Abs(projectRoot)
+	project, err := secfile.OpenRoot(projectRoot)
 	if err != nil {
 		return nil, err
 	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return nil, err
-	}
+	resolved := project.Path()
 	stable := filepath.Join(resolved, ".stable")
 	if st, e := os.Lstat(stable); e == nil && st.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("project state directory must not be a symlink")
@@ -81,9 +79,17 @@ func NewSnapshotStore(projectRoot string, maxBytes int64, maxManifests int, cred
 			return nil, err
 		}
 	}
+	serviceRoot, err := secfile.OpenRoot(root)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot service root is unsafe: %w", err)
+	}
+	if err := project.Revalidate(); err != nil {
+		return nil, err
+	}
 	id := sha256.Sum256([]byte(resolved))
 	return &SnapshotStore{
 		root:         root,
+		serviceRoot:  serviceRoot,
 		projectID:    hex.EncodeToString(id[:]),
 		maxBytes:     maxBytes,
 		maxManifests: maxManifests,
@@ -121,6 +127,12 @@ func (s *SnapshotStore) Create(sessionID, candidateID, runID, label, candidateRo
 	}
 	var pending int64
 	for _, entry := range entries {
+		if err := validateSnapshotDigest(entry.Digest); err != nil {
+			return FileSnapshot{}, err
+		}
+		if entry.Size < 0 || entry.Size > s.maxBytes {
+			return FileSnapshot{}, fmt.Errorf("snapshot entry %s exceeds the project byte budget", entry.Path)
+		}
 		if _, e := os.Lstat(s.blobPath(entry.Digest)); os.IsNotExist(e) {
 			pending += entry.Size
 		}
@@ -153,12 +165,18 @@ func (s *SnapshotStore) Create(sessionID, candidateID, runID, label, candidateRo
 // List returns the snapshots owned by one candidate, oldest first. Other
 // candidates' snapshots are not visible.
 func (s *SnapshotStore) List(candidateID string) ([]FileSnapshot, error) {
+	if err := validateSnapshotComponent(candidateID); err != nil {
+		return nil, err
+	}
 	dir := filepath.Join(s.root, "manifests", candidateID)
 	entries, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
 		return []FileSnapshot{}, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := s.serviceRoot.Revalidate(); err != nil {
 		return nil, err
 	}
 	out := []FileSnapshot{}
@@ -185,12 +203,35 @@ func (s *SnapshotStore) ValidateRestore(candidateID, snapshotID string) (FileSna
 		return FileSnapshot{}, err
 	}
 	for _, entry := range snap.Entries {
-		blob, err := os.Open(s.blobPath(entry.Digest))
+		if err := validateSnapshotDigest(entry.Digest); err != nil || entry.Size < 0 || entry.Size > s.maxBytes {
+			return FileSnapshot{}, fmt.Errorf("snapshot blob %q has invalid metadata", entry.Digest)
+		}
+		blob, err := s.openServiceFile(filepath.Join("blobs", entry.Digest))
 		if err != nil {
 			return FileSnapshot{}, fmt.Errorf("snapshot blob %s unavailable: %w", entry.Digest[:12], err)
 		}
+		info, statErr := blob.Stat()
+		if statErr != nil {
+			_ = blob.Close()
+			return FileSnapshot{}, statErr
+		}
+		if info.Size() != entry.Size {
+			_ = blob.Close()
+			return FileSnapshot{}, fmt.Errorf("snapshot blob %s size changed", entry.Digest[:12])
+		}
 		h := sha256.New()
-		_, copyErr := io.Copy(h, blob)
+		_, copyErr := io.CopyN(h, blob, entry.Size)
+		if copyErr == nil {
+			var extra [1]byte
+			var extraErr error
+			var extraN int
+			extraN, extraErr = blob.Read(extra[:])
+			if extraErr != nil && !errors.Is(extraErr, io.EOF) {
+				copyErr = extraErr
+			} else if extraN != 0 {
+				copyErr = errors.New("snapshot blob has trailing data")
+			}
+		}
 		closeErr := blob.Close()
 		if copyErr != nil {
 			return FileSnapshot{}, copyErr
@@ -201,6 +242,9 @@ func (s *SnapshotStore) ValidateRestore(candidateID, snapshotID string) (FileSna
 		if hex.EncodeToString(h.Sum(nil)) != entry.Digest {
 			return FileSnapshot{}, fmt.Errorf("snapshot blob %s is corrupt", entry.Digest[:12])
 		}
+	}
+	if err := s.serviceRoot.Revalidate(); err != nil {
+		return FileSnapshot{}, err
 	}
 	return snap, nil
 }
@@ -250,6 +294,44 @@ func (s *SnapshotStore) blobPath(digest string) string {
 	return filepath.Join(s.root, "blobs", digest)
 }
 
+func (s *SnapshotStore) openServiceFile(rel string) (*os.File, error) {
+	clean, err := CleanRelative(rel)
+	if err != nil {
+		return nil, err
+	}
+	f, err := s.serviceRoot.Open(clean)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, secfile.ErrUnsafePath
+	}
+	return f, nil
+}
+
+func validateSnapshotComponent(value string) error {
+	if value == "" || value == "." || value == ".." || strings.ContainsAny(value, "/\\:\x00") {
+		return ErrUnsafePath
+	}
+	return nil
+}
+
+func validateSnapshotDigest(digest string) error {
+	if len(digest) != sha256.Size*2 {
+		return ErrUnsafePath
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return ErrUnsafePath
+	}
+	return nil
+}
+
 func (s *SnapshotStore) blobBytesLocked() (int64, error) {
 	entries, err := os.ReadDir(filepath.Join(s.root, "blobs"))
 	if err != nil {
@@ -267,6 +349,9 @@ func (s *SnapshotStore) blobBytesLocked() (int64, error) {
 }
 
 func (s *SnapshotStore) manifestCount(candidateID string) (int, error) {
+	if err := validateSnapshotComponent(candidateID); err != nil {
+		return 0, err
+	}
 	entries, err := os.ReadDir(filepath.Join(s.root, "manifests", candidateID))
 	if os.IsNotExist(err) {
 		return 0, nil
@@ -284,6 +369,12 @@ func (s *SnapshotStore) manifestCount(candidateID string) (int, error) {
 }
 
 func (s *SnapshotStore) writeBlobLocked(candidateRoot string, entry ManifestEntry) error {
+	if err := validateSnapshotDigest(entry.Digest); err != nil {
+		return err
+	}
+	if _, err := CleanRelative(entry.Path); err != nil {
+		return err
+	}
 	path := s.blobPath(entry.Digest)
 	if _, err := os.Lstat(path); err == nil {
 		return nil // same content already stored; never double-counted
@@ -365,11 +456,35 @@ func (s *SnapshotStore) writeManifestLocked(snap FileSnapshot) error {
 }
 
 func (s *SnapshotStore) readManifest(candidateID, snapshotID string) (FileSnapshot, error) {
-	if candidateID == "" || strings.ContainsAny(candidateID, "/\\") || strings.ContainsAny(snapshotID, "/\\") {
+	if err := validateSnapshotComponent(candidateID); err != nil {
+		return FileSnapshot{}, err
+	}
+	if err := validateSnapshotComponent(snapshotID); err != nil {
+		return FileSnapshot{}, err
+	}
+	manifestRel := filepath.Join("manifests", candidateID, snapshotID+".json")
+	manifestFile, err := s.openServiceFile(manifestRel)
+	if err != nil {
+		return FileSnapshot{}, err
+	}
+	info, err := manifestFile.Stat()
+	if err != nil {
+		_ = manifestFile.Close()
+		return FileSnapshot{}, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = manifestFile.Close()
 		return FileSnapshot{}, ErrUnsafePath
 	}
-	raw, err := os.ReadFile(filepath.Join(s.root, "manifests", candidateID, snapshotID+".json"))
+	raw, err := io.ReadAll(manifestFile)
+	closeErr := manifestFile.Close()
 	if err != nil {
+		return FileSnapshot{}, err
+	}
+	if closeErr != nil {
+		return FileSnapshot{}, closeErr
+	}
+	if err := s.serviceRoot.Revalidate(); err != nil {
 		return FileSnapshot{}, err
 	}
 	var snap FileSnapshot
@@ -410,11 +525,18 @@ func newSnapshotID() string {
 }
 
 func copyBlob(blobPath, dst string, mode os.FileMode) error {
-	in, err := os.Open(blobPath)
+	in, err := secfile.OpenNoFollow(blobPath)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return secfile.ErrUnsafePath
+	}
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err

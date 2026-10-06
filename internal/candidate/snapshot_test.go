@@ -1,6 +1,7 @@
 package candidate
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,6 +138,36 @@ func TestValidateRestoreRejectsCorruptOrMissingBlob(t *testing.T) {
 	}
 	if _, err = store.ValidateRestore("cand-1", snap.SnapshotID); err == nil {
 		t.Fatal("missing blob accepted")
+	}
+}
+
+func TestSnapshotRejectsUnsafeIdentifiersAndDigestPaths(t *testing.T) {
+	project := t.TempDir()
+	store, err := NewSnapshotStore(project, 1<<20, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.List(".."); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("List traversal error = %v, want ErrUnsafePath", err)
+	}
+	if _, err := store.ValidateRestore("cand-1", "../escape"); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("ValidateRestore traversal error = %v, want ErrUnsafePath", err)
+	}
+	snap := FileSnapshot{
+		SnapshotID:  "snap-unsafe",
+		ProjectID:   store.projectID,
+		CandidateID: "cand-1",
+		Digest:      strings.Repeat("a", 64),
+		Entries: []ManifestEntry{{
+			Path:   "ok.txt",
+			Digest: "../escape",
+		}},
+	}
+	if err := store.writeManifestLocked(snap); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ValidateRestore("cand-1", snap.SnapshotID); err == nil {
+		t.Fatal("ValidateRestore accepted a digest path escape")
 	}
 }
 

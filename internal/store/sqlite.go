@@ -124,11 +124,89 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	if _, err = db.Exec(`PRAGMA user_version = 11`); err != nil {
+	if version < 12 {
+		if err = migrateV12(db); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if _, err = db.Exec(`PRAGMA user_version = 12`); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+// migrateV12 extends both transaction journals with the intermediate phases
+// and paths required for non-atomic platforms. Existing v11 rows retain their
+// meaning and default to the Linux atomic exchange mode.
+func migrateV12(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = rebuildJournalV12(tx, "acceptance_apply_journal", `
+		CREATE TABLE acceptance_apply_journal (
+			decision_id TEXT PRIMARY KEY REFERENCES acceptance_decisions(id),
+			candidate_id TEXT NOT NULL REFERENCES candidates(id),
+			phase TEXT NOT NULL CHECK(phase IN ('prepared','old_saved','target_installed','swapped','finalized','blocked')),
+			transaction_mode TEXT NOT NULL DEFAULT 'atomic-exchange',
+			rollback_path TEXT NOT NULL DEFAULT '',
+			old_digest TEXT NOT NULL,
+			new_digest TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+		return err
+	}
+	if err = rebuildJournalV12(tx, "rewind_journal", `
+		CREATE TABLE rewind_journal (
+			id TEXT PRIMARY KEY,
+			candidate_id TEXT NOT NULL REFERENCES candidates(id),
+			snapshot_id TEXT NOT NULL,
+			phase TEXT NOT NULL CHECK(phase IN ('prepared','old_saved','target_installed','swapped','finalized','blocked')),
+			transaction_mode TEXT NOT NULL DEFAULT 'atomic-exchange',
+			rollback_path TEXT NOT NULL DEFAULT '',
+			expected_digest TEXT NOT NULL,
+			target_digest TEXT NOT NULL,
+			staging_dir TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`CREATE INDEX IF NOT EXISTS rewind_journal_candidate ON rewind_journal(candidate_id,phase,updated_at)`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`PRAGMA user_version=12`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func rebuildJournalV12(tx *sql.Tx, table, createSQL string) error {
+	legacy := table + "_v11"
+	if _, err := tx.Exec(`ALTER TABLE ` + table + ` RENAME TO ` + legacy); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(createSQL); err != nil {
+		return err
+	}
+	if table == "acceptance_apply_journal" {
+		_, err := tx.Exec(`INSERT INTO acceptance_apply_journal(decision_id,candidate_id,phase,transaction_mode,rollback_path,old_digest,new_digest,reason,updated_at) SELECT decision_id,candidate_id,phase,'atomic-exchange','',old_digest,new_digest,reason,updated_at FROM acceptance_apply_journal_v11`)
+		if err != nil {
+			return err
+		}
+	} else {
+		_, err := tx.Exec(`INSERT INTO rewind_journal(id,candidate_id,snapshot_id,phase,transaction_mode,rollback_path,expected_digest,target_digest,staging_dir,reason,created_at,updated_at) SELECT id,candidate_id,snapshot_id,phase,'atomic-exchange','',expected_digest,target_digest,staging_dir,reason,created_at,updated_at FROM rewind_journal_v11`)
+		if err != nil {
+			return err
+		}
+	}
+	_, err := tx.Exec(`DROP TABLE ` + legacy)
+	return err
 }
 
 // migrateV11 introduces the rewind journal for candidate snapshot recovery.

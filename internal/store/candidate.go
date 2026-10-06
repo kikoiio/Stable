@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"stable/internal/artifact"
 	"stable/internal/candidate"
+	"stable/internal/platform/secfile"
 )
 
 type CandidateRecord struct {
@@ -24,11 +26,13 @@ type CandidateRecord struct {
 }
 
 type AcceptanceRecovery struct {
-	Record    CandidateRecord
-	Decision  candidate.AcceptanceDecision
-	Phase     string
-	OldDigest string
-	NewDigest string
+	Record          CandidateRecord
+	Decision        candidate.AcceptanceDecision
+	Phase           string
+	OldDigest       string
+	NewDigest       string
+	TransactionMode string
+	RollbackPath    string
 }
 
 func (s *Store) CheckAcceptance(ctx context.Context, d candidate.AcceptanceDecision) (bool, candidate.Receipt, bool, error) {
@@ -139,6 +143,12 @@ func (s *Store) SaveAcceptanceDecision(ctx context.Context, d candidate.Acceptan
 	if err != nil {
 		return false, err
 	}
+	var candidateRoot string
+	if err = s.db.QueryRowContext(ctx, `SELECT candidate_root FROM candidates WHERE id=?`, d.CandidateID).Scan(&candidateRoot); err != nil {
+		return false, err
+	}
+	transactionMode := secfile.TransactionMode()
+	rollback := filepath.Join(filepath.Dir(filepath.Clean(candidateRoot)), ".stable-accept-rollback-"+d.ID)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -156,7 +166,7 @@ func (s *Store) SaveAcceptanceDecision(ctx context.Context, d candidate.Acceptan
 	if candidateID != d.CandidateID || userID != d.UserID || candidateDigest != d.CandidateDigest || previewDigest != d.PreviewDigest || formalDigest != d.FormalDigest || mode != string(d.Mode) || storedFindings != string(findings) {
 		return false, errors.New("acceptance decision ID was reused with different contents")
 	}
-	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO acceptance_apply_journal(decision_id,candidate_id,phase,old_digest,new_digest,updated_at) VALUES(?,?,?,?,?,?)`, d.ID, d.CandidateID, "prepared", d.FormalDigest, d.CandidateDigest, time.Now().UTC().Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO acceptance_apply_journal(decision_id,candidate_id,phase,transaction_mode,rollback_path,old_digest,new_digest,updated_at) VALUES(?,?,?,?,?,?,?,?)`, d.ID, d.CandidateID, "prepared", transactionMode, rollback, d.FormalDigest, d.CandidateDigest, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return false, err
 	}
@@ -183,8 +193,20 @@ func (s *Store) SetAcceptancePhase(ctx context.Context, decisionID, from, to, re
 	}
 	return nil
 }
+
+// AcceptanceTransaction returns the persisted platform mode and rollback
+// path. It is intentionally a small optional hook so older in-memory callers
+// can keep implementing AcceptanceStore without journal metadata.
+func (s *Store) AcceptanceTransaction(ctx context.Context, decisionID string) (string, string, error) {
+	var mode, rollback string
+	err := s.db.QueryRowContext(ctx, `SELECT transaction_mode,rollback_path FROM acceptance_apply_journal WHERE decision_id=?`, decisionID).Scan(&mode, &rollback)
+	return mode, rollback, err
+}
 func validAcceptanceTransition(from, to string) bool {
-	return (from == "prepared" && (to == "swapped" || to == "blocked")) || (from == "swapped" && (to == "finalized" || to == "blocked"))
+	return (from == "prepared" && (to == "old_saved" || to == "swapped" || to == "blocked")) ||
+		(from == "old_saved" && (to == "target_installed" || to == "blocked")) ||
+		(from == "target_installed" && (to == "swapped" || to == "blocked")) ||
+		(from == "swapped" && (to == "finalized" || to == "blocked"))
 }
 
 func (s *Store) GetAcceptanceReceipt(ctx context.Context, decisionID string) (candidate.Receipt, error) {
@@ -207,7 +229,7 @@ func (s *Store) FindAcceptanceReceipt(ctx context.Context, decisionID string) (c
 }
 
 func (s *Store) PendingAcceptances(ctx context.Context) ([]AcceptanceRecovery, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT c.id,c.action_id,c.goal_id,c.formal_root,c.candidate_root,c.baseline_digest,c.candidate_digest,c.root_mode,c.criteria_revision,c.dependency_revision,c.status,c.created_at,c.updated_at,d.id,d.user_id,d.candidate_digest,d.preview_digest,d.formal_digest,d.mode,d.confirmed_findings_json,j.phase,j.old_digest,j.new_digest FROM acceptance_apply_journal j JOIN candidates c ON c.id=j.candidate_id JOIN acceptance_decisions d ON d.id=j.decision_id WHERE j.phase IN ('prepared','swapped','blocked') ORDER BY j.updated_at,j.decision_id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT c.id,c.action_id,c.goal_id,c.formal_root,c.candidate_root,c.baseline_digest,c.candidate_digest,c.root_mode,c.criteria_revision,c.dependency_revision,c.status,c.created_at,c.updated_at,d.id,d.user_id,d.candidate_digest,d.preview_digest,d.formal_digest,d.mode,d.confirmed_findings_json,j.phase,j.old_digest,j.new_digest,j.transaction_mode,j.rollback_path FROM acceptance_apply_journal j JOIN candidates c ON c.id=j.candidate_id JOIN acceptance_decisions d ON d.id=j.decision_id WHERE j.phase IN ('prepared','old_saved','target_installed','swapped','blocked') ORDER BY j.updated_at,j.decision_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +238,7 @@ func (s *Store) PendingAcceptances(ctx context.Context) ([]AcceptanceRecovery, e
 	for rows.Next() {
 		var x AcceptanceRecovery
 		var cstatus, created, updated, mode, findings string
-		err = rows.Scan(&x.Record.Candidate.ID, &x.Record.ActionID, &x.Record.GoalID, &x.Record.Candidate.FormalRoot, &x.Record.Candidate.CandidateRoot, &x.Record.Candidate.BaselineDigest, &x.Record.Candidate.CandidateDigest, &x.Record.Candidate.RootMode, &x.Record.CriteriaRevision, &x.Record.DependencyRevision, &cstatus, &created, &updated, &x.Decision.ID, &x.Decision.UserID, &x.Decision.CandidateDigest, &x.Decision.PreviewDigest, &x.Decision.FormalDigest, &mode, &findings, &x.Phase, &x.OldDigest, &x.NewDigest)
+		err = rows.Scan(&x.Record.Candidate.ID, &x.Record.ActionID, &x.Record.GoalID, &x.Record.Candidate.FormalRoot, &x.Record.Candidate.CandidateRoot, &x.Record.Candidate.BaselineDigest, &x.Record.Candidate.CandidateDigest, &x.Record.Candidate.RootMode, &x.Record.CriteriaRevision, &x.Record.DependencyRevision, &cstatus, &created, &updated, &x.Decision.ID, &x.Decision.UserID, &x.Decision.CandidateDigest, &x.Decision.PreviewDigest, &x.Decision.FormalDigest, &mode, &findings, &x.Phase, &x.OldDigest, &x.NewDigest, &x.TransactionMode, &x.RollbackPath)
 		if err != nil {
 			return nil, err
 		}
@@ -255,22 +277,18 @@ func (s *Store) ReconcileAcceptances(ctx context.Context) error {
 			return s.blockAcceptance(ctx, item, err)
 		}
 		oldDigest, newDigest := item.OldDigest, item.NewDigest
-		if oldDigest == newDigest && formalDigest == newDigest && candidateDigest == newDigest {
-			if item.Phase == "prepared" {
-				if err = s.SetAcceptancePhase(ctx, item.Decision.ID, "prepared", "swapped", ""); err != nil {
-					return err
-				}
+		if item.Phase == "prepared" && formalDigest == oldDigest && candidateDigest == newDigest {
+			tx := candidate.DirectoryTransaction{ID: item.Decision.ID, Kind: candidate.TransactionAcceptance, CurrentRoot: item.Record.Candidate.FormalRoot, IncomingRoot: item.Record.Candidate.CandidateRoot, RollbackRoot: item.RollbackPath, ExpectedDigest: oldDigest, TargetDigest: newDigest, Mode: item.TransactionMode}
+			if tx.Mode == "" {
+				tx.Mode = "atomic-exchange"
 			}
-		} else if formalDigest == oldDigest && candidateDigest == newDigest {
-			if item.Phase != "prepared" {
-				return s.blockAcceptance(ctx, item, errors.New("swapped journal points to old formal version"))
-			}
-			if err = candidate.ExchangeProjectDir(item.Record.Candidate.FormalRoot, item.Record.Candidate.CandidateRoot); err != nil {
+			if err = candidate.NewTransactionCoordinator().Apply(ctx, tx, acceptanceJournalAdapter{store: s}); err != nil {
 				return s.blockAcceptance(ctx, item, err)
 			}
-			formalDigest = newDigest
-			if err = s.SetAcceptancePhase(ctx, item.Decision.ID, "prepared", "swapped", ""); err != nil {
-				return err
+		} else if item.Phase == "old_saved" || item.Phase == "target_installed" {
+			tx := candidate.DirectoryTransaction{ID: item.Decision.ID, Kind: candidate.TransactionAcceptance, CurrentRoot: item.Record.Candidate.FormalRoot, IncomingRoot: item.Record.Candidate.CandidateRoot, RollbackRoot: item.RollbackPath, ExpectedDigest: oldDigest, TargetDigest: newDigest, Mode: item.TransactionMode}
+			if err = candidate.NewTransactionCoordinator().Recover(ctx, tx, candidate.TransactionPhase(item.Phase), acceptanceJournalAdapter{store: s}); err != nil {
+				return s.blockAcceptance(ctx, item, err)
 			}
 		} else if formalDigest == newDigest && candidateDigest == oldDigest {
 			if item.Phase == "prepared" {
@@ -278,8 +296,11 @@ func (s *Store) ReconcileAcceptances(ctx context.Context) error {
 					return err
 				}
 			}
-		} else {
+		} else if !(oldDigest == newDigest && formalDigest == newDigest && candidateDigest == newDigest) {
 			return s.blockAcceptance(ctx, item, fmt.Errorf("formal/candidate digests do not match the apply journal (formal=%s candidate=%s)", formalDigest, candidateDigest))
+		}
+		if err = candidate.RestoreServiceRoot(item.Record.Candidate.FormalRoot, item.Record.Candidate.CandidateRoot); err != nil {
+			return s.blockAcceptance(ctx, item, err)
 		}
 		receipt := candidate.Receipt{ID: "receipt-" + item.Decision.ID, DecisionID: item.Decision.ID, CandidateID: item.Record.Candidate.ID, FormalDigest: newDigest, AcceptedAt: time.Now().UTC()}
 		if err = s.FinalizeAcceptance(ctx, item.Decision, receipt, item.Record.GoalID, item.Record.ActionID); err != nil {
@@ -287,6 +308,12 @@ func (s *Store) ReconcileAcceptances(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+type acceptanceJournalAdapter struct{ store *Store }
+
+func (j acceptanceJournalAdapter) Advance(ctx context.Context, id string, from, to candidate.TransactionPhase, reason string) error {
+	return j.store.SetAcceptancePhase(ctx, id, string(from), string(to), reason)
 }
 
 func (s *Store) blockAcceptance(ctx context.Context, item AcceptanceRecovery, cause error) error {

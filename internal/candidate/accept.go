@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -43,6 +42,16 @@ type AcceptanceStore interface {
 	FindAcceptanceReceipt(context.Context, string) (Receipt, bool, error)
 	SetAcceptancePhase(context.Context, string, string, string, string) error
 	FinalizeAcceptance(context.Context, AcceptanceDecision, Receipt, string, string) error
+}
+
+type acceptanceTransactionInfo interface {
+	AcceptanceTransaction(context.Context, string) (string, string, error)
+}
+
+type acceptanceJournal struct{ store AcceptanceStore }
+
+func (j acceptanceJournal) Advance(ctx context.Context, id string, from, to TransactionPhase, reason string) error {
+	return j.store.SetAcceptancePhase(ctx, id, string(from), string(to), reason)
 }
 
 func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision AcceptanceDecision, goalID, actionID string, store AcceptanceStore, now time.Time) (Receipt, error) {
@@ -86,7 +95,20 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 		_ = store.SetAcceptancePhase(ctx, decision.ID, "prepared", "blocked", reason)
 		return Receipt{}, errors.New(reason)
 	}
-	if err = ExchangeProjectDir(c.FormalRoot, c.CandidateRoot); err != nil {
+	mode := secfile.TransactionMode()
+	rollback := filepath.Join(filepath.Dir(filepath.Clean(c.CandidateRoot)), ".stable-accept-rollback-"+decision.ID)
+	if infoStore, ok := store.(acceptanceTransactionInfo); ok {
+		if storedMode, storedRollback, infoErr := infoStore.AcceptanceTransaction(ctx, decision.ID); infoErr == nil {
+			if storedMode != "" {
+				mode = storedMode
+			}
+			if storedRollback != "" {
+				rollback = storedRollback
+			}
+		}
+	}
+	tx := DirectoryTransaction{ID: decision.ID, Kind: TransactionAcceptance, CurrentRoot: c.FormalRoot, IncomingRoot: c.CandidateRoot, RollbackRoot: rollback, ExpectedDigest: decision.FormalDigest, TargetDigest: decision.CandidateDigest, ServiceRoot: filepath.Join(c.FormalRoot, ".stable"), Mode: mode}
+	if err = NewTransactionCoordinator().Apply(ctx, tx, acceptanceJournal{store: store}); err != nil {
 		_ = store.SetAcceptancePhase(ctx, decision.ID, "prepared", "blocked", err.Error())
 		return Receipt{}, err
 	}
@@ -95,18 +117,13 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 	// directory. Move them back before anyone appends to the transcript. A
 	// crash before this move leaves the logs under the candidate root, where
 	// acceptance recovery can still find them.
-	if st, statErr := os.Lstat(filepath.Join(c.CandidateRoot, ".stable")); statErr == nil && st.IsDir() {
-		if moveErr := os.Rename(filepath.Join(c.CandidateRoot, ".stable"), filepath.Join(c.FormalRoot, ".stable")); moveErr != nil {
-			_ = store.SetAcceptancePhase(ctx, decision.ID, "swapped", "blocked", moveErr.Error())
-			return Receipt{}, fmt.Errorf("project exchanged; session state restore required: %w", moveErr)
-		}
+	if moveErr := RestoreServiceRoot(c.FormalRoot, c.CandidateRoot); moveErr != nil {
+		_ = store.SetAcceptancePhase(ctx, decision.ID, "swapped", "blocked", moveErr.Error())
+		return Receipt{}, fmt.Errorf("project exchanged; session state restore required: %w", moveErr)
 	}
 	_, acceptedDigest, err := BuildManifest(c.FormalRoot)
 	if err != nil {
 		return Receipt{}, err
-	}
-	if err = store.SetAcceptancePhase(ctx, decision.ID, "prepared", "swapped", ""); err != nil {
-		return Receipt{}, fmt.Errorf("project exchanged; acceptance recovery required: %w", err)
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -200,7 +217,7 @@ func ExchangeProjectDir(formalRoot, candidateRoot string) error {
 	if err != nil {
 		return err
 	}
-	if err = secfile.Exchange(formalRoot, candidateRoot); err != nil {
+	if err = secfile.ExchangeDirectories(formalRoot, candidateRoot); err != nil {
 		if errors.Is(err, secfile.ErrUnsafePath) {
 			return ErrUnsafePath
 		}

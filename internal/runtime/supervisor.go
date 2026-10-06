@@ -118,7 +118,10 @@ func ReconcileBeforeDispatch(ctx context.Context, dbPath string) error {
 		return err
 	}
 	defer s.Close()
-	return s.ReconcileAcceptances(ctx)
+	if err := s.ReconcileAcceptances(ctx); err != nil {
+		return err
+	}
+	return s.ReconcileRewinds(ctx)
 }
 
 func Supervise(c appconfig.AppConfig, p paths.Paths, sbx sandbox.SandboxManager) error {
@@ -148,7 +151,7 @@ func Supervise(c appconfig.AppConfig, p paths.Paths, sbx sandbox.SandboxManager)
 		return errors.New("runtime already running")
 	}
 	if err := ReconcileBeforeDispatch(context.Background(), p.Database); err != nil {
-		return fmt.Errorf("reconcile interrupted acceptances: %w", err)
+		return fmt.Errorf("reconcile interrupted candidate transactions: %w", err)
 	}
 	address := "127.0.0.1:" + strconv.Itoa(c.TemporalPort)
 	if conn, err := net.DialTimeout("tcp", address, 200*time.Millisecond); err == nil {

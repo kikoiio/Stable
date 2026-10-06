@@ -9,9 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"stable/internal/platform/secfile"
 )
 
 type FindingResult string
@@ -203,7 +206,7 @@ func DiffManifests(formalRoot, candidateRoot string, formal, candidate []Manifes
 }
 
 func readEntry(root string, entry ManifestEntry) ([]byte, error) {
-	f, err := secureOpen(root, entry.Path)
+	secureRoot, f, err := openRootEntry(root, entry.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +226,44 @@ func readEntry(root string, entry ManifestEntry) ([]byte, error) {
 	if hex.EncodeToString(sum[:]) != entry.Digest {
 		return nil, errors.New("project changed while building review")
 	}
+	if err := secureRoot.Revalidate(); err != nil {
+		return nil, err
+	}
 	return data, nil
+}
+
+// openRootEntry binds one content read to a validated root identity. The
+// caller must revalidate the returned root after consuming the file so a root
+// replacement during a review cannot be mistaken for a stable read.
+func openRootEntry(root, rel string) (secfile.Root, *os.File, error) {
+	clean, err := CleanRelative(rel)
+	if err != nil {
+		return secfile.Root{}, nil, err
+	}
+	secureRoot, err := secfile.OpenRoot(root)
+	if err != nil {
+		if errors.Is(err, secfile.ErrUnsafePath) {
+			return secfile.Root{}, nil, ErrUnsafePath
+		}
+		return secfile.Root{}, nil, err
+	}
+	f, err := secureRoot.Open(clean)
+	if err != nil {
+		if errors.Is(err, secfile.ErrUnsafePath) {
+			return secfile.Root{}, nil, ErrUnsafePath
+		}
+		return secfile.Root{}, nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return secfile.Root{}, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return secfile.Root{}, nil, ErrUnsafePath
+	}
+	return secureRoot, f, nil
 }
 
 func TextDiff(path, before, after string) string {

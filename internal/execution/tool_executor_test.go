@@ -282,6 +282,80 @@ func TestToolExecutorSandboxUnavailableIsDenied(t *testing.T) {
 	}
 }
 
+func TestToolExecutorCommandUsesPinnedOneShotNetworkProfile(t *testing.T) {
+	formal := t.TempDir()
+	candidateRoot := filepath.Join(t.TempDir(), "candidate")
+	request := executorRequest(t, formal, candidateRoot)
+	var authority permission.Authority
+	if err := json.Unmarshal(request.PermissionBounds, &authority); err != nil {
+		t.Fatal(err)
+	}
+	authority.Network = []permission.NetworkGrant{{Protocol: "tcp", Host: "localhost", Port: 443}}
+	request.PermissionBounds, _ = json.Marshal(authority)
+
+	gate := &executorTestGate{decision: permission.PermissionDecision{Kind: permission.DecisionAllow}}
+	sandboxFake := &executorTestSandbox{result: sandbox.SandboxResult{Stdout: []byte("ok\n"), ExitCode: 0}}
+	factory := NewToolExecutorFactory(ToolExecutorDeps{Gate: gate, Sandbox: sandboxFake, HelperPath: "proxy-helper", Now: time.Now})
+	runner, err := factory.ForRun(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := runner.Execute(context.Background(), llm.ToolUse{ID: "network-command", Name: "command", Arguments: json.RawMessage(`{"command":"printf ok"}`)})
+	if err != nil || outcome.IsError {
+		t.Fatalf("network command = %#v, err=%v", outcome, err)
+	}
+	if len(sandboxFake.profile.NetworkGrants) != 1 {
+		t.Fatalf("network grants = %+v", sandboxFake.profile.NetworkGrants)
+	}
+	grant := sandboxFake.profile.NetworkGrants[0]
+	if grant.Protocol != "tcp" || grant.Host != "localhost" || len(grant.ResolvedIPs) == 0 {
+		t.Fatalf("grant was not pinned in command profile: %+v", grant)
+	}
+	wantHelper, err := filepath.Abs("proxy-helper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sandboxFake.profile.ProxyHelperPath != wantHelper {
+		t.Fatalf("proxy helper = %q, want %q", sandboxFake.profile.ProxyHelperPath, wantHelper)
+	}
+}
+
+func TestToolExecutorHelperUsesPinnedProfileAndCleansScratch(t *testing.T) {
+	formal := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formal, "a.txt"), []byte("content\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	candidateRoot := filepath.Join(t.TempDir(), "candidate")
+	request := executorRequest(t, formal, candidateRoot)
+	var authority permission.Authority
+	if err := json.Unmarshal(request.PermissionBounds, &authority); err != nil {
+		t.Fatal(err)
+	}
+	authority.Network = []permission.NetworkGrant{{Protocol: "tcp", Host: "localhost", Port: 443}}
+	request.PermissionBounds, _ = json.Marshal(authority)
+
+	gate := &executorTestGate{decision: permission.PermissionDecision{Kind: permission.DecisionAllow}}
+	sandboxFake := &executorTestSandbox{result: sandbox.SandboxResult{Stdout: []byte(`{"output":"read"}`), ExitCode: 0}}
+	factory := NewToolExecutorFactory(ToolExecutorDeps{Gate: gate, Sandbox: sandboxFake, HelperPath: "tool-helper", Now: time.Now})
+	runner, err := factory.ForRun(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := runner.Execute(context.Background(), llm.ToolUse{ID: "network-helper", Name: "read_file", Arguments: json.RawMessage(`{"file_path":"a.txt"}`)})
+	if err != nil || outcome.IsError {
+		t.Fatalf("network helper = %#v, err=%v", outcome, err)
+	}
+	if len(sandboxFake.profile.NetworkGrants) != 1 || len(sandboxFake.profile.NetworkGrants[0].ResolvedIPs) == 0 {
+		t.Fatalf("grant was not pinned in helper profile: %+v", sandboxFake.profile.NetworkGrants)
+	}
+	if sandboxFake.profile.CandidateRoot == authority.CandidateRoot {
+		t.Fatalf("read-only helper did not use scratch candidate: %q", sandboxFake.profile.CandidateRoot)
+	}
+	if _, statErr := os.Stat(sandboxFake.profile.CandidateRoot); !os.IsNotExist(statErr) {
+		t.Fatalf("scratch candidate was not cleaned up: path=%q err=%v", sandboxFake.profile.CandidateRoot, statErr)
+	}
+}
+
 func TestToolExecutorEnforcesReadBeforeWrite(t *testing.T) {
 	formal := t.TempDir()
 	if err := os.WriteFile(filepath.Join(formal, "a.txt"), []byte("old\n"), 0600); err != nil {

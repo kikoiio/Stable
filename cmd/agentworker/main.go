@@ -157,6 +157,9 @@ func runConfigured(dbPath, runRoot, address, projectRoot string, appMode bool, c
 	if err = state.ReconcileAcceptances(context.Background()); err != nil {
 		return fmt.Errorf("reconcile interrupted acceptances: %w", err)
 	}
+	if err = state.ReconcileRewinds(context.Background()); err != nil {
+		return fmt.Errorf("reconcile interrupted rewinds: %w", err)
+	}
 	artifacts, err := artifact.New(runRoot)
 	if err != nil {
 		return err

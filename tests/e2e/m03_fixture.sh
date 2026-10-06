@@ -31,6 +31,7 @@ m03_fixture_setup() {
   M03_SECRET="m03-fake-model-key-$(date +%s)-$$"
   M03_HOST_SECRET="$M03_OUTSIDE/host_secret.txt"
   mkdir -p "$M03_PROJECT" "$M03_CANDIDATE" "$M03_RUN_DIR" "$M03_OUTSIDE"
+  chmod 700 "$M03_RUN_DIR"
   cp "$M03_SRC/sensor.kicad_sch" "$M03_SRC/sensor.kicad_pro" "$M03_PROJECT/"
   cp "$M03_SRC/sensor.kicad_sch" "$M03_SRC/sensor.kicad_pro" "$M03_CANDIDATE/"
   # Same-filesystem requirement for renameat2(RENAME_EXCHANGE) at accept time.

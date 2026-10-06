@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"stable/internal/candidate"
+	"stable/internal/platform/secfile"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
 )
@@ -167,18 +168,16 @@ func (s *Service) rewindSnapshot(ctx context.Context, c ClientMsg) (sessionlog.R
 		_ = os.RemoveAll(staging)
 		return fail(err)
 	}
-	journal := store.RewindJournal{ID: id, CandidateID: c.CandidateID, SnapshotID: c.SnapshotID, ExpectedDigest: digest, TargetDigest: snap.Digest, StagingDir: staging}
+	journal := store.RewindJournal{ID: id, CandidateID: c.CandidateID, SnapshotID: c.SnapshotID, ExpectedDigest: digest, TargetDigest: snap.Digest, StagingDir: staging, TransactionMode: secfile.TransactionMode(), RollbackPath: staging + ".rollback"}
 	if err = s.deps.Store.BeginRewind(ctx, journal); err != nil {
 		_ = os.RemoveAll(staging)
 		return fail(err)
 	}
 	// A crash from here on leaves the journal for startup reconciliation;
 	// the synchronous path reports the same transitions as they happen.
-	if err = candidate.SwapWithStaging(cand.CandidateRoot, staging); err != nil {
+	tx := candidate.DirectoryTransaction{ID: journal.ID, Kind: candidate.TransactionRewind, CurrentRoot: cand.CandidateRoot, IncomingRoot: staging, RollbackRoot: journal.RollbackPath, ExpectedDigest: journal.ExpectedDigest, TargetDigest: journal.TargetDigest, Mode: journal.TransactionMode}
+	if err = candidate.NewTransactionCoordinator().Apply(ctx, tx, rewindJournalAdapter{store: s.deps.Store}); err != nil {
 		return fail(fmt.Errorf("exchange candidate with staged snapshot: %w", err))
-	}
-	if err = s.deps.Store.SetRewindPhase(ctx, journal.ID, store.RewindPrepared, store.RewindSwapped, ""); err != nil {
-		return fail(err)
 	}
 	if _, after, err := candidate.BuildManifest(cand.CandidateRoot); err != nil {
 		return fail(err)
@@ -202,6 +201,12 @@ func (s *Service) rewindSnapshot(ctx context.Context, c ClientMsg) (sessionlog.R
 		return done, fmt.Errorf("rewind finished but the receipt could not be recorded: %w", err)
 	}
 	return done, nil
+}
+
+type rewindJournalAdapter struct{ store *store.Store }
+
+func (j rewindJournalAdapter) Advance(ctx context.Context, id string, from, to candidate.TransactionPhase, reason string) error {
+	return j.store.SetRewindPhase(ctx, id, string(from), string(to), reason)
 }
 
 func (s *Service) searchSessions(c ClientMsg) (sessionlog.SearchResult, error) {

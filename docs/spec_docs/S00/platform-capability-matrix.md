@@ -21,8 +21,8 @@
 | C03 单实例锁 | 支持 | 待真实环境验证 | 待真实环境验证 |
 | C04 进程树托管 | 支持 | 降级(待真实环境验证) | 降级(待真实环境验证) |
 | C05 私密文件与安全存储 | 支持 | 待真实环境验证 | 待真实环境验证 |
-| C06 安全根目录访问 | 支持 | 未评估(计划评估) | 未评估(计划评估) |
-| C07 候选目录事务(原子验收) | 支持 | 未评估(计划评估) | 未评估(计划评估) |
+| C06 安全根目录访问 | 支持 | 契约已实现(待真实环境验证) | 契约已实现(待真实环境验证) |
+| C07 候选目录事务(原子验收) | 支持 | journaled-move 契约已实现(待真实环境验证) | journaled-move 契约已实现(待真实环境验证) |
 | C08 网络隔离(沙箱执行与网络授权) | 支持 | 未评估(计划评估) | 未评估(计划评估) |
 | C09 无头 KiCad 检查 | 支持 | 未评估(计划评估) | 未评估(计划评估) |
 | C10 交互式 GUI 会话 | 支持(可降级) | 未评估(计划评估) | 未评估(计划评估) |
@@ -175,7 +175,7 @@
 - AC-PROC-2:`go test ./internal/runtime/... ./internal/sandbox/... -count=1` → 通过(已执行)。
 - AC-PROC-3〔降级〕:`python3 -m unittest discover -s workers/computer` → 通过(已执行,OK)。
 - AC-PROC-4:`stable down` → 报 stopped N leftover GUI session process(es) 计数如实(手工)。
-- AC-PROC-5:`bash tests/e2e/m03_computer_session.sh`(需沙箱+GUI)→ 停止后 pgrep 无残留、stale handle 被拒、formal digest 不变(未执行,重)。
+- AC-PROC-5:`bash tests/e2e/m03_computer_session.sh`(需沙箱+GUI)→ 停止后 pgrep 无残留、stale handle 被拒、formal digest 不变(已执行,2026-10-06,PASS)。
 - AC-PROC-6〔降级〕:向 computer_sessions 写入指向无关进程的伪造 runtime_handle 后 StopSessionProcesses → 无关进程不收到任何信号(现状无自动测试,需新增定向测试或手工验证)。
 
 **边界与矩阵外备注**:bwrap --die-with-parent 承担部分进程树清理责任,抽象进程托管契约时须显式化;guest 侧 bridge.py 是进程托管的另一半实现(Python),平台审计不能只看 Go;Pdeathsig 语义是「创建线程死亡」而非「父进程死亡」,靠 --die-with-parent 兜底(仅代码审阅);工具超时(600s)经 ctx 取消落到 runProcessGroup 组终止,抽象时需一并考虑;会话控制 socket 目录经 MkdirTemp 落 /tmp(路径差异归 C01)。
@@ -224,6 +224,8 @@
 
 **Linux 状态:支持**——根内读取统一经 CleanRelative 词法拒绝 + openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS)+O_NOFOLLOW+fstat 常规文件校验,关键节点(冻结/评审/验收/ERC 前后)有摘要复核,openat2 不可用时错误上抛无静默回退(前提:Linux 内核 ≥ 5.6)。已澄清:openat2 仅存在于 workspace.go secureOpen;ERC 报告读取用末组件 O_NOFOLLOW+fstat+8MB 上限(报告路径服务自建);设备号检查仅承担同文件系统前置判断,防替换由逐次 openat2+摘要复核承担。
 
+**S03 更新(2026-10-06)**：`internal/platform/secfile` 已提供跨平台 `Root`、根身份重新验证、同卷检查和普通文件读取契约。Linux 继续使用 openat2；Darwin 使用逐组件 openat/O_NOFOLLOW；Windows 使用句柄级 reparse point 与卷/文件身份检查。review、snapshot、ERC 报告读取均已接入该边界；Darwin/Windows 真实主机行为留阶段 5 验证。
+
 **证据**:
 - `internal/candidate/workspace.go` `secureOpen`(213–238)— 根 fd(O_PATH|O_DIRECTORY)后 unix.Openat2(OpenHow{O_RDONLY|O_CLOEXEC|O_NOFOLLOW, RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS}),fstat 要求常规文件;RESOLVE_BENEATH 拒绝绝对路径与向上穿越,RESOLVE_NO_SYMLINKS 拒绝任何一级符号链接(含父目录替换与 /proc 魔法链接),O_NOFOLLOW 纵深防御;未用 RESOLVE_NO_XDEV(根内挂载点可跨设备,已知边界)。
 - `internal/candidate/workspace.go` `CleanRelative`(36–45)— 词法拒绝绝对路径、NUL、`.`、`..`;`BuildManifest`(47–117)对根 Lstat 拒绝符号链接根,WalkDir 跳过 `.stable`,符号链接/非常规文件条目直接 ErrUnsafePath,每个文件经 secureOpen 读入做 SHA-256。
@@ -236,7 +238,7 @@
 
 **证据类型与已执行验证**:可运行验证——`go test ./internal/candidate/... -count=1`(ok,含 TestManifestPath 词法穿越、TestManifestRejectsSymlink 根内符号链接、TestMaterializeRejectsTraversalEntry 快照穿越、TestGuardRewindTargetRejectsFormalRoot、TestAcceptRejectsStalePreview、TestCandidateReviewRejectsWritesDuringChecker)。仅代码审阅——openat2 内核层语义无直接命中用例(现有测试在 WalkDir 层即拒绝符号链接;建议补 openat2 层逃逸用例,对应 AC-ROOT-3)。
 
-**macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
+**macOS 状态**:契约已实现，目标编译与 Linux 契约测试通过；真实文件系统行为留阶段 5。**Windows 状态**:契约已实现，目标编译与 Linux 契约测试通过；真实文件系统行为留阶段 5。
 
 **等价机制线索**(未经验证,不构成承诺):macOS——无 openat2;逐组件 openat+O_NOFOLLOW+每级 fstat(dev/ino) 复核的 safe-open 循环;根身份用 st_dev/st_ino 比对。Windows——CreateFileW+FILE_FLAG_OPEN_REPARSE_POINT 拒绝 reparse point;GetFileInformationByHandle 比对卷序列号+File ID;路径规范化后前缀包含校验。旧内核(<5.6)——openat 逐目录下探+每级 fstat+O_NOFOLLOW 模拟。
 
@@ -260,7 +262,9 @@
 
 **范围界定**:含——候选目录准备(CreateCandidate,含同设备号前置与失败回滚)、冻结后的原子交换验收(AcceptCandidate/ExchangeProjectDir)、SQLite 验收 journal(acceptance_apply_journal)与重启 reconcile(ReconcileAcceptances)、快照回滚(SnapshotStore/StageRewind/SwapWithStaging/rewind journal);不含——候选内容生成与沙箱执行、ERC 检查本身(C09)、`.stable` 服务子树常规读写。
 
-**Linux 状态:支持**——验收交换主线(原子 RENAME_EXCHANGE + 交换前持久化 journal + 基于 manifest digest 的崩溃分类恢复 + 冲突即 blocked)在代码与测试中完整闭环,无任何普通覆盖/复制降级路径。已知接线缺口(非平台能力缺失,详见现状与差异记录):ReconcileRewinds 未接入生产启动路径;accept.go 注释承诺的 `.stable` 回移恢复机制不存在。
+**Linux 状态:支持**——验收交换主线(原子 RENAME_EXCHANGE + 交换前持久化 journal + 基于 manifest digest 的崩溃分类恢复 + 冲突即 blocked)在代码与测试中完整闭环,无任何普通覆盖/复制降级路径。S03 将 rewind 同步流程接入同一事务 coordinator，并把 `.stable` 服务目录恢复纳入 acceptance 完成与恢复路径。
+
+**S03 更新(2026-10-06)**：事务 coordinator 已统一 acceptance/rewind 调用链。Linux 使用 `atomic-exchange`；Darwin/Windows 明确使用带 rollback 路径和 `old_saved`/`target_installed` phase 的 `journaled-move`，能力不足、跨卷或摘要不一致时 fail-closed。journal schema 已迁移到 v12；真实 Darwin/Windows 崩溃恢复仍留阶段 5。
 
 **证据**:
 - `internal/candidate/accept.go` — ExchangeProjectDir 对两根 Lstat(拒绝非目录/符号链接)+unix.Stat 同设备号检查后,以 unix.Renameat2(AT_FDCWD,…,RENAME_EXCHANGE) 单次原子交换;AcceptCandidate 流程:journal 幂等检查 → validateAcceptance(状态 reviewed/frozen、决策身份与 digest 匹配、review digest 重算、normal/force 门禁)→ journal 落盘 → 交换前二次 manifest 复核(防 TOCTOU)→ 交换 → `.stable` 回移 → prepared→swapped → FinalizeAcceptance(receipt+状态机一个 SQLite 事务)。
@@ -274,7 +278,7 @@
 
 **证据类型与已执行验证**:可运行验证——`go test ./internal/candidate/... -count=1`(ok)、`go test ./internal/store/ -run 'TestReconcile' -count=1`(10/10 PASS,含交换前/交换后/冲突三类崩溃结局与 rewind 四用例)。仅代码审阅/未执行——tests/e2e 的 m03 验收与重启恢复 e2e(重,含真实沙箱与 SQLite 重开)未在本阶段执行。
 
-**macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
+**macOS 状态**:journaled-move 契约已实现，目标编译与 Linux 状态机测试通过；真实主机崩溃恢复留阶段 5。**Windows 状态**:journaled-move 契约已实现，目标编译与 Linux 状态机测试通过；真实主机崩溃恢复留阶段 5。
 
 **等价机制线索**(未经验证,不构成承诺):macOS——无 renameat2(RENAME_EXCHANGE) 等价 syscall,方向为「journal + 两次 rename(formal→备份、staging→formal)+ 重启按 journal 收尾」的分阶段提交;Windows 10+ NT 内核支持 POSIX 语义重命名(FILE_RENAME_FLAG_POSIX_SEMANTICS)可替换目录但无 exchange 语义,大概率同需分阶段提交;两平台均须保留「磁盘 digest 对照 journal 分类结局」恢复模型;均须通过 AC-CAND-7 故障注入后才能声明等价。
 
@@ -300,7 +304,7 @@
 
 **范围界定**:含——bubblewrap 隔离后端的约束构造与校验(只读/可写挂载、PID/网络 namespace、proc/dev/tmpfs)、每 run Probe、网络授权 grant 数据模型与策略判定、host 侧可信代理 NetworkProxy、guest 侧 loopback 代理与代理助手包装、持久隔离会话的网络拒绝、非 Linux fail-closed 形态;不含——单实例锁(C03)、进程组终止细节(C04)、OpNetwork 审批 UI 流程(权限域)、无头 KiCad(C09)。
 
-**Linux 状态:支持**——bubblewrap+mount/PID/network namespace 全链路存在且有可运行测试(默认全断网、授权目标经 pinning 代理可达、未授权端口被拒)。两点限定如实记录:①持久隔离会话明确拒绝网络 grant(能力收窄);②生产代码尚无路径把用户审批转成 SandboxProfile.NetworkGrants(授权链路未接线,代理机制本身已落地并强制)。
+**Linux 状态:支持**——bubblewrap+mount/PID/network namespace 全链路存在且有可运行测试(默认全断网、授权目标经 pinning 代理可达、未授权端口被拒)。一次性 command、helper 和 bridge 已从可信 authority 接入 `SandboxProfile.NetworkGrants`;持久隔离会话仍明确拒绝网络 grant(能力收窄)。
 
 **证据**:
 - `internal/sandbox/linux.go`(//go:build linux)— args()(154–209)构造 `--die-with-parent --new-session --unshare-pid --unshare-net --clearenv --proc /proc --dev /dev --tmpfs /tmp --tmpfs /home`,project 根 --ro-bind 只读、candidate/run 根 --bind 可写、/usr /bin /lib /lib64 /etc/ssl 等按存在只读绑定、HOME=/tmp TMPDIR=/tmp PATH=/usr/bin:/bin;ValidateProfile(33–152)要求三根真实目录、互不重叠/不含符号链接,拒绝传 HOME/PATH/DISPLAY、键名含 KEY/TOKEN 的环境变量,限定只读挂载 guest 路径,有 grant 时必须提供代理助手文件挂载且每个 grant 为 tcp+host+port+pinned IP、无重复。
@@ -310,10 +314,10 @@
 - `internal/sandbox/process.go` — 平台中立接口 SandboxManager/SandboxProfile(含 NetworkGrants)/ErrUnavailable("Linux isolation is unavailable")。
 - `internal/sandbox/session.go`(55–57)— 持久隔离会话带任何 NetworkGrant 即报错拒绝(fail closed)。
 - `internal/permission/policy.go` — OpNetwork 未匹配 grant → deny "network destination is not explicitly authorized"(49–52);匹配且无 deny/ask → allow "explicit network grant"(107–109)。
-- `internal/execution/tool_executor.go` — errors.Is(err, sandbox.ErrUnavailable) → ToolDenied "Error: isolation unavailable; execution refused"(196–197);Sandbox 为 nil 同样拒绝(152–155)。
+- `internal/execution/sandbox_profile.go`、`tool_executor.go`、`python_bridge.go` — 一次性 command/helper/ERC/GUI bridge 从 authority 构造并 pin 网络 grant;持久 session profile 拒绝 grant;errors.Is(err, sandbox.ErrUnavailable) → ToolDenied "Error: isolation unavailable; execution refused"。
 - `LinuxManager{}` 直接构造点(生产代码 6 处):cmd/agentworker/main.go:173、internal/runtime/supervisor.go:366 与 390、cmd/stable/chatserve.go:101 与 222、internal/dependency/service.go:46(dependency 为业务包内构造)。
 
-**证据类型与已执行验证**:可运行验证——`go test ./internal/sandbox/ -count=1`(ok,bwrap 实跑,含 TestBubblewrapArgs* 断言 --unshare-pid/--unshare-net/--clearenv、project 无 --bind、grant 存在时仍无 --share-net;TestNetworkGrantPinsExactResolvedTarget/TestTrustedProxyPinsAndRechecksBeforeDial/TestNetworkProxyHTTPConnectAndSOCKS5 未授权全拒)、`go test ./internal/execution/ -run 'TestBridgeFailsClosedWithoutSandbox' -count=1`(ok)。跨平台编译探针(2026-10-06 实测)——`GOOS=darwin go build ./internal/sandbox/` 失败(session.go:54 undefined LinuxManager、Pdeathsig 字段不存在);`GOOS=windows go build ./internal/sandbox/` 失败(rc=1,同因);`GOOS=windows go build ./internal/candidate/` 失败(依赖链 sandbox/session.go)。即非 Linux 的 fail-closed 主形态是编译期不可构建,比 network_other.go 的运行时拒绝更强、更早。仅代码审阅/未执行——m03 沙箱网络 e2e(重);细粒度挂载白名单无独立测试,行为由 TestProfileValidation 抽样断言与代码推断。
+**证据类型与已执行验证**:可运行验证——`go test ./internal/sandbox/ -count=1`(ok,bwrap 实跑,含 namespace/profile、网络 pinning、代理重验、session grant 拒绝与清理断言);`go test ./internal/execution/ -run 'Test.*(Command|Helper|Network|Isolation|PythonBridge|Session)' -count=1`(ok);`bash tests/e2e/m03_sandbox_network.sh` 与 `bash tests/e2e/m03_sandbox_secrets.sh`(均 PASS,默认断网/获批目标/未授权目标/DNS 变化及敏感标记扫描)。跨平台编译探针(2026-10-06 实测)——`CGO_ENABLED=0 GOOS=darwin go build ./...`、`CGO_ENABLED=0 GOOS=windows go build ./...`通过;运行时能力仍由非 Linux stub 明确返回 unsupported,本阶段不声明 macOS/Windows 支持。仅代码审阅/未执行——细粒度挂载白名单无独立测试,行为由 profile 契约测试与代码推断。
 
 **macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
 
@@ -329,12 +333,12 @@
 **验收条件**:
 - AC-NET-1:`go test ./internal/sandbox/ -run 'TestBubblewrapArgs|TestBubblewrapArgsWithApprovedNetworkProxy|TestBubblewrapArgsWithSessionControl'` → 通过;断言含 --unshare-pid --unshare-net --clearenv、project 仅 ro-bind、grant 存在时无 --share-net(已执行,V6 包全过)。〔降级〕bwrap 缺失环境允许 skip,但 skip 不得计为通过证据。
 - AC-NET-2:`go test ./internal/sandbox/ -run 'TestNetworkGrantPinsExactResolvedTarget|TestTrustedProxyPinsAndRechecksBeforeDial|TestNetworkProxyHTTPConnectAndSOCKS5'` → 换 host/端口/DNS 变更均被拒且未触达拨号器;未授权 CONNECT 403(已执行,V6)。
-- AC-NET-3:`make m03-e2e`(TestM03SandboxNetwork)→ 默认 profile DIRECT_BLOCKED、授权目标 APPROVED_CONNECTED、未授权端口不可达(未执行,重)。
+- AC-NET-3:`bash tests/e2e/m03_sandbox_network.sh`(TestM03SandboxNetwork)→ 默认 profile DIRECT_BLOCKED、授权目标 APPROVED_CONNECTED、未授权端口不可达、解析变化拒绝(已执行,2026-10-06,PASS)。
 - AC-NET-4:`go test ./internal/sandbox/ -run TestProbeAndNoHostFallback` → 有 bwrap 时 project 只读/candidate 可写/project 内容不变;无 bwrap 时探测失败且宿主无残留(已执行,V6 包全过)。
 - AC-NET-5〔降级〕:任一平台沙箱能力不可用时 RunIsolated/StartIsolatedSession 返回包装 ErrUnavailable 的错误,执行链显示 "isolation unavailable; execution refused",无非沙箱回退(Linux 已验证;其他平台以编译失败+源码审阅为证)。
-- AC-NET-6〔非 Linux〕:macOS/Windows 上沙箱包单独可编译性、enableLoopback 明确报错、含 LinuxManager 引用包的编译失败清单(阶段 1 交付)——本阶段已实测「编译失败」形态(darwin/windows rc=1),完整清单留阶段 1。
+- AC-NET-6〔非 Linux〕:macOS/Windows 全仓目标编译通过(`CGO_ENABLED=0 GOOS=darwin/windows go build ./...`,2026-10-06);运行时 Linux sandbox 能力仍由 stub 返回 unsupported,不宣称非 Linux 支持。
 
-**边界与矩阵外备注**:全仓 grep runtime.GOOS 零命中,平台选择完全依赖 build tags;代理助手可由 agentctl/agentworker 任一二进制充当(--stable-sandbox-proxy 受信包装入口两处),打包时助手定位是额外平台依赖点;supervisor 的 Flock(C03)与 session.go 的 syscall.Kill 进程组(C04)在沙箱组合根附近,平台边界抽取时应一并处理;授权链路缺口:PinNetworkGrant/SandboxProfile.NetworkGrants 仅测试使用,生产代码从不产生 grant,OpNetwork 审批结果未接入沙箱 profile。
+**边界与矩阵外备注**:全仓 grep runtime.GOOS 零命中,平台选择完全依赖 build tags;代理助手可由 agentctl/agentworker 任一二进制充当(--stable-sandbox-proxy 受信包装入口两处),打包时助手定位是额外平台依赖点;supervisor 的 Flock(C03)与 session.go 的 syscall.Kill 进程组(C04)在沙箱组合根附近,平台边界抽取时应一并处理;authority → 一次性 profile 的 grant 接线由 execution 负责,持久 session 仍拒绝 grant。
 
 ### C09 无头 KiCad 检查
 
@@ -352,7 +356,7 @@
 - `internal/runtime/doctor.go`(22、26)— 固定文件检查(libexec/agentctl、agentworker、temporal、fixture、schemas、两个 bridge.py)+ exec.LookPath 主机 PATH 检查 python3、kicad-cli、kicad、eeschema、Xvfb、xvfb-run、xprop、xwininfo、import;缺失提示安装系统包;有缺失即非零退出(main.go:144–146)。
 - `internal/dependency/collector.go`(31)+ `workers/kicad/erc.py`(38–68)— 桥不可用即报错;`kicad-cli version` 失败返回 'blocked',reason 'kicad-cli version unavailable; result not verifiable'(不猜版本)。
 
-**证据类型与已执行验证**:可运行验证——`go test ./internal/candidate/... -count=1`(ok,含 TestKicadERCCheckerRecordsPassAndFail 假沙箱 pass/fail 两分支、TestCandidateReviewRejectsWritesDuringChecker 检查期间写入即失效)、`python3 -m unittest discover -s workers/kicad`(OK)。仅代码审阅/未执行——doctor 判定逻辑无任何测试,且 stable doctor 本体加载用户配置(按安全边界不跑);真实 KiCad e2e(m03_kicad_candidate.sh)与 make cases 需完整环境,未在本阶段执行(重;本机已确认 kicad-cli/eeschema 存在,具备执行条件)。
+**证据类型与已执行验证**:可运行验证——`go test ./internal/candidate/... -count=1`(ok,含 ERC pass/fail、报告边界和候选写入失效断言);`python3 -m unittest discover -s workers/kicad`(OK);`bash tests/e2e/m03_kicad_candidate.sh`(TestM03KicadRepairRunsOnlyAgainstCandidateInLinuxSandbox,PASS);`go test ./internal/runtime -run 'Test.*Doctor|Test.*Missing' -count=1`(PASS)。`make cases` 仍未执行,不作为本阶段通过证据。
 
 **macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
 
@@ -370,7 +374,7 @@
 - AC-KCAD-2:`go test ./internal/candidate/ -run TestCandidateReviewRejectsWritesDuringChecker` → 检查期间篡改候选使 review 失败(已执行)。
 - AC-KCAD-3:`python3 -m unittest discover -s workers/kicad` → OK(已执行;注:其中按名需真实 kicad-cli 的用例在本机已满足条件)。
 - AC-KCAD-4〔降级〕:kicad-cli 缺失环境运行 review 流程 → finding=unavailable 且验收被阻,用户可见 reason,不静默(代码审阅+TestBridgeFailsClosedWithoutSandbox 佐证)。
-- AC-KCAD-5:`bash tests/e2e/m03_kicad_candidate.sh`(需 bwrap+kicad-cli+eeschema)→ 真实 ERC 经沙箱完成,Version 非空非 not-run(未执行,重)。
+- AC-KCAD-5:`bash tests/e2e/m03_kicad_candidate.sh`(需 bwrap+kicad-cli+eeschema)→ 真实 ERC 经沙箱完成,Version 非空非 not-run(已执行,2026-10-06,PASS)。
 - AC-KCAD-6:`make cases`(需 kicad-cli)→ 场景用例通过(未执行,重)。
 
 **边界与矩阵外备注**:KiCad 配置播种三处重复(Go erc_checker.go、workers/kicad/erc.py、workers/computer/bridge.py)全部硬编码 kicad/9.0 子目录与 /usr/share/kicad/template——KiCad 升版会静默失效,建议阶段 2/4 收敛为单一 resolver;CI(.github/workflows/go.yml)只跑 go build+test,Python bridge 契约仅本地触发;doctor 检查 kicad/xvfb-run/xprop 但运行时不用(超集检查,易误导支持判定)。
@@ -393,7 +397,7 @@
 - `internal/execution/python_bridge.go`(138–174)— computer.\* 强制走持久会话(候选绑定),请求失败即 StopIsolatedSession。
 - `tests/e2e/m03_computer_session_test.go` — 断言 applied/open/generation=1/窗口身份非空/截图证据在 run root 内非空,停止后 observe 报 stale。
 
-**证据类型与已执行验证**:可运行验证——`go test ./internal/execution/ -run 'TestComputerBridgeUsesPersistentCandidateBoundSession|TestBridgeFailsClosedWithoutSandbox' -count=1`(ok,会话复用/候选绑定/无沙箱拒绝)、`python3 -m unittest discover -s workers/computer`(OK,observe 绑定候选根、formal 路径被拒、协议一问一答)、`go test ./internal/sandbox/ -count=1`(ok,含 TestBubblewrapArgsWithSessionControl/TestSessionGeneration)。仅代码审阅/未执行——StopSessionProcesses 无测试且无带 GUI 进程的 state.db fixture;m03 GUI e2e 未在本阶段执行(重;本机已确认 Xvfb/eeschema/import 存在,具备条件);AC-GUI-3 降级路径(import 缺失)无现成自动化。
+**证据类型与已执行验证**:可运行验证——`go test ./internal/execution/ -run 'TestComputerBridgeUsesPersistentCandidateBoundSession|TestBridgeFailsClosedWithoutSandbox' -count=1`(ok);`python3 -m unittest discover -s workers/computer`(OK);`go test ./internal/sandbox/ -count=1`(ok,含 session control/generation);`bash tests/e2e/m03_computer_session.sh`(TestM03ComputerIsolatedSessionLifecycle,PASS,开窗/截图/generation/stop 无残留)。仅代码审阅/未执行——StopSessionProcesses 无独立 fixture;AC-GUI-3 降级路径(import 缺失)无现成自动化。
 
 **macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
 
@@ -411,7 +415,7 @@
 - AC-GUI-2:`python3 -m unittest discover -s workers/computer` → 观察绑定候选、formal 拒绝、协议一问一答(已执行,OK)。
 - AC-GUI-3〔降级〕:import 缺失环境下会话观察 → status=stale、screenshot_path 空、结果 blocked,且 Xvfb/eeschema 仍被正常清理(无现成自动化;标仅代码审阅 bridge.py:121–132,或补测试)。
 - AC-GUI-4〔降级〕:`stable down` → 遗留 eeschema/Xvfb 仅按 cmdline 前缀精确匹配被 SIGTERM,不触碰无关进程(手工;附代码审阅)。
-- AC-GUI-5:`bash tests/e2e/m03_computer_session.sh`(需 Xvfb+eeschema+bwrap+import)→ 开窗、generation 递增、截图证据留在 run root、停止后 stale(未执行,重)。
+- AC-GUI-5:`bash tests/e2e/m03_computer_session.sh`(需 Xvfb+eeschema+bwrap+import)→ 开窗、generation 递增、截图证据留在 run root、停止后 stale(已执行,2026-10-06,PASS)。
 
 **边界与矩阵外备注**:ctypes dlopen libX11.so.6/libXtst.so.6 是隐式平台依赖,doctor 未覆盖;GUI 会话启动日志(Xvfb/eeschema/windows/failed-\*.png)写 run_root/computer-logs 属可观察性产物;会话控制 socket 的 sun_path 108 字节限制催生 host /tmp 短路径+挂载方案(m04_tools.sh:280 注明嵌套 TMPDIR 会触发),平台路径长度策略需纳入考虑。
 
@@ -435,8 +439,8 @@
 
 | 完成标志 | 达成位置与证据 |
 |----------|----------------|
-| 每项功能对每个平台都有「支持/不支持/降级」的明确状态和可执行验收条件 | 第 2 节矩阵总览:10 行 × 3 平台状态齐全(Linux 全部「支持」,macOS/Windows 统一「未评估(计划评估)」);第 3 节每行验收条件共 54 条(AC-PATH-1…AC-GUI-5),每条「运行 X → 期望 Y」,其中已执行验证 26 条均有本机实测结果 |
-| Linux 当前行为作为回归基线 | 第 3 节每行「Linux 状态」记录的是当前真实行为并区分证据类型(可运行验证 26 条已执行/仅代码审阅);可运行验证命令(如 `go test ./internal/appconfig/ -count=1`、`./internal/candidate/...`、`./internal/sandbox/...`、`./internal/store/ -run TestReconcile`)在本机全部通过,可随时重放 |
+| 每项功能对每个平台都有「支持/不支持/降级」的明确状态和可执行验收条件 | 第 2 节矩阵总览:10 行 × 3 平台状态齐全(Linux 全部「支持」,macOS/Windows 统一「未评估(计划评估)」);第 3 节每行验收条件共 54 条(AC-PATH-1…AC-GUI-5),每条「运行 X → 期望 Y」,已执行项均有本机实测结果,未执行项明确保留原因 |
+| Linux 当前行为作为回归基线 | 第 3 节每行「Linux 状态」记录的是当前真实行为并区分可运行验证与代码审阅;受影响包、Linux e2e 和跨目标构建命令均记录实际结果,可随时重放 |
 
 ## 6. 审计差异记录
 
