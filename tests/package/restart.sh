@@ -8,8 +8,12 @@ mock_pid=
 dump_diagnostics() {
   rc=$?
   [[ $rc -eq 0 ]] && return 0
+  echo '--- stable goal status (retry, stderr shown) ---' >&2
+  stable goal status --goal restart-test >&2 2>&1 || true
   echo '--- status.json ---' >&2
   cat "$test_root/status.json" 2>/dev/null >&2 || true
+  echo '--- mock model log (tail) ---' >&2
+  tail -30 "$test_root/mock.log" 2>/dev/null >&2 || true
   echo '--- state logs (tail) ---' >&2
   for f in "$HOME/.local/state/stable"/*.log; do
     [[ -f $f ]] || continue
@@ -29,6 +33,7 @@ export HOME="$test_root/home"
 mkdir -p "$HOME"
 bash "$test_root/$pkg_name/install.sh"
 export PATH="$HOME/.local/bin:/usr/bin:/bin"
+export STABLE_MOCK_LOG="$test_root/mock.log"
 python3 "$project_root/tests/package/mock_model.py" > "$test_root/mock.port" &
 mock_pid=$!
 for _ in $(seq 1 50); do [[ -s "$test_root/mock.port" ]] && break; sleep 0.1; done
