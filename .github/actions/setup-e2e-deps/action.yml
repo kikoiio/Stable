@@ -17,10 +17,13 @@ runs:
         # 官方 9.0 系列 PPA(支持 Ubuntu 24.04 noble);kicad-cli 与 eeschema 随 kicad 主包附带。
         # kicad-libraries 必须装:缺省时 kicad 配置里没有 Device/Connector 符号库,
         # ERC 会多出 lib_symbol_issues 告警,修复后的夹具也无法归零(首轮 CI 实证)。
+        # 注意 PPA 里 kicad-libraries 对 kicad-symbols 等只是 Recommends,--no-install-recommends
+        # 会跳过,符号库与 sym-lib-table 模板实际在 kicad-symbols 里,必须显式点名(m07c run
+        # 37505687914 实证:metapackage 装了但符号文件没落盘,ERC 仍报 table missing)。
         sudo add-apt-repository -y ppa:kicad/kicad-9.0-releases
         sudo apt-get update
         sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-          kicad kicad-libraries xvfb x11-utils imagemagick
+          kicad kicad-libraries kicad-symbols xvfb x11-utils imagemagick
         kicad-cli version
 
     - name: Clear runner-injected XDG directories
