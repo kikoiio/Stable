@@ -441,8 +441,17 @@ func (e *toolRunExecutor) executeHelper(ctx context.Context, modelName, helper s
 		defer os.RemoveAll(scratch)
 		candidateMount = scratch
 	}
-	profile := sandbox.SandboxProfile{ProjectRoot: e.authority.AllowedRoot, CandidateRoot: candidateMount, RunRoot: e.runRoot, Timeout: toolRunTimeout, OutputLimit: 1 << 20}
 	helperAbs, err := filepath.Abs(e.deps.HelperPath)
+	if err != nil {
+		return "", nil, err
+	}
+	// Build every one-shot helper profile through the trusted authority path.
+	// Read-only helpers retain their per-call scratch candidate by narrowing the
+	// copied authority before profile construction; the original authority and
+	// persistent session bounds remain unchanged.
+	profileAuthority := e.authority
+	profileAuthority.CandidateRoot = candidateMount
+	profile, err := OneShotSandboxProfile(ctx, profileAuthority, e.runRoot, helperAbs, toolRunTimeout, 1<<20, nil)
 	if err != nil {
 		return "", nil, err
 	}
@@ -479,7 +488,18 @@ func (e *toolRunExecutor) executeCommand(ctx context.Context, args map[string]an
 	if strings.ContainsRune(command, 0) {
 		return "", errors.New("command contains NUL")
 	}
-	profile := sandbox.SandboxProfile{ProjectRoot: e.authority.AllowedRoot, CandidateRoot: e.authority.CandidateRoot, RunRoot: e.runRoot, Timeout: commandTimeoutFor(args), OutputLimit: 1 << 20}
+	helperPath := ""
+	if e.deps.HelperPath != "" {
+		var err error
+		helperPath, err = filepath.Abs(e.deps.HelperPath)
+		if err != nil {
+			return "", err
+		}
+	}
+	profile, err := OneShotSandboxProfile(ctx, e.authority, e.runRoot, helperPath, commandTimeoutFor(args), 1<<20, nil)
+	if err != nil {
+		return "", err
+	}
 	result, err := e.deps.Sandbox.RunIsolated(ctx, profile, []string{"bash", "-c", command}, nil)
 	if err != nil {
 		return "", err
