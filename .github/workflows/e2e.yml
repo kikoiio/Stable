@@ -27,6 +27,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      # go test ./... 含 m06 沙箱测试(TestM06* 需要 bwrap + userns,见 m07c 实证),
+      # 因此 unit job 也要走依赖 action 的 bwrap/userns 步骤(不装 KiCad)。
+      - uses: ./.github/actions/setup-e2e-deps
+        with:
+          kicad: 'false'
       - name: Build CLI and workers
         run: go build ./cmd/...
       - name: Run unit tests
