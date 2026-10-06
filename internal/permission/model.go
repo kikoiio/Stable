@@ -26,6 +26,9 @@ const (
 	OpCommand OperationKind = "command"
 	OpNetwork OperationKind = "network"
 	OpLegacy  OperationKind = "legacy"
+	// OpMCPTool is an invocation of a tool on an MCP server: Name is the MCP
+	// server name and Target the normalized "server__tool" match string.
+	OpMCPTool OperationKind = "mcp_tool"
 )
 
 type Authority struct {
@@ -54,9 +57,14 @@ type NetworkGrant struct {
 }
 
 type Operation struct {
-	ID         string          `json:"id"`
-	Kind       OperationKind   `json:"kind"`
-	Name       string          `json:"name"`
+	ID   string        `json:"id"`
+	Kind OperationKind `json:"kind"`
+	// Name is the actor of the operation (a command or built-in tool name).
+	// For MCP tool operations (OpMCPTool) it is the MCP server name.
+	Name string `json:"name"`
+	// Target is the object the operation acts on: a filesystem path for the
+	// file kinds, or for MCP tool operations (OpMCPTool) the normalized
+	// "<server>__<tool>" match string that exact rules compare verbatim.
 	Target     string          `json:"target,omitempty"`
 	Parameters json.RawMessage `json:"parameters,omitempty"`
 	Protocol   string          `json:"protocol,omitempty"`

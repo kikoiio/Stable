@@ -215,3 +215,73 @@ func TestPlanModeMatrix(t *testing.T) {
 		})
 	}
 }
+
+// MCP tool operations (OpMCPTool) carry no filesystem boundary: Name is the
+// MCP server and Target the normalized "server__tool" match string. Without a
+// matching exact rule they always ask, in every mode; exact rules decide them
+// with the same deny > ask > allow precedence as every other kind, and target
+// matching is exact-string (no wildcards), like all existing kinds. Unknown
+// operation kinds keep failing closed.
+func TestMCPRules(t *testing.T) {
+	a := Authority{RunID: "r", SessionID: "s", AllowedRoot: "/project", CandidateRoot: "/candidate", Mode: ModeDefault}
+	op := Operation{ID: "m", Kind: OpMCPTool, Name: "github", Target: "github__create_issue", Parameters: []byte(`{"title":"x"}`)}
+	scope, err := a.ScopeDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, err := digest(op.Parameters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := func(effect RuleEffect) ExactRule {
+		return ExactRule{Effect: effect, Kind: OpMCPTool, Name: op.Name, Target: op.Target, ParametersDigest: params, ScopeDigest: scope}
+	}
+
+	// No matching rule: default ask, in every mode.
+	for _, mode := range []Mode{ModeDefault, ModeAcceptEdits, ModePlan, ModeBypass} {
+		modeA := a
+		modeA.Mode = mode
+		if d := (Policy{}).Decide(modeA, op); d.Kind != DecisionAsk {
+			t.Fatalf("%s: mcp tool without rules: got %s want ask (%s)", mode, d.Kind, d.Reason)
+		}
+	}
+
+	// Each effect is honored on an exact match.
+	if d := (Policy{Rules: []ExactRule{rule(EffectAllow)}}).Decide(a, op); d.Kind != DecisionAllow {
+		t.Fatalf("exact allow rule ignored: %+v", d)
+	}
+	if d := (Policy{Rules: []ExactRule{rule(EffectAsk)}}).Decide(a, op); d.Kind != DecisionAsk {
+		t.Fatalf("exact ask rule ignored: %+v", d)
+	}
+	if d := (Policy{Rules: []ExactRule{rule(EffectDeny)}}).Decide(a, op); d.Kind != DecisionDeny {
+		t.Fatalf("exact deny rule ignored: %+v", d)
+	}
+
+	// deny > ask > allow precedence, as for every other kind.
+	if d := (Policy{Rules: []ExactRule{rule(EffectAllow), rule(EffectAsk), rule(EffectDeny)}}).Decide(a, op); d.Kind != DecisionDeny {
+		t.Fatalf("deny did not win over ask and allow: %+v", d)
+	}
+	if d := (Policy{Rules: []ExactRule{rule(EffectAllow), rule(EffectAsk)}}).Decide(a, op); d.Kind != DecisionAsk {
+		t.Fatalf("ask did not win over allow: %+v", d)
+	}
+
+	// Matching is exact-string like every existing kind: a wildcard target
+	// never matches, so the operation falls back to the default ask.
+	wild := rule(EffectAllow)
+	wild.Target = "github__*"
+	if d := (Policy{Rules: []ExactRule{wild}}).Decide(a, op); d.Kind != DecisionAsk {
+		t.Fatalf("wildcard target rule matched: got %s want ask (%s)", d.Kind, d.Reason)
+	}
+
+	// A different tool on the same server does not match the rule either.
+	other := op
+	other.Target = "github__list_issues"
+	if d := (Policy{Rules: []ExactRule{rule(EffectAllow)}}).Decide(a, other); d.Kind != DecisionAsk {
+		t.Fatalf("rule for another tool matched: got %s want ask (%s)", d.Kind, d.Reason)
+	}
+
+	// Unknown operation kinds are still denied outright.
+	if d := (Policy{}).Decide(a, Operation{ID: "u", Kind: "mystery", Name: "x"}); d.Kind != DecisionDeny {
+		t.Fatalf("unknown kind: got %s want deny (%s)", d.Kind, d.Reason)
+	}
+}
