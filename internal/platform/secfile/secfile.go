@@ -2,13 +2,99 @@ package secfile
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 )
 
 var (
 	ErrUnsafePath      = errors.New("unsafe candidate path")
 	ErrDifferentDevice = errors.New("paths are on different filesystems")
+	ErrRootChanged     = errors.New("secure root changed during operation")
 )
+
+// Root is a validated project root. Its identity is captured when it is
+// opened and can be checked again before a multi-file operation commits.
+// Platform-specific secureOpen implementations enforce the per-entry rules.
+type Root struct {
+	path     string
+	identity string
+}
+
+// OpenRoot validates a directory without following a symlink at the root and
+// records a platform-provided file identity snapshot.
+func OpenRoot(path string) (Root, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return Root{}, err
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		return Root{}, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return Root{}, ErrUnsafePath
+	}
+	identity, err := rootIdentity(abs)
+	if err != nil {
+		return Root{}, err
+	}
+	return Root{path: filepath.Clean(abs), identity: identity}, nil
+}
+
+// Path returns the validated absolute root path.
+func (r Root) Path() string { return r.path }
+
+// Open opens a regular file relative to the validated root.
+func (r Root) Open(rel string) (*os.File, error) {
+	if r.path == "" {
+		return nil, ErrUnsafePath
+	}
+	return SecureOpen(r.path, rel)
+}
+
+// Stat opens and stats a regular file relative to the validated root.
+func (r Root) Stat(rel string) (os.FileInfo, error) {
+	f, err := r.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return f.Stat()
+}
+
+// Revalidate confirms that the root still refers to the same directory.
+func (r Root) Revalidate() error {
+	if r.path == "" || r.identity == "" {
+		return ErrUnsafePath
+	}
+	current, err := rootIdentity(r.path)
+	if err != nil {
+		return err
+	}
+	if current != r.identity {
+		return ErrRootChanged
+	}
+	return nil
+}
+
+// Close is present so callers can use Root with a future native directory
+// handle implementation. The current identity wrapper owns no descriptor.
+func (r Root) Close() error { return nil }
+
+func rootIdentity(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", ErrUnsafePath
+	}
+	// FileInfo.Sys carries the native inode/file-index data on the supported
+	// targets. Including the cleaned path prevents an unrelated directory with
+	// a reused native identity from being accepted as this root.
+	return fmt.Sprintf("%s|%#v", filepath.Clean(path), info.Sys()), nil
+}
 
 // SecureOpen opens rel under root with openat2 RESOLVE_BENEATH|NO_SYMLINKS
 // and O_NOFOLLOW, then rejects non-regular files.
