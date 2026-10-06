@@ -45,6 +45,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-e2e-deps
+      # userns 放开(等 s04 把同名步骤并入 setup-e2e-deps 后移除,见 build-and-test 同名步骤)
+      - name: Enable user namespaces for bwrap
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+          bwrap --die-with-parent --unshare-net --ro-bind / / true
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
