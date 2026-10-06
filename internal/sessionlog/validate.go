@@ -423,6 +423,14 @@ func checkHookReload(h HookReload) error {
 }
 
 func checkMCPReload(r MCPReload) error {
+	if r.Before < 0 || r.After < 0 {
+		return errors.New("mcp reload counts must be non-negative")
+	}
+	for _, rejection := range r.Rejections {
+		if len(rejection) > MaxMCPOutput {
+			return fmt.Errorf("mcp rejection exceeds %d bytes", MaxMCPOutput)
+		}
+	}
 	switch r.Trigger {
 	case "auto", "manual":
 	default:
@@ -432,6 +440,12 @@ func checkMCPReload(r MCPReload) error {
 }
 
 func checkMCPServer(s MCPServer) error {
+	if s.Name == "" || s.Source == "" {
+		return errors.New("mcp server event is missing name or source")
+	}
+	if s.ToolCount < 0 {
+		return errors.New("mcp server tool count must be non-negative")
+	}
 	switch s.State {
 	case "connected", "disconnected", "reload-failed":
 	default:

@@ -65,6 +65,11 @@ type ToolExecutorDeps struct {
 	// per-session inventory used by run-context injection. Nil makes load_skill
 	// unavailable; the nil behavior is defined by the M07-A tool dispatch.
 	SkillProvider SkillProvider
+	// MCP, when set, serves the M07-C MCP tool dispatch: direct
+	// mcp__<server>__<tool> calls, the mcp_call bridge and the tool_search
+	// index. Nil keeps all three entries on the plain unknown-tool path, so
+	// deployments without MCP stay unchanged.
+	MCP MCPCaller
 	// HookRunner runs optional pre/post tool-use hooks. A nil runner leaves
 	// existing tool execution behavior unchanged.
 	HookRunner HookRunner
@@ -174,6 +179,12 @@ func WithTodoProvider(provider TodoProvider) ToolExecutorOption {
 // the run-context skill inventory.
 func WithSkillProvider(provider SkillProvider) ToolExecutorOption {
 	return func(deps *ToolExecutorDeps) { deps.SkillProvider = provider }
+}
+
+// WithMCPCaller injects the MCP caller backing the mcp__ direct-call prefix,
+// the mcp_call bridge and tool_search.
+func WithMCPCaller(caller MCPCaller) ToolExecutorOption {
+	return func(deps *ToolExecutorDeps) { deps.MCP = caller }
 }
 
 // WithHookRunner injects the lifecycle hook runner for tool calls.

@@ -130,6 +130,61 @@ The skill body is returned as the tool result and its guidance applies to the co
 	},
 }
 
+// MCPCallSchema is the provider-facing schema of the mcp_call bridge tool.
+// It reaches dispatch-tier tools that are not exposed in the tool inventory:
+// the server/tool pair is resolved against the full MCP inventory (the pair
+// itself, the full "mcp__server__tool" name, or a unique bare tool name) and
+// the arguments are coerced against the target schema before the gated call.
+var MCPCallSchema = map[string]any{
+	"name": "mcp_call",
+	"description": `Call a tool on a connected MCP server by name. Use this for dispatch-tier tools that are not listed in your tool inventory; run tool_search first to discover them.
+
+- server: the MCP server providing the tool, and tool: the tool name on that server. The pair may also be given as the full "mcp__server__tool" name, or as a bare tool name when it is unique across servers.
+- arguments: the tool input object shaped after the target tool's input schema; it is corrected against the schema before the call.
+The call passes the same permission gate as direct MCP tool calls and may require user approval.`,
+	"input_schema": map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"server": map[string]any{
+				"type":        "string",
+				"description": "The MCP server that provides the tool.",
+			},
+			"tool": map[string]any{
+				"type":        "string",
+				"description": "The tool name on that server, exactly as reported by tool_search.",
+			},
+			"arguments": map[string]any{
+				"type":        "object",
+				"description": "The tool input object matching the target tool's input schema. Omit for tools without parameters.",
+			},
+		},
+		"required": []string{"server", "tool"},
+	},
+}
+
+// ToolSearchSchema is the provider-facing schema of the tool_search tool. It
+// is read-only: it lists the dispatch tier without calling anything and
+// constructs no permission operation.
+var ToolSearchSchema = map[string]any{
+	"name":        "tool_search",
+	"description": `Search the dispatch tier of the connected MCP servers for callable tools. Dispatch-tier tools do not appear in your tool inventory, so run this search when no listed tool fits the task, then invoke what you find with mcp_call or its full mcp__server__tool name. The search is read-only: it never executes a tool and needs no approval.`,
+	"input_schema": map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query": map[string]any{
+				"type":        "string",
+				"description": "Space-separated keywords, each matched as a substring against tool names and descriptions. An empty query lists every dispatch tool.",
+			},
+			"limit": map[string]any{
+				"type":        "integer",
+				"minimum":     1,
+				"maximum":     20,
+				"description": "Maximum number of tools to return. Defaults to 20, which is also the hard cap.",
+			},
+		},
+	},
+}
+
 // M06ToolSchemas returns the six M06 tool schemas in model-name order, ready
 // for the chatserve/runtime schema whitelists and executor dispatch tests.
 func M06ToolSchemas() []map[string]any {
@@ -153,4 +208,10 @@ func M06ToolSchemas() []map[string]any {
 // for the chatserve/runtime schema whitelists and executor dispatch tests.
 func SkillToolSchemas() []map[string]any {
 	return []map[string]any{LoadSkillSchema}
+}
+
+// MCPToolSchemas returns the two dispatch entry points in provider schema
+// form. Eager MCP schemas are appended by the host after connection setup.
+func MCPToolSchemas() []map[string]any {
+	return []map[string]any{MCPCallSchema, ToolSearchSchema}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -248,5 +249,60 @@ func TestPlanSinkSentinelErrors(t *testing.T) {
 	}
 	if PlanChoiceAuto != "auto" || PlanChoiceManual != "manual" {
 		t.Fatalf("plan choices = %q/%q, want auto/manual", PlanChoiceAuto, PlanChoiceManual)
+	}
+}
+
+func TestMCPCallSchemaShape(t *testing.T) {
+	if got, want := MCPCallSchema["name"], "mcp_call"; got != want {
+		t.Fatalf("name = %v, want %v", got, want)
+	}
+	description, _ := MCPCallSchema["description"].(string)
+	if !strings.Contains(description, "tool_search") {
+		t.Fatalf("description %q must explain the tool_search discovery flow", description)
+	}
+	input := schemaObject(t, MCPCallSchema, "input_schema")
+	if got, want := input["type"], "object"; got != want {
+		t.Fatalf("input type = %v, want %v", got, want)
+	}
+	if required := schemaStrings(t, input, "required"); !reflect.DeepEqual(required, []string{"server", "tool"}) {
+		t.Fatalf("required = %v, want [server tool]", required)
+	}
+	properties := schemaObject(t, input, "properties")
+	for _, field := range []string{"server", "tool"} {
+		if fieldSchema := schemaObject(t, properties, field); fieldSchema["type"] != "string" {
+			t.Fatalf("%s type = %v, want string", field, fieldSchema["type"])
+		}
+	}
+	arguments := schemaObject(t, properties, "arguments")
+	if got, want := arguments["type"], "object"; got != want {
+		t.Fatalf("arguments type = %v, want %v", got, want)
+	}
+	if _, optional := arguments["required"]; optional {
+		t.Fatal("arguments must stay optional")
+	}
+}
+
+func TestToolSearchSchemaShape(t *testing.T) {
+	if got, want := ToolSearchSchema["name"], "tool_search"; got != want {
+		t.Fatalf("name = %v, want %v", got, want)
+	}
+	description, _ := ToolSearchSchema["description"].(string)
+	if !strings.Contains(description, "read-only") {
+		t.Fatalf("description %q must document the read-only guarantee", description)
+	}
+	input := schemaObject(t, ToolSearchSchema, "input_schema")
+	if _, hasRequired := input["required"]; hasRequired {
+		t.Fatal("tool_search must have no required arguments")
+	}
+	properties := schemaObject(t, input, "properties")
+	if query := schemaObject(t, properties, "query"); query["type"] != "string" {
+		t.Fatalf("query type = %v, want string", query["type"])
+	}
+	limit := schemaObject(t, properties, "limit")
+	if got, want := limit["type"], "integer"; got != want {
+		t.Fatalf("limit type = %v, want %v", got, want)
+	}
+	if got, want := limit["maximum"], 20; got != want {
+		t.Fatalf("limit maximum = %v, want %v", got, want)
 	}
 }

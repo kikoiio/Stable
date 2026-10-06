@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"stable/internal/platform/secfile"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -629,8 +631,10 @@ const (
 	maxAskOptions   = 4
 )
 
-// executeHostTool serves the M06 host-side branches listed above and reports
-// handled=false for every tool the sandbox path should serve.
+// executeHostTool serves the M06 host-side branches and the M07-C MCP entries
+// listed above and reports handled=false for every tool the sandbox path
+// should serve. The MCP entries are wired only when an MCPCaller is injected;
+// otherwise they fall through so mapTool reports the plain unknown-tool error.
 func (e *toolRunExecutor) executeHostTool(ctx context.Context, call llm.ToolUse, args map[string]any) (agent.ToolOutcome, bool) {
 	outcome := agent.ToolOutcome{CallID: call.ID, ToolName: call.Name, Status: agent.ToolFailed, IsError: true}
 	switch call.Name {
@@ -642,9 +646,21 @@ func (e *toolRunExecutor) executeHostTool(ctx context.Context, call llm.ToolUse,
 		return e.executeTaskTool(call, args, outcome), true
 	case "load_skill":
 		return e.executeLoadSkill(ctx, call, args, outcome), true
+	case "mcp_call":
+		if e.deps.MCP != nil {
+			return e.executeMCPCall(ctx, call, args, outcome), true
+		}
+	case "tool_search":
+		if e.deps.MCP != nil {
+			return e.executeToolSearch(args, outcome), true
+		}
 	case "write_file", "edit_file":
 		if target, ok := e.planFileTarget(args); ok {
 			return e.executePlanFileWrite(ctx, call, args, target, outcome), true
+		}
+	default:
+		if strings.HasPrefix(call.Name, "mcp__") && e.deps.MCP != nil {
+			return e.executeMCPDirectCall(ctx, call, args, outcome), true
 		}
 	}
 	return outcome, false
@@ -1229,6 +1245,353 @@ func renderTask(task todo.Task) string {
 		fmt.Fprintf(&b, "\n  metadata: %s", strings.Join(pairs, ", "))
 	}
 	return b.String()
+}
+
+// ---------------------------------------------------------------------------
+// M07-C host-side MCP tool entries
+//
+// Direct mcp__<server>__<tool> calls, the mcp_call bridge and the read-only
+// tool_search index join the M06 host branches: they never touch the
+// filesystem or the sandbox helper, and they run behind the same pre-tool-use
+// hook and EventToolCall/EventToolResult pairing as every other tool. The MCP
+// dependency is optional — with no caller injected every entry falls through
+// to mapTool's unknown-tool error, keeping existing deployments unchanged.
+// ---------------------------------------------------------------------------
+
+// maxToolSearchResults caps one tool_search listing regardless of the
+// requested limit, so a broad query cannot flood the model context.
+const maxToolSearchResults = 20
+
+// toolSearchSchemaLimit bounds the rendered input_schema of one tool_search
+// entry: dispatch-tier schemas only need to be recognizable, not complete.
+const toolSearchSchemaLimit = 400
+
+// executeMCPDirectCall serves model-emitted mcp__<server>__<tool> calls. The
+// name is resolved through MCPCaller.ResolveTarget rather than a local split:
+// ResolveTarget is the single authority on target names (full name,
+// "server__tool" pair, unique bare suffix) and its failures already carry the
+// available-tool guidance, so this entry and the mcp_call bridge cannot
+// disagree about what a given name means.
+func (e *toolRunExecutor) executeMCPDirectCall(ctx context.Context, call llm.ToolUse, args map[string]any, outcome agent.ToolOutcome) agent.ToolOutcome {
+	server, tool, err := e.deps.MCP.ResolveTarget(call.Name)
+	if err != nil {
+		outcome.Content = "Error: " + err.Error()
+		return outcome
+	}
+	return e.executeMCPTarget(ctx, call, server, tool, args, outcome)
+}
+
+// executeMCPCall serves the mcp_call bridge: an explicit server/tool pair with
+// optional arguments, resolved against the full dispatch inventory. The gate
+// sees the resolved target, never the raw spelling, so approvals and saved
+// rules always bind to the normalized server__tool pair.
+func (e *toolRunExecutor) executeMCPCall(ctx context.Context, call llm.ToolUse, args map[string]any, outcome agent.ToolOutcome) agent.ToolOutcome {
+	server, _ := args["server"].(string)
+	tool, _ := args["tool"].(string)
+	server, tool = strings.TrimSpace(server), strings.TrimSpace(tool)
+	var query string
+	switch {
+	case server != "" && tool != "":
+		query = server + "__" + tool
+	case server != "":
+		// The model stuffed the whole target into one field; let the
+		// resolver make sense of it instead of guessing the split.
+		query = server
+	case tool != "":
+		query = tool
+	default:
+		outcome.Content = "Error: server and tool are required"
+		return outcome
+	}
+	resolvedServer, resolvedTool, err := e.deps.MCP.ResolveTarget(query)
+	if err != nil {
+		outcome.Content = "Error: " + err.Error()
+		return outcome
+	}
+	callArgs := map[string]any{}
+	if raw, present := args["arguments"]; present && raw != nil {
+		object, isObject := raw.(map[string]any)
+		if !isObject {
+			outcome.Content = "Error: arguments must be an object"
+			return outcome
+		}
+		callArgs = object
+	}
+	return e.executeMCPTarget(ctx, call, resolvedServer, resolvedTool, callArgs, outcome)
+}
+
+// executeMCPTarget runs one resolved MCP invocation: arguments are coerced
+// against the target input schema when the caller can supply it, the
+// permission gate arbitrates (ask flows through the same approval wait as the
+// sandbox path), and the result keeps the server's own error flag instead of
+// being prefixed locally.
+func (e *toolRunExecutor) executeMCPTarget(ctx context.Context, call llm.ToolUse, server, tool string, args map[string]any, outcome agent.ToolOutcome) agent.ToolOutcome {
+	if schema, ok := e.deps.MCP.InputSchema(server, tool); ok {
+		args = coerceMCPArguments(args, schema)
+	}
+	if e.deps.Gate == nil {
+		outcome.Content = "Error: permission gate unavailable"
+		return outcome
+	}
+	operation := permission.Operation{ID: call.ID, Kind: permission.OpMCPTool, Name: server, Target: server + "__" + tool}
+	decision, err := e.deps.Gate.Authorize(ctx, e.authority, operation)
+	if err != nil {
+		outcome.Content = "Error: permission authorization failed"
+		return outcome
+	}
+	if decision.Kind == permission.DecisionAsk {
+		if e.approvalObserver != nil {
+			e.approvalObserver()
+		}
+		decision, err = e.waitForApproval(ctx, operation)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				// Unlike the sandbox path this cannot abort the run from a
+				// host branch, and finish() below still pairs the logged
+				// tool_call event, so abortLoggedCall must not run here.
+				outcome.Content = "Error: run cancelled while awaiting approval"
+				return outcome
+			}
+			outcome.Content = "Error: approval unavailable"
+			return outcome
+		}
+	}
+	if decision.Kind != permission.DecisionAllow {
+		outcome.Status = agent.ToolDenied
+		outcome.Content = "Error: " + safeReason(decision.Reason, "operation denied")
+		return outcome
+	}
+	output, isError, callErr := e.deps.MCP.CallTool(ctx, server, tool, args)
+	if callErr != nil {
+		// Transport failures are host-side conditions; their text is safe and
+		// useful to surface verbatim.
+		outcome.Content = "Error: mcp tool call failed: " + callErr.Error()
+		return outcome
+	}
+	outcome.Status, outcome.IsError, outcome.Content = agent.ToolSucceeded, false, output
+	if isError {
+		outcome.Status = agent.ToolFailed
+		outcome.IsError = true
+	}
+	return outcome
+}
+
+// executeToolSearch serves the read-only dispatch-tier index. It never calls
+// a tool and constructs no permission operation, like ask_user and the task
+// tools. Keywords are matched case-insensitively against name and
+// description; an empty query lists everything, capped at
+// maxToolSearchResults with the remainder noted.
+func (e *toolRunExecutor) executeToolSearch(args map[string]any, outcome agent.ToolOutcome) agent.ToolOutcome {
+	query, _ := args["query"].(string)
+	query = strings.ToLower(strings.TrimSpace(query))
+	terms := strings.Fields(query)
+	limit := maxToolSearchResults
+	if raw, ok := args["limit"].(float64); ok && raw >= 1 {
+		limit = min(int(raw), maxToolSearchResults)
+	}
+	var matches []MCPToolSchema
+	for _, tool := range e.deps.MCP.DispatchTools() {
+		if matchesToolQuery(tool, terms) {
+			matches = append(matches, tool)
+		}
+	}
+	if len(matches) == 0 {
+		if query == "" {
+			outcome.Status, outcome.IsError, outcome.Content = agent.ToolSucceeded, false, "No dispatch tools are available on the connected MCP servers."
+			return outcome
+		}
+		outcome.Status, outcome.IsError, outcome.Content = agent.ToolSucceeded, false, fmt.Sprintf("No dispatch tools match %q. Try broader keywords, or search with an empty query to list everything.", query)
+		return outcome
+	}
+	shown := matches
+	if len(shown) > limit {
+		shown = shown[:limit]
+	}
+	var b strings.Builder
+	if query == "" {
+		fmt.Fprintf(&b, "Found %d dispatch tools", len(matches))
+	} else {
+		fmt.Fprintf(&b, "Found %d dispatch tools matching %q", len(matches), query)
+	}
+	if len(shown) < len(matches) {
+		fmt.Fprintf(&b, " (showing %d, %d more not listed — refine the query):", len(shown), len(matches)-len(shown))
+	} else {
+		b.WriteString(":")
+	}
+	for _, tool := range shown {
+		description := tool.Description
+		if description == "" {
+			description = "(no description)"
+		}
+		fmt.Fprintf(&b, "\n- %s: %s\n  schema: %s", tool.Name, description, truncateSchemaText(tool.InputSchema))
+	}
+	outcome.Status, outcome.IsError, outcome.Content = agent.ToolSucceeded, false, b.String()
+	return outcome
+}
+
+// matchesToolQuery reports whether every whitespace-separated keyword appears
+// in the tool's name or description (case-insensitive). An empty term list
+// matches everything.
+func matchesToolQuery(tool MCPToolSchema, terms []string) bool {
+	haystack := strings.ToLower(tool.Name + "\n" + tool.Description)
+	for _, term := range terms {
+		if !strings.Contains(haystack, term) {
+			return false
+		}
+	}
+	return true
+}
+
+// truncateSchemaText renders one input schema for the tool_search listing,
+// cut on a rune boundary when it would dominate the result.
+func truncateSchemaText(schema map[string]any) string {
+	if len(schema) == 0 {
+		return "{}"
+	}
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		return "{}"
+	}
+	text := string(encoded)
+	if runes := []rune(text); len(runes) > toolSearchSchemaLimit {
+		return string(runes[:toolSearchSchemaLimit]) + "...[truncated]"
+	}
+	return text
+}
+
+// MCP argument coercion mirrors internal/mcp.CoerceBySchema shape for shape so
+// the executor bridge and the SDK-side dispatch cannot produce different
+// arguments for the same call. internal/mcp imports the MCP SDK and this
+// package must not, so the rules are duplicated here on purpose; change
+// internal/mcp/coerce.go first, then re-derive this twin, keeping the
+// cross-language rule table intact.
+var (
+	mcpIntShape = regexp.MustCompile(`^[+-]?\d+$`)
+	mcpNumShape = regexp.MustCompile(`^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$`)
+)
+
+// coerceMCPArguments nudges model-written arguments toward the target input
+// schema (numbers for declared strings, numeric strings for declared numbers,
+// "true"/"false" for booleans, plus object/array recursion). Values that
+// cannot be corrected pass through untouched: the MCP server's own domain
+// error is more useful to the model than a local type error.
+func coerceMCPArguments(args map[string]any, schema map[string]any) map[string]any {
+	if args == nil {
+		return args
+	}
+	if fixed, ok := mcpCoerceValue(args, schema).(map[string]any); ok {
+		return fixed
+	}
+	return args
+}
+
+// mcpCoerceValue is the recursion core of coerceMCPArguments; the any signature
+// handles both nested schemas (properties, items) and nested values.
+func mcpCoerceValue(value any, schema any) any {
+	schemaMap, ok := schema.(map[string]any)
+	if !ok {
+		return value
+	}
+	want, _ := schemaMap["type"].(string)
+	if want == "object" {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return value
+		}
+		properties, _ := schemaMap["properties"].(map[string]any)
+		out := make(map[string]any, len(object))
+		for key, item := range object {
+			if sub, found := properties[key]; found {
+				out[key] = mcpCoerceValue(item, sub)
+			} else {
+				out[key] = item
+			}
+		}
+		return out
+	}
+	if want == "array" {
+		itemSchema := schemaMap["items"]
+		// Models often wrap arrays in a single-key object or join them into
+		// one comma-separated string.
+		if object, isObj := value.(map[string]any); isObj && len(object) == 1 {
+			for _, inner := range object {
+				if arr, isArr := inner.([]any); isArr {
+					value = arr
+				}
+			}
+		} else if text, isStr := value.(string); isStr {
+			parts := strings.Split(text, ",")
+			arr := make([]any, 0, len(parts))
+			for _, part := range parts {
+				if trimmed := strings.TrimSpace(part); trimmed != "" {
+					arr = append(arr, trimmed)
+				}
+			}
+			value = arr
+		}
+		if arr, isArr := value.([]any); isArr {
+			out := make([]any, len(arr))
+			for i, item := range arr {
+				out[i] = mcpCoerceValue(item, itemSchema)
+			}
+			return out
+		}
+		return value
+	}
+	if want != "" {
+		return mcpCoerceScalar(value, want)
+	}
+	return value
+}
+
+func mcpCoerceScalar(value any, want string) any {
+	switch want {
+	case "string":
+		// A bool must not silently become the text "true".
+		switch v := value.(type) {
+		case float64:
+			if v == float64(int64(v)) {
+				return strconv.FormatInt(int64(v), 10)
+			}
+			return strconv.FormatFloat(v, 'f', -1, 64)
+		case int:
+			return strconv.Itoa(v)
+		case int64:
+			return strconv.FormatInt(v, 10)
+		case json.Number:
+			return v.String()
+		}
+	case "integer":
+		if text, ok := value.(string); ok {
+			trimmed := strings.TrimSpace(text)
+			// "5.7" against integer is not truncated here; the MCP server
+			// reports its own domain error.
+			if mcpIntShape.MatchString(trimmed) {
+				if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+					return n
+				}
+			}
+		}
+	case "number":
+		if text, ok := value.(string); ok {
+			trimmed := strings.TrimSpace(text)
+			if mcpNumShape.MatchString(trimmed) {
+				if f, err := strconv.ParseFloat(trimmed, 64); err == nil {
+					return f
+				}
+			}
+		}
+	case "boolean":
+		if text, ok := value.(string); ok {
+			switch strings.ToLower(strings.TrimSpace(text)) {
+			case "true":
+				return true
+			case "false":
+				return false
+			}
+		}
+	}
+	return value
 }
 
 var _ agent.ExecutorFactory = ToolExecutorFactory{}

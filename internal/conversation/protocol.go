@@ -10,6 +10,7 @@ import (
 	"stable/internal/agent"
 	"stable/internal/candidate"
 	"stable/internal/core"
+	"stable/internal/mcp"
 	"stable/internal/permission"
 	"stable/internal/sessionlog"
 )
@@ -87,6 +88,8 @@ type ServerMsg struct {
 	SkillActivated []string               `json:"skill_activated,omitempty"`
 	HookList       *HookListMsg           `json:"hook_list,omitempty"`
 	HookReport     *HookReportMsg         `json:"hook_report,omitempty"`
+	MCPList        *MCPListMsg            `json:"mcp_list,omitempty"`
+	MCPReport      *MCPReportMsg          `json:"mcp_report,omitempty"`
 }
 
 // HookSummary is one loaded hook in the merged view.
@@ -110,6 +113,18 @@ type HookReportMsg struct {
 	After  int `json:"after"`
 }
 
+type MCPListMsg struct {
+	Servers    []mcp.ServerStatus `json:"servers"`
+	Rejections []string           `json:"rejections,omitempty"`
+}
+
+type MCPReportMsg struct {
+	Before     int      `json:"before"`
+	After      int      `json:"after"`
+	Rejections []string `json:"rejections,omitempty"`
+	Error      string   `json:"error,omitempty"`
+}
+
 // SkillReport kinds for the ServerMsg SkillReport payload.
 const (
 	SkillReportError  = "error"
@@ -131,7 +146,7 @@ type SkillReport struct {
 
 func validOp(op string) bool {
 	switch op {
-	case "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list", "hooks_list", "hooks_reload":
+	case "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list", "hooks_list", "hooks_reload", "mcp_list", "mcp_reload":
 		return true
 	}
 	return false
@@ -263,6 +278,10 @@ func validateClient(m ClientMsg) error {
 		}
 	case "skill_reload":
 		// The reload rescans the catalog service-wide; no fields required.
+	case "mcp_list", "mcp_reload":
+		if m.SessionID == "" {
+			return fmt.Errorf("op %s requires session_id", m.Op)
+		}
 	case "plan_resolve":
 		if m.SessionID == "" {
 			return fmt.Errorf("op plan_resolve requires session_id")

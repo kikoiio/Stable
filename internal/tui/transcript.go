@@ -260,6 +260,28 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 			part := &block{role: "Hooks 重载"}
 			fmt.Fprintf(&part.text, "%d → %d", reload.Before, reload.After)
 			blocks = append(blocks, part)
+		case sessionlog.EventMCPReload:
+			var reload sessionlog.MCPReload
+			if decodeEventData(e.Data, &reload) != nil {
+				continue
+			}
+			part := &block{role: "MCP 重载"}
+			fmt.Fprintf(&part.text, "%d → %d（%s）", reload.Before, reload.After, reload.Trigger)
+			if len(reload.Rejections) > 0 {
+				fmt.Fprintf(&part.text, "；跳过 %d 项", len(reload.Rejections))
+			}
+			blocks = append(blocks, part)
+		case sessionlog.EventMCPServer:
+			var server sessionlog.MCPServer
+			if decodeEventData(e.Data, &server) != nil {
+				continue
+			}
+			part := &block{role: "MCP 服务器"}
+			fmt.Fprintf(&part.text, "%s（%s·%s，工具:%d）", server.Name, server.Source, server.State, server.ToolCount)
+			if server.Error != "" {
+				part.text.WriteString("：" + server.Error)
+			}
+			blocks = append(blocks, part)
 		case sessionlog.EventRunEvent:
 			var run sessionlog.RunEvent
 			if decodeEventData(e.Data, &run) != nil {

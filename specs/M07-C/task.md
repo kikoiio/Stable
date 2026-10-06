@@ -1,6 +1,6 @@
 # M07-C MCP Tasks
 
-> 状态:待批准。依据已批准的 spec.md 与 plan.md(specs/M07-C/)。
+> 状态:已批准(2026-10-06)。依据已批准的 spec.md 与 plan.md(specs/M07-C/)。
 > 执行约定:并行子代理须遵守文件所有权边界(不同任务不同文件);启动批量编译/全量测试等重型操作前检查内存(free -h、/proc/pressure/memory)并与主代理协调;每个任务完成即运行其验证,先有证据再标记完成;每组逻辑相关任务完成后提交一次。执行环境:Ubuntu linux/amd64,go1.26.0;开发在 /home/neo/Projects/stable-m07c worktree(m07c 分支)。
 > 与 plan 的偏差记录:MCPCaller 接口增加 ResolveTarget 方法(目标解析与「未知工具」错误收敛到 Manager),使执行包无需引入 mcp 包(从而不引入 SDK),与 plan「执行包不见 SDK」决策一致。
 
