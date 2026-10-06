@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"stable/internal/platform/paths"
+	"stable/internal/platform/secfile"
 	"strconv"
 	"strings"
 )
@@ -63,13 +65,9 @@ func ConfigPath() (string, error) {
 	if p := os.Getenv("STABLE_CONFIG"); p != "" {
 		return filepath.Abs(p)
 	}
-	base := os.Getenv("XDG_CONFIG_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		base = filepath.Join(home, ".config")
+	base, err := paths.UserConfigHome()
+	if err != nil {
+		return "", err
 	}
 	return filepath.Join(base, "stable", "config.json"), nil
 }
@@ -79,13 +77,9 @@ func ConfigPath() (string, error) {
 // stable/skills. STABLE_CONFIG does not affect it: that variable relocates
 // only the config file itself, not the configuration directory tree.
 func UserSkillsDir() (string, error) {
-	base := os.Getenv("XDG_CONFIG_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		base = filepath.Join(home, ".config")
+	base, err := paths.UserConfigHome()
+	if err != nil {
+		return "", err
 	}
 	return filepath.Join(base, "stable", "skills"), nil
 }
@@ -104,15 +98,20 @@ func StateDir() (string, error) {
 	if p := os.Getenv("STABLE_STATE_DIR"); p != "" {
 		return filepath.Abs(p)
 	}
-	base := os.Getenv("XDG_STATE_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		base = filepath.Join(home, ".local", "state")
+	base, err := paths.UserStateHome()
+	if err != nil {
+		return "", err
 	}
 	return filepath.Join(base, "stable"), nil
+}
+
+// UserCommandsDir returns the user-level custom command directory.
+func UserCommandsDir() (string, error) {
+	base, err := paths.UserConfigHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "stable", "commands"), nil
 }
 
 func Load() (AppConfig, error) {
@@ -122,26 +121,19 @@ func Load() (AppConfig, error) {
 		return c, err
 	}
 	if st, err := os.Stat(p); err == nil {
-		if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
-			return c, errors.New("config file must be private (chmod 600)")
+		private, privateErr := secfile.IsPrivatePath(p)
+		if privateErr != nil {
+			return c, privateErr
 		}
-		owned, ownerErr := ownedByCurrentUser(st)
-		if ownerErr != nil {
-			return c, ownerErr
+		if !st.Mode().IsRegular() || !private {
+			return c, fmt.Errorf("config file must be private (%s)", secfile.FixHint("file"))
 		}
-		if st.Sys() != nil && !owned {
-			return c, errors.New("config file must be owned by current user")
+		dirPrivate, privateErr := secfile.IsPrivatePath(filepath.Dir(p))
+		if privateErr != nil {
+			return c, privateErr
 		}
-		dir, err := os.Stat(filepath.Dir(p))
-		if err != nil {
-			return c, err
-		}
-		dirOwned, ownerErr := ownedByCurrentUser(dir)
-		if ownerErr != nil {
-			return c, ownerErr
-		}
-		if dir.Mode().Perm()&0077 != 0 || !dirOwned {
-			return c, errors.New("config directory must be private and owned by current user (chmod 700)")
+		if !dirPrivate {
+			return c, fmt.Errorf("config directory must be private and owned by current user (%s)", secfile.FixHint("dir"))
 		}
 		data, err := os.ReadFile(p)
 		if err != nil {
@@ -265,14 +257,11 @@ func Init() (path string, created bool, err error) {
 		return "", false, err
 	}
 	dir := filepath.Dir(path)
-	if err = os.MkdirAll(dir, 0700); err != nil {
-		return "", false, err
-	}
-	if err = os.Chmod(dir, 0700); err != nil {
+	if err = secfile.MkdirAllPrivate(dir, 0700); err != nil {
 		return "", false, err
 	}
 	template := []byte("{\n  \"model\": {\n    \"provider\": \"openai\",\n    \"model\": \"YOUR_MODEL_ID\",\n    \"api_key\": \"YOUR_PRIVATE_KEY\"\n  }\n}\n")
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := secfile.OpenFilePrivate(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if errors.Is(err, os.ErrExist) {
 		return path, false, nil
 	}

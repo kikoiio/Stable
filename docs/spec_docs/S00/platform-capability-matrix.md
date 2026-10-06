@@ -16,11 +16,11 @@
 
 | 能力行 | Linux | macOS | Windows |
 |--------|-------|-------|---------|
-| C01 路径与安装布局 | 支持 | 未评估(计划评估) | 未评估(计划评估) |
-| C02 本机 IPC | 支持 | 未评估(计划评估) | 未评估(计划评估) |
-| C03 单实例锁 | 支持 | 未评估(计划评估) | 未评估(计划评估) |
-| C04 进程树托管 | 支持 | 未评估(计划评估) | 未评估(计划评估) |
-| C05 私密文件与安全存储 | 支持 | 未评估(计划评估) | 未评估(计划评估) |
+| C01 路径与安装布局 | 支持 | 待真实环境验证 | 待真实环境验证 |
+| C02 本机 IPC | 支持 | 待真实环境验证 | 待真实环境验证 |
+| C03 单实例锁 | 支持 | 待真实环境验证 | 待真实环境验证 |
+| C04 进程树托管 | 支持 | 降级(待真实环境验证) | 降级(待真实环境验证) |
+| C05 私密文件与安全存储 | 支持 | 待真实环境验证 | 待真实环境验证 |
 | C06 安全根目录访问 | 支持 | 未评估(计划评估) | 未评估(计划评估) |
 | C07 候选目录事务(原子验收) | 支持 | 未评估(计划评估) | 未评估(计划评估) |
 | C08 网络隔离(沙箱执行与网络授权) | 支持 | 未评估(计划评估) | 未评估(计划评估) |
@@ -473,5 +473,17 @@ S01 把操作系统依赖抽到 `internal/platform/{paths,ipc,lock,proc,secfile,
 | 6 处 `sandbox.LinuxManager{}`（含 `internal/dependency/service.go`） | 0；cmd/stable、chatserve、agentworker 注入 `sandbox.New()` |
 | `internal/appconfig/owner_unix.go` | `owner_linux.go` + `owner_other.go`（非 Linux Load fail-closed） |
 | `internal/store` 空白导入 go-sqlite3 | `driver_linux.go` / `driver_other.go`；非 Linux `Open` 返回明确 unsupported |
+
+## 8. S02 位置更新（保留 S00/S01 历史结论）
+
+S02 将 C01–C05 的跨平台实现接入 `internal/platform`，并完成 Linux 回归与三向编译。macOS/Windows 的真实 ACL、命名管道、锁、进程托管和启动恢复仍待真实平台验收，逐项操作记录于 `docs/spec_docs/S02/real-os-acceptance.md`。
+
+| 能力 | S02 实现位置 | 本机证据 |
+| --- | --- | --- |
+| C01 路径 | `internal/platform/paths/user_{linux,darwin,windows}.go`、`internal/appconfig/config.go` | paths/appconfig 单测；Windows/macOS `go build` |
+| C02 IPC | `internal/platform/ipc/ipc_unix.go`、`ipc_windows.go`、`pipe_name.go` | IPC 契约单测；三向编译 |
+| C03 锁 | `internal/platform/lock/lock_unix.go`、`lock_windows.go` | Linux runtime 测试；三向编译 |
+| C04 进程 | `internal/platform/proc/proc_{linux,darwin,windows}.go` | Linux runtime 测试；三向编译；非 Linux 为降级待验 |
+| C05 私密文件 | `internal/platform/secfile/private_{unix,windows}.go`、业务调用点 | secfile 权限单测、门禁、三向编译 |
 
 可运行验证路径同步：`go test ./internal/sandbox/...` 现为 `go test ./internal/platform/sandbox/...`。S01 回放（2026-10-06）：appconfig TestLoadAndValidate、store TestReconcile、platform/sandbox Bubblewrap/进程组/网络代理/Probe、conversation TestSessionProtocolClientLifecycle、candidate 全包、execution computer bridge、redact、workers/kicad 与 workers/computer unittest 均通过。`make platform-check` 与 `CGO_ENABLED=0 GOOS=windows/darwin go build ./...` 退出码 0。

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"stable/internal/platform/secfile"
 	"sync"
 	"time"
 )
@@ -148,12 +149,12 @@ func Append(root, id, typ string, data any) (Event, error) {
 		return Event{}, err
 	}
 	b = append(b, '\n')
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	f, err := secfile.OpenFilePrivate(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return Event{}, err
 	}
 	defer f.Close()
-	if err = f.Chmod(0600); err != nil {
+	if err = secfile.ChmodPrivate(f.Name(), 0600); err != nil {
 		return Event{}, err
 	}
 	info, err := f.Stat()

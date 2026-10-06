@@ -1,4 +1,4 @@
-//go:build linux
+//go:build unix
 
 package ipc
 
@@ -6,6 +6,8 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"stable/internal/platform/secfile"
 )
 
 func listenPrivate(path string, removeStale bool) (net.Listener, error) {
@@ -18,7 +20,7 @@ func listenPrivate(path string, removeStale bool) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = os.Chmod(path, 0600); err != nil {
+	if err = secfile.ChmodPrivate(path, 0600); err != nil {
 		listener.Close()
 		_ = os.Remove(path)
 		return nil, err

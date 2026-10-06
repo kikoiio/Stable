@@ -24,12 +24,15 @@ func Doctor(c appconfig.AppConfig, p paths.Paths) []Check {
 		st, err := os.Stat(path)
 		checks = append(checks, Check{Name: name, OK: err == nil && st.Mode().IsRegular(), Detail: path})
 	}
-	for _, name := range []string{"python3", "kicad-cli", "kicad", "eeschema", "Xvfb", "xvfb-run", "xprop", "xwininfo", "import"} {
+	for _, name := range doctorTools {
 		path, err := exec.LookPath(name)
 		if err != nil {
 			path = "install system package providing " + name
 		}
 		checks = append(checks, Check{Name: name, OK: err == nil, Detail: path})
+	}
+	for _, capability := range doctorCapabilities {
+		checks = append(checks, Check{Name: capability.Name, OK: capability.OK, Detail: capability.Detail})
 	}
 	addr := fmt.Sprintf("127.0.0.1:%d", c.TemporalPort)
 	conn, err := net.DialTimeout("tcp", addr, 200000000)

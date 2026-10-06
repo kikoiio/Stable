@@ -32,7 +32,7 @@ type KicadERCChecker struct {
 // available (the same source workers/kicad uses).
 func seedKicadConfig(runRoot string) error {
 	config := filepath.Join(runRoot, ".kicad-config", "kicad", "9.0")
-	if err := os.MkdirAll(config, 0700); err != nil {
+	if err := secfile.MkdirAllPrivate(config, 0700); err != nil {
 		return err
 	}
 	for _, name := range []string{"sym-lib-table", "fp-lib-table"} {
@@ -87,17 +87,17 @@ func (k KicadERCChecker) Check(ctx context.Context, c Candidate) (Finding, error
 		return Finding{}, errors.New("candidate ID is unsafe for checker output")
 	}
 	baseRunRoot := filepath.Join(runRoot, c.ID)
-	if err = os.MkdirAll(baseRunRoot, 0700); err != nil {
+	if err = secfile.MkdirAllPrivate(baseRunRoot, 0700); err != nil {
 		return Finding{}, err
 	}
-	if err = os.Chmod(baseRunRoot, 0700); err != nil {
+	if err = secfile.ChmodPrivate(baseRunRoot, 0700); err != nil {
 		return Finding{}, err
 	}
 	runRoot, err = os.MkdirTemp(baseRunRoot, "check-")
 	if err != nil {
 		return Finding{}, err
 	}
-	if err = os.Chmod(runRoot, 0700); err != nil {
+	if err = secfile.ChmodPrivate(runRoot, 0700); err != nil {
 		return Finding{}, err
 	}
 	timeout := k.Timeout

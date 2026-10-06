@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"stable/internal/platform/secfile"
 )
 
 type limitedBuffer struct {
@@ -78,7 +80,7 @@ func (m LinuxManager) run(ctx context.Context, p SandboxProfile, argv []string, 
 		if err != nil {
 			return SandboxResult{}, fmt.Errorf("create private proxy directory: %w", err)
 		}
-		if err = os.Chmod(proxyDir, 0700); err != nil {
+		if err = secfile.ChmodPrivate(proxyDir, 0700); err != nil {
 			return SandboxResult{}, err
 		}
 		socketPath := filepath.Join(proxyDir, "proxy.sock")

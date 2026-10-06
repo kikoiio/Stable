@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"stable/internal/platform/secfile"
 	"strings"
 	"time"
 
@@ -91,7 +92,7 @@ func (s *Store) Snapshot(ctx context.Context, goalID, path string) (core.Artifac
 		tmp.Close()
 		return out, err
 	}
-	if err = tmp.Chmod(0444); err != nil {
+	if err = secfile.ChmodPrivate(tmp.Name(), 0444); err != nil {
 		tmp.Close()
 		return out, err
 	}

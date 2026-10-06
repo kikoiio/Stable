@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"stable/internal/platform/secfile"
 	"strings"
 )
 
@@ -71,7 +72,7 @@ func SessionPath(root, id string) (string, error) {
 			return "", errors.New("session path must be a regular file")
 		}
 		if st.Mode().Perm()&0077 != 0 {
-			if err = os.Chmod(path, 0600); err != nil {
+			if err = secfile.ChmodPrivate(path, 0600); err != nil {
 				return "", fmt.Errorf("secure session file permissions: %w", err)
 			}
 		}

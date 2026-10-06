@@ -67,7 +67,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		p, err := paths.Resolve(c)
+		p, err := paths.Resolve(c.StateDir)
 		if err != nil {
 			return err
 		}
@@ -124,7 +124,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	p, err := paths.Resolve(c)
+	p, err := paths.Resolve(c.StateDir)
 	if err != nil {
 		return err
 	}

@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
 	"stable/internal/core"
+	"stable/internal/platform/secfile"
 )
 
 // CapabilityCaller is the subset of the KiCad bridge used to describe check
@@ -41,7 +41,7 @@ func (c KiCadCollector) Collect(ctx context.Context, goal core.Goal) ([]core.Dep
 	// candidate and run roots only give the isolated process private scratch.
 	scratch := filepath.Join(runRoot, ".stable-runs", "dependencies-"+goal.ID)
 	for _, dir := range []string{filepath.Join(scratch, "candidate"), filepath.Join(scratch, "run")} {
-		if err := os.MkdirAll(dir, 0700); err != nil {
+		if err := secfile.MkdirAllPrivate(dir, 0700); err != nil {
 			return nil, err
 		}
 	}

@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"stable/internal/platform/paths"
 	"stable/internal/platform/proc"
@@ -80,5 +79,5 @@ func terminateIf(pid int, wantPrefix string) bool {
 	if err != nil {
 		return false
 	}
-	return process.Signal(syscall.SIGTERM) == nil
+	return proc.Terminate(process) == nil
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"stable/internal/platform/secfile"
 	"strings"
 	"sync"
 	"time"
@@ -784,7 +785,7 @@ func writePlanFileAtomic(path string, data []byte) error {
 			_ = os.Remove(tmpName)
 		}
 	}()
-	if err = tmp.Chmod(0600); err != nil {
+	if err = secfile.ChmodPrivate(tmp.Name(), 0600); err != nil {
 		_ = tmp.Close()
 		return err
 	}

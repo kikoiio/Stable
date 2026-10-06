@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"stable/internal/platform/secfile"
 	"strings"
 	"sync"
 	"time"
@@ -173,12 +174,12 @@ func appendLine(path string, entry Entry) error {
 		return err
 	}
 	b = append(b, '\n')
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	f, err := secfile.OpenFilePrivate(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if err = f.Chmod(0600); err != nil {
+	if err = secfile.ChmodPrivate(f.Name(), 0600); err != nil {
 		return err
 	}
 	info, err := f.Stat()
@@ -200,7 +201,7 @@ func appendLine(path string, entry Entry) error {
 
 func rewriteFile(path string, entries []Entry) error {
 	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	f, err := secfile.OpenFilePrivate(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
@@ -217,7 +218,7 @@ func rewriteFile(path string, entries []Entry) error {
 			return err
 		}
 	}
-	if err = f.Chmod(0600); err != nil {
+	if err = secfile.ChmodPrivate(f.Name(), 0600); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
 		return err

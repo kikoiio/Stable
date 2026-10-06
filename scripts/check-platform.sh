@@ -11,14 +11,17 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 # Collect .go files under internal/ and cmd/, excluding platform adapters and
-# files whose first build constraint is linux or !linux.
+# files whose first build constraint is a platform adapter.
 mapfile -t files < <(find internal cmd -name '*.go' -print | sort)
 for f in "${files[@]}"; do
+	case "$f" in
+	*_test.go) continue ;;
+	esac
 	case "$f" in
 	internal/platform/*) continue ;;
 	esac
 	head="$(head -n 8 "$f")"
-	if grep -qE '^//go:build (linux|!linux)\b' <<<"$head"; then
+	if grep -qE '^//go:build (linux|!linux|unix|darwin|windows)([[:space:]]|$)' <<<"$head"; then
 		continue
 	fi
 	# unix import / runtime.GOOS / syscall. usage
@@ -34,6 +37,11 @@ for f in "${files[@]}"; do
 			cat "$tmp/bad"
 			fail=1
 		fi
+	fi
+	if grep -nE 'os\.Chmod\(|\.Chmod\(' "$f" >"$tmp/hits"; then
+		echo "private chmod outside secfile in $f:"
+		cat "$tmp/hits"
+		fail=1
 	fi
 done
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"stable/internal/platform/secfile"
 	"strings"
 )
 
@@ -18,10 +19,10 @@ func Prepare(root string) (string, error) {
 			return "", errors.New("session directory path must not contain symlinks")
 		}
 	}
-	if err = os.MkdirAll(dir, 0700); err != nil {
+	if err = secfile.MkdirAllPrivate(dir, 0700); err != nil {
 		return "", err
 	}
-	if err = os.Chmod(dir, 0700); err != nil {
+	if err = secfile.ChmodPrivate(dir, 0700); err != nil {
 		return "", err
 	}
 	if err = ignoreInGit(root); err != nil {
@@ -49,7 +50,7 @@ func ignoreInGit(root string) error {
 			return nil
 		}
 	}
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	f, err := secfile.OpenFilePrivate(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}

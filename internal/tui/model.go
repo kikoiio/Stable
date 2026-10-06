@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -235,11 +234,11 @@ func userSkillsDir() string {
 // userCommandsDir returns the user-level custom command directory; an
 // unavailable home directory simply contributes no user commands.
 func userCommandsDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
+	dir, err := appconfig.UserCommandsDir()
+	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".config", "stable", "commands")
+	return dir
 }
 
 // refreshCommands rebuilds the registry from the fixed built-in set, the
@@ -457,7 +456,12 @@ func registerBuiltins(host *commandHost, registry *commands.Registry) {
 			fmt.Fprintf(&b, "\n- /%s — %s（来源：%s）", s.Meta.Name, s.Meta.Description, s.Source)
 		}
 		if len(list) == 0 {
-			b.WriteString("\n（无）\n提示：把技能放到项目的 .stable/skills/<名称>/SKILL.md 或用户级 ~/.config/stable/skills/<名称>/SKILL.md。")
+			userDir := userSkillsDir()
+			b.WriteString("\n（无）\n提示：把技能放到项目的 .stable/skills/<名称>/SKILL.md")
+			if userDir != "" {
+				b.WriteString(" 或用户级 " + filepath.Join(userDir, "<名称>", "SKILL.md"))
+			}
+			b.WriteString("。")
 		}
 		m.Events = append(m.Events, sessionlog.Event{Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "系统", Text: b.String(), Kind: "text"}})
 		m.Transcript.SetEvents(m.Events)
@@ -742,7 +746,11 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 			if x.HookList != nil {
 				var b strings.Builder
 				if len(x.HookList.Hooks) == 0 {
-					b.WriteString("（无 hook）\n提示：把 hooks.yaml 放到项目的 .stable/hooks.yaml 或用户级 ~/.config/stable/hooks.yaml。")
+					b.WriteString("（无 hook）\n提示：把 hooks.yaml 放到项目的 .stable/hooks.yaml")
+					if dir, err := appconfig.UserHooksPath(); err == nil {
+						b.WriteString(" 或用户级 " + dir)
+					}
+					b.WriteString("。")
 				}
 				for _, h := range x.HookList.Hooks {
 					fmt.Fprintf(&b, "%s  %s  %s  来源:%s", h.ID, h.Event, h.Action, h.Source)

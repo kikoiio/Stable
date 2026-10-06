@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"stable/internal/appconfig"
+	"stable/internal/platform/secfile"
 )
 
 type Paths struct {
@@ -13,7 +13,8 @@ type Paths struct {
 	Socket, ChatSocket, Lock, SupervisorLog, TemporalLog, WorkerLog, ChatLog string
 }
 
-func Resolve(c appconfig.AppConfig) (Paths, error) {
+// Resolve derives install and state layout paths from the absolute state directory.
+func Resolve(stateDir string) (Paths, error) {
 	var p Paths
 	exe, err := os.Executable()
 	if err != nil {
@@ -27,7 +28,7 @@ func Resolve(c appconfig.AppConfig) (Paths, error) {
 	p.Root = filepath.Dir(p.Bin)
 	p.Libexec = filepath.Join(p.Root, "libexec")
 	p.Share = filepath.Join(p.Root, "share")
-	p.State, err = filepath.Abs(c.StateDir)
+	p.State, err = filepath.Abs(stateDir)
 	if err != nil {
 		return p, err
 	}
@@ -47,7 +48,7 @@ func Resolve(c appconfig.AppConfig) (Paths, error) {
 	return p, nil
 }
 
-func (p Paths) Prepare() error { return os.MkdirAll(p.Goals, 0700) }
+func (p Paths) Prepare() error { return secfile.MkdirAllPrivate(p.Goals, 0700) }
 
 func (p Paths) HelperBinary(name string) string {
 	return filepath.Join(p.Libexec, name+exeSuffix)

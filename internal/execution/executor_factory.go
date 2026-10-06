@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
+	"stable/internal/platform/secfile"
 	"time"
 
 	"stable/internal/agent"
@@ -226,14 +226,14 @@ func (f ToolExecutorFactory) ForRun(request agent.ExecutionRequest) (agent.RunEx
 		authority.FormalRoot = authority.AllowedRoot
 	}
 	runRoot := filepath.Join(filepath.Dir(authority.CandidateRoot), ".stable-runs", request.RunID)
-	if err = os.MkdirAll(runRoot, 0700); err != nil {
+	if err = secfile.MkdirAllPrivate(runRoot, 0700); err != nil {
 		return nil, err
 	}
 	runRoot, err = filepath.Abs(runRoot)
 	if err != nil {
 		return nil, err
 	}
-	if err = os.Chmod(runRoot, 0700); err != nil {
+	if err = secfile.ChmodPrivate(runRoot, 0700); err != nil {
 		return nil, err
 	}
 	return &toolRunExecutor{deps: f.deps, request: request, authority: authority, runRoot: runRoot}, nil

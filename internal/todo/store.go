@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"stable/internal/platform/secfile"
 	"strings"
 
 	"stable/internal/redact"
@@ -96,11 +97,11 @@ func (s *Store) Save(tasks []Task) ([]Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	f, err := secfile.OpenFilePrivate(s.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, err
 	}
-	if err = f.Chmod(0600); err != nil {
+	if err = secfile.ChmodPrivate(f.Name(), 0600); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
@@ -162,13 +163,13 @@ func ensureTasksDir(path string) error {
 	if st, err := os.Lstat(dir); err == nil && st.Mode()&os.ModeSymlink != 0 {
 		return errors.New("tasks directory must not be a symlink")
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := secfile.MkdirAllPrivate(dir, 0700); err != nil {
 		return err
 	}
-	if err := os.Chmod(stable, 0700); err != nil {
+	if err := secfile.ChmodPrivate(stable, 0700); err != nil {
 		return err
 	}
-	if err := os.Chmod(dir, 0700); err != nil {
+	if err := secfile.ChmodPrivate(dir, 0700); err != nil {
 		return err
 	}
 	return nil

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"stable/internal/platform/secfile"
 	"strings"
 	"sync"
 	"time"
@@ -73,10 +74,10 @@ func NewSnapshotStore(projectRoot string, maxBytes int64, maxManifests int, cred
 	}
 	root := filepath.Join(resolved, ".stable", "candidate-snapshots")
 	for _, dir := range []string{root, filepath.Join(root, "blobs"), filepath.Join(root, "manifests")} {
-		if err = os.MkdirAll(dir, 0700); err != nil {
+		if err = secfile.MkdirAllPrivate(dir, 0700); err != nil {
 			return nil, err
 		}
-		if err = os.Chmod(dir, 0700); err != nil {
+		if err = secfile.ChmodPrivate(dir, 0700); err != nil {
 			return nil, err
 		}
 	}
@@ -228,7 +229,7 @@ func (s *SnapshotStore) Materialize(snap FileSnapshot, stagingDir string) error 
 			return fmt.Errorf("snapshot entry escapes staging: %w", err)
 		}
 		dst := filepath.Join(stagingDir, rel)
-		if err = os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
+		if err = secfile.MkdirAllPrivate(filepath.Dir(dst), 0700); err != nil {
 			return err
 		}
 		if err = copyBlob(s.blobPath(entry.Digest), dst, os.FileMode(entry.Mode)); err != nil {
@@ -296,6 +297,11 @@ func (s *SnapshotStore) writeBlobLocked(candidateRoot string, entry ManifestEntr
 	if err != nil {
 		return err
 	}
+	if err = secfile.ChmodPrivate(tmp.Name(), 0600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return err
+	}
 	h := sha256.New()
 	_, copyErr := io.Copy(io.MultiWriter(tmp, h), in)
 	syncErr := tmp.Sync()
@@ -314,7 +320,7 @@ func (s *SnapshotStore) writeBlobLocked(candidateRoot string, entry ManifestEntr
 		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("candidate file %s changed while snapshotting", entry.Path)
 	}
-	if err = os.Chmod(tmp.Name(), 0600); err != nil {
+	if err = secfile.ChmodPrivate(tmp.Name(), 0600); err != nil {
 		_ = os.Remove(tmp.Name())
 		return err
 	}
@@ -323,10 +329,10 @@ func (s *SnapshotStore) writeBlobLocked(candidateRoot string, entry ManifestEntr
 
 func (s *SnapshotStore) writeManifestLocked(snap FileSnapshot) error {
 	dir := filepath.Join(s.root, "manifests", snap.CandidateID)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := secfile.MkdirAllPrivate(dir, 0700); err != nil {
 		return err
 	}
-	if err := os.Chmod(dir, 0700); err != nil {
+	if err := secfile.ChmodPrivate(dir, 0700); err != nil {
 		return err
 	}
 	raw, err := json.Marshal(snap)
@@ -351,7 +357,7 @@ func (s *SnapshotStore) writeManifestLocked(snap FileSnapshot) error {
 		_ = os.Remove(tmp.Name())
 		return err
 	}
-	if err = os.Chmod(tmp.Name(), 0600); err != nil {
+	if err = secfile.ChmodPrivate(tmp.Name(), 0600); err != nil {
 		_ = os.Remove(tmp.Name())
 		return err
 	}

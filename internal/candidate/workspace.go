@@ -133,7 +133,7 @@ func CreateCandidate(id, formalRoot, candidatesParent string) (Candidate, error)
 	if err != nil {
 		return Candidate{}, err
 	}
-	if err := os.MkdirAll(candidatesParent, 0700); err != nil {
+	if err := secfile.MkdirAllPrivate(candidatesParent, 0700); err != nil {
 		return Candidate{}, err
 	}
 	resolvedParent, err := filepath.EvalSymlinks(candidatesParent)
@@ -167,7 +167,7 @@ func CreateCandidate(id, formalRoot, candidatesParent string) (Candidate, error)
 		return Candidate{}, err
 	}
 	rootMode := uint32(rootInfo.Mode().Perm())
-	if err = os.Chmod(target, os.FileMode(rootMode)); err != nil {
+	if err = secfile.ChmodPrivate(target, os.FileMode(rootMode)); err != nil {
 		return Candidate{}, err
 	}
 	rollback := true
@@ -178,7 +178,7 @@ func CreateCandidate(id, formalRoot, candidatesParent string) (Candidate, error)
 	}()
 	for _, e := range base {
 		dst := filepath.Join(target, e.Path)
-		if err = os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
+		if err = secfile.MkdirAllPrivate(filepath.Dir(dst), 0700); err != nil {
 			return Candidate{}, err
 		}
 		if err = copyFile(formalRoot, e.Path, dst, os.FileMode(e.Mode)); err != nil {

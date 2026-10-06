@@ -1,10 +1,12 @@
-//go:build linux
+//go:build linux || darwin
 
 package lock
 
 import (
 	"os"
 	"syscall"
+
+	"stable/internal/platform/secfile"
 )
 
 type fileGuard struct {
@@ -12,7 +14,7 @@ type fileGuard struct {
 }
 
 func tryAcquire(path string) (Guard, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	file, err := secfile.OpenFilePrivate(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
