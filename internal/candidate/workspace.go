@@ -46,17 +46,11 @@ func CleanRelative(path string) (string, error) {
 }
 
 func BuildManifest(root string) ([]ManifestEntry, string, error) {
-	root, err := filepath.Abs(root)
+	secureRoot, err := secfile.OpenRoot(root)
 	if err != nil {
 		return nil, "", err
 	}
-	rootInfo, err := os.Lstat(root)
-	if err != nil {
-		return nil, "", err
-	}
-	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
-		return nil, "", ErrUnsafePath
-	}
+	root = secureRoot.Path()
 	entries := make([]ManifestEntry, 0)
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -90,7 +84,7 @@ func BuildManifest(root string) ([]ManifestEntry, string, error) {
 		if info.IsDir() {
 			return nil
 		}
-		f, err := secureOpen(root, rel)
+		f, err := secureRoot.Open(rel)
 		if err != nil {
 			return err
 		}
@@ -109,6 +103,9 @@ func BuildManifest(root string) ([]ManifestEntry, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	if err := secureRoot.Revalidate(); err != nil {
+		return nil, "", err
+	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
 	h := sha256.New()
 	for _, e := range entries {
@@ -121,14 +118,11 @@ func CreateCandidate(id, formalRoot, candidatesParent string) (Candidate, error)
 	if id == "" || id == "." || id == ".." || filepath.Base(id) != id || strings.ContainsAny(id, "/\\") {
 		return Candidate{}, errors.New("candidate ID is required")
 	}
-	formalRoot, err := filepath.Abs(formalRoot)
+	formal, err := secfile.OpenRoot(formalRoot)
 	if err != nil {
 		return Candidate{}, err
 	}
-	formalRoot, err = filepath.EvalSymlinks(formalRoot)
-	if err != nil {
-		return Candidate{}, err
-	}
+	formalRoot = formal.Path()
 	candidatesParent, err = filepath.Abs(candidatesParent)
 	if err != nil {
 		return Candidate{}, err
@@ -136,20 +130,16 @@ func CreateCandidate(id, formalRoot, candidatesParent string) (Candidate, error)
 	if err := secfile.MkdirAllPrivate(candidatesParent, 0700); err != nil {
 		return Candidate{}, err
 	}
-	resolvedParent, err := filepath.EvalSymlinks(candidatesParent)
-	if err != nil {
-		return Candidate{}, err
+	if _, err = secfile.OpenRoot(candidatesParent); err != nil {
+		return Candidate{}, fmt.Errorf("candidate parent is unsafe: %w", err)
 	}
-	if filepath.Clean(resolvedParent) != filepath.Clean(candidatesParent) {
-		return Candidate{}, fmt.Errorf("candidate parent must not traverse a symlink")
-	}
-	if err = secfile.SameDevice(formalRoot, candidatesParent); err != nil {
+	if err = secfile.SameVolume(formalRoot, candidatesParent); err != nil {
 		if errors.Is(err, secfile.ErrDifferentDevice) {
 			return Candidate{}, errors.New("candidate must be created on the formal project's filesystem")
 		}
 		return Candidate{}, err
 	}
-	base, digest, err := BuildManifest(formalRoot)
+	base, digest, err := BuildManifest(formal.Path())
 	if err != nil {
 		return Candidate{}, err
 	}
@@ -181,7 +171,7 @@ func CreateCandidate(id, formalRoot, candidatesParent string) (Candidate, error)
 		if err = secfile.MkdirAllPrivate(filepath.Dir(dst), 0700); err != nil {
 			return Candidate{}, err
 		}
-		if err = copyFile(formalRoot, e.Path, dst, os.FileMode(e.Mode)); err != nil {
+		if err = copyFile(formal, e.Path, dst, os.FileMode(e.Mode)); err != nil {
 			return Candidate{}, err
 		}
 	}
@@ -222,8 +212,8 @@ func secureOpen(root, rel string) (*os.File, error) {
 	return file, nil
 }
 
-func copyFile(root, rel, dst string, mode os.FileMode) error {
-	in, err := secureOpen(root, rel)
+func copyFile(root secfile.Root, rel, dst string, mode os.FileMode) error {
+	in, err := root.Open(rel)
 	if err != nil {
 		return err
 	}

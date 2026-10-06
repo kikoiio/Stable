@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !darwin && !windows
 
 package secfile
 
@@ -20,5 +20,9 @@ func exchange(string, string) error {
 }
 
 func sameDevice(string, string) error {
-	return errors.New("secfile: device identity checks are only supported on Linux")
+	return ErrUnsupported
+}
+
+func moveDirectory(string, string, bool) error {
+	return ErrUnsupported
 }

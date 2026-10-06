@@ -2,7 +2,6 @@ package secfile
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -11,6 +10,7 @@ var (
 	ErrUnsafePath      = errors.New("unsafe candidate path")
 	ErrDifferentDevice = errors.New("paths are on different filesystems")
 	ErrRootChanged     = errors.New("secure root changed during operation")
+	ErrUnsupported     = errors.New("secure file operation is unsupported on this platform")
 )
 
 // Root is a validated project root. Its identity is captured when it is
@@ -18,8 +18,15 @@ var (
 // Platform-specific secureOpen implementations enforce the per-entry rules.
 type Root struct {
 	path     string
-	identity string
+	identity rootIdentitySnapshot
 }
+
+type rootIdentitySnapshot struct {
+	file      os.FileInfo
+	signature string
+}
+
+func (r rootIdentitySnapshot) empty() bool { return r.file == nil && r.signature == "" }
 
 // OpenRoot validates a directory without following a symlink at the root and
 // records a platform-provided file identity snapshot.
@@ -35,7 +42,7 @@ func OpenRoot(path string) (Root, error) {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return Root{}, ErrUnsafePath
 	}
-	identity, err := rootIdentity(abs)
+	identity, err := captureRootIdentity(abs)
 	if err != nil {
 		return Root{}, err
 	}
@@ -65,14 +72,14 @@ func (r Root) Stat(rel string) (os.FileInfo, error) {
 
 // Revalidate confirms that the root still refers to the same directory.
 func (r Root) Revalidate() error {
-	if r.path == "" || r.identity == "" {
+	if r.path == "" || r.identity.empty() {
 		return ErrUnsafePath
 	}
-	current, err := rootIdentity(r.path)
+	current, err := captureRootIdentity(r.path)
 	if err != nil {
 		return err
 	}
-	if current != r.identity {
+	if !sameRootIdentity(r.identity, current) {
 		return ErrRootChanged
 	}
 	return nil
@@ -81,20 +88,6 @@ func (r Root) Revalidate() error {
 // Close is present so callers can use Root with a future native directory
 // handle implementation. The current identity wrapper owns no descriptor.
 func (r Root) Close() error { return nil }
-
-func rootIdentity(path string) (string, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", err
-	}
-	if !info.IsDir() {
-		return "", ErrUnsafePath
-	}
-	// FileInfo.Sys carries the native inode/file-index data on the supported
-	// targets. Including the cleaned path prevents an unrelated directory with
-	// a reused native identity from being accepted as this root.
-	return fmt.Sprintf("%s|%#v", filepath.Clean(path), info.Sys()), nil
-}
 
 // SecureOpen opens rel under root with openat2 RESOLVE_BENEATH|NO_SYMLINKS
 // and O_NOFOLLOW, then rejects non-regular files.
@@ -115,6 +108,19 @@ func Exchange(dirA, dirB string) error {
 // SameDevice reports an error when pathA and pathB are on different devices.
 func SameDevice(pathA, pathB string) error {
 	return sameDevice(pathA, pathB)
+}
+
+// SameVolume is the platform-neutral name for the same-device check. The
+// older SameDevice name remains available to existing callers.
+func SameVolume(pathA, pathB string) error { return sameDevice(pathA, pathB) }
+
+// ExchangeDirectories swaps two directories when the platform provides an
+// atomic exchange primitive.
+func ExchangeDirectories(pathA, pathB string) error { return exchange(pathA, pathB) }
+
+// MoveDirectory performs one checked directory move for journaled recovery.
+func MoveDirectory(pathA, pathB string, replace bool) error {
+	return moveDirectory(pathA, pathB, replace)
 }
 
 // MkdirAllPrivate creates path and every missing parent with the given mode,
