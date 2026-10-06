@@ -21,15 +21,15 @@
 
 ## 需求对照(spec AC1–AC9 逐条)
 
-- [ ] AC1 两级发现与合并、非法条目跳过可见、/mcp 列表一致(验证:e2e 场景① + LoadMerge 单测)
-- [ ] AC2 自动全连、探测超时回退、失败跳过隔离、关闭无残留(验证:Manager 单测 + discover 回退单测 + e2e 场景②)
-- [ ] AC3 eager 直调、dispatch 查询+调用、强制覆盖、命名归一与覆盖语义(验证:strategy/sanitize 单测 + e2e 场景④)
-- [ ] AC4 hook 拦截、默认 ask/批准/拒绝、参数强转、未知工具指引(验证:execution/permission 单测 + e2e 场景③④)
-- [ ] AC5 连接失败/调用失败/未知工具三形态互不混淆(验证:e2e 场景②④ 断言三种错误文案)
-- [ ] AC6 instructions 首轮注入一次,无 instructions 不注入(验证:e2e 场景⑤ + conversation 单测)
-- [ ] AC7 mtime 自动生效、/mcp reload 报告、事件投影、主配置其余键不热生效(验证:e2e 场景⑥ + Manager 单测)
-- [ ] AC8 http hook 请求到达/头展开/响应回流/超时可区分/on_error(验证:e2e 场景⑦ + hooks 单测)
-- [ ] AC9 超限与异常跳过截断有报告、不崩溃、事件重启投影一致(验证:e2e 场景⑧ + 超限单测)
+- [x] AC1 两级发现与合并、非法条目跳过可见、/mcp 列表一致(验证:LoadMerge 矩阵与 M07C service e2e)
+- [x] AC2 自动全连、探测超时回退、失败跳过隔离、关闭无残留(验证:Manager/ discover_timeout 单测与失败隔离 e2e)
+- [x] AC3 eager 直调、dispatch 查询+调用、强制覆盖、命名归一与覆盖语义(验证:strategy/sanitize 单测与 dispatch e2e)
+- [x] AC4 hook 拦截、默认 ask/批准/拒绝、参数强转、未知工具指引(验证:execution/permission 单测与 dispatch/unknown e2e)
+- [x] AC5 连接失败/调用失败/未知工具三形态互不混淆(验证:failure isolation/unknown e2e 与 execution 错误矩阵)
+- [x] AC6 instructions 首轮注入一次,无 instructions 不注入(验证:service e2e 同会话两轮断言)
+- [x] AC7 mtime 自动生效、/mcp reload 报告、事件投影、主配置其余键不热生效(验证:mtime 增删 e2e 与 Manager 单测)
+- [x] AC8 http hook 请求到达/头展开/响应回流/超时可区分/on_error(验证:hooks httptest 矩阵)
+- [ ] AC9 超限与异常跳过截断有报告、不崩溃、事件重启投影一致(配置/输出上限、失败隔离、sessionlog 投影已验证；完整进程重启场景仍未覆盖)
 
 ## 编译与测试
 
@@ -39,12 +39,12 @@
 
 ## 端到端场景
 
-- [ ] 场景 1(全链路):当前 e2e 已验证真实 stdio、eager 直调、/mcp 列表/重载和事件投影；dispatch、hook 拦截与审批路径由 execution/hooks 单测覆盖，尚未合并为单一端到端场景。
-- [ ] 场景 2(热更新):差分 `Reload`、mtime 检测和 Runner schema 同步已实现，但尚未有覆盖增/删/改及重启回放的完整 e2e。
+- [x] 场景 1(全链路):service e2e 覆盖真实 stdio、eager 直调、dispatch 查询/调用、未知目标、instructions 去重、/mcp 列表/重载和事件投影；hook/审批顺序由 execution 单测覆盖。
+- [ ] 场景 2(热更新):e2e 已覆盖项目配置增删、mtime 自动刷新、Runner schema 同步和手动 reload 事件；重启后回放仍由 sessionlog 单测覆盖，尚未做完整进程重启场景。
 - [x] 场景 3(http hook):`internal/hooks/http_action_test.go` 的 httptest 矩阵覆盖请求、响应、截断、超时和 `on_error`。
-- [ ] 场景 4(失败链):单元测试覆盖调用失败与未知工具；秒退 fixture 的完整服务 e2e 尚未加入。
+- [x] 场景 4(失败链):失败服务器隔离、健康服务器继续调用、未知工具指引均由 service e2e 验证；调用/传输错误由 execution 单测验证。
 - [x] 场景 5(回归保障):无 MCP 时 manager 注入为空时执行路径保持未知工具，schema 组装保留既有清单；全量回归测试通过。
 
 ## 覆盖边界
 
-当前保留未勾选的端到端场景是测试覆盖缺口，不表示实现已失败。实现级测试、全量测试、跨平台编译和 M07C 薄包装均已通过；后续若需要发布级验收，应补齐场景 1、2、4 的组合式 e2e。
+当前仅保留场景 2 的“完整进程重启后回放”作为未覆盖项；其余实现级测试、组合式 service e2e、全量测试、跨平台编译和 M07C 薄包装均已通过。

@@ -50,6 +50,7 @@ type m06Agent struct {
 	mu      sync.Mutex
 	calls   int
 	seen    [][]llm.Message
+	tools   [][]llm.ToolSchema
 	respond func(call int, req llm.Request) []llm.Event
 }
 
@@ -58,6 +59,7 @@ func (p *m06Agent) Stream(_ context.Context, request llm.Request) (<-chan llm.Ev
 	p.calls++
 	call := p.calls
 	p.seen = append(p.seen, append([]llm.Message(nil), request.Messages...))
+	p.tools = append(p.tools, append([]llm.ToolSchema(nil), request.Tools...))
 	respond := p.respond
 	p.mu.Unlock()
 	events := []llm.Event{
@@ -88,6 +90,7 @@ func (p *m06Agent) reset() {
 	defer p.mu.Unlock()
 	p.calls = 0
 	p.seen = nil
+	p.tools = nil
 }
 
 func (p *m06Agent) roundCount() int {
@@ -104,6 +107,15 @@ func (p *m06Agent) roundMessages(call int) []llm.Message {
 		return nil
 	}
 	return p.seen[call-1]
+}
+
+func (p *m06Agent) roundTools(call int) []llm.ToolSchema {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if call < 1 || call > len(p.tools) {
+		return nil
+	}
+	return append([]llm.ToolSchema(nil), p.tools[call-1]...)
 }
 
 func m06TextRound(text string) []llm.Event {
