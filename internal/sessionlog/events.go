@@ -89,6 +89,8 @@ const (
 	EventSkillInvoked   = "skill_invoked"
 	EventHookFired      = "hook_fired"
 	EventHookReload     = "hook_reload"
+	EventMCPReload      = "mcp_reload"
+	EventMCPServer      = "mcp_server"
 )
 
 // SnapshotRef records a candidate file snapshot owned by this session.
@@ -264,6 +266,32 @@ type HookFired struct {
 type HookReload struct {
 	Before int `json:"before"`
 	After  int `json:"after"`
+}
+
+// MCPReload records an MCP configuration reload. Trigger is "auto" or
+// "manual". Rejections lists the server names the reload refused to apply.
+type MCPReload struct {
+	Before     int      `json:"before"`
+	After      int      `json:"after"`
+	Rejections []string `json:"rejections,omitempty"`
+	Trigger    string   `json:"trigger"`
+}
+
+// MaxMCPOutput bounds the size of the free-form text one MCP event may
+// carry, mirroring MaxHookOutput. Writers truncate to this limit before
+// appending.
+const MaxMCPOutput = 8 * 1024
+
+// MCPServer records one MCP server state transition. State is one of
+// "connected", "disconnected", or "reload-failed". Error carries the
+// failure diagnostic for reload-failed, truncated to MaxMCPOutput by the
+// writer.
+type MCPServer struct {
+	Name      string `json:"name"`
+	Source    string `json:"source"`
+	State     string `json:"state"`
+	Error     string `json:"error,omitempty"`
+	ToolCount int    `json:"tool_count"`
 }
 
 type RunStarted struct {
