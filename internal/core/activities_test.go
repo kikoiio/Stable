@@ -16,6 +16,7 @@ import (
 
 	"stable/internal/agent"
 	"stable/internal/artifact"
+	"stable/internal/candidate"
 	"stable/internal/conversation"
 	"stable/internal/core"
 	"stable/internal/llm"
@@ -1024,6 +1025,96 @@ func TestPendingReverificationPassSkipsModel(t *testing.T) {
 		if e.InvalidatedReason != "" {
 			t.Fatalf("current evidence invalidated: %+v", e)
 		}
+	}
+}
+
+func TestAcceptedCandidateRequiresIndependentGoalReverification(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	formalRoot := filepath.Join(root, "project")
+	if err := os.Mkdir(formalRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	artifactPath := filepath.Join(formalRoot, "design.txt")
+	if err := os.WriteFile(artifactPath, []byte("original design"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := artifact.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactID, err := artifacts.Digest(ctx, artifactPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.Open(filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	_, err = state.CreateGoal(ctx, core.Goal{
+		ID: "g", Objective: "reverify accepted candidate", AllowedRoot: formalRoot,
+		ArtifactPath: artifactPath, CurrentArtifactID: artifactID,
+		Criteria: []core.Criterion{ercCriteria("erc", 0)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependencies := []core.DependencySnapshot{
+		{SchemaVersion: 1, Family: core.CheckFamilyERC, CheckerID: "kicad-cli-erc", CheckerVersion: "9.0.4", Fingerprint: "fixture-erc-v1", Available: true},
+		{SchemaVersion: 1, Family: core.CheckFamilyConnection, CheckerID: "sensor-connection-check", CheckerVersion: "1", Fingerprint: "fixture-connection-v1", Available: true},
+	}
+	if _, err = state.ReconcileDependencies(ctx, "g", dependencies); err != nil {
+		t.Fatal(err)
+	}
+	checker := &verifyKicad{path: artifactPath, present: false}
+	activities := &core.Activities{State: state, Artifacts: artifacts, Kicad: checker.caller(ctx), Refresher: &fixtureRefresher{state: state, snapshots: dependencies}}
+	projectCandidate, err := candidate.CreateCandidate("accepted-reverification-candidate", formalRoot, filepath.Join(filepath.Dir(formalRoot), "candidates"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectCandidate.CandidateRoot, filepath.Base(artifactPath)), []byte("accepted candidate design"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	projectCandidate, err = candidate.FreezeCandidate(projectCandidate, nil, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := candidate.BuildReview(ctx, projectCandidate, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectCandidate.Status = "reviewed"
+	if err := state.SaveCandidate(ctx, store.CandidateRecord{Candidate: projectCandidate, ActionID: "accepted-reverification-action", GoalID: "g"}); err != nil {
+		t.Fatal(err)
+	}
+	decision := candidate.AcceptanceDecision{
+		ID: "accepted-reverification-decision", UserID: "fixture-user", CandidateID: projectCandidate.ID,
+		CandidateDigest: review.CandidateDigest, PreviewDigest: review.Digest, FormalDigest: review.FormalDigest,
+		Mode: candidate.AcceptNormal,
+	}
+	if _, err := candidate.AcceptCandidate(ctx, projectCandidate, review, decision, "g", "", state, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := state.GetGoalSnapshot(ctx, "g")
+	if err != nil || accepted.Goal.Status != core.GoalPendingReverification {
+		t.Fatalf("acceptance skipped independent reverification: goal=%+v err=%v", accepted.Goal, err)
+	}
+
+	activities.Decider = deciderFunc(func(context.Context, core.DecisionContext) (core.ProposedAction, error) {
+		t.Fatal("passing independent verification unexpectedly called the model")
+		return core.ProposedAction{}, nil
+	})
+	done, err := activities.EvaluateGoal(ctx, "g", "accepted-candidate-reverification")
+	if err != nil || !done {
+		t.Fatalf("independent goal evaluation done=%v err=%v", done, err)
+	}
+	verified, err := state.GetGoalSnapshot(ctx, "g")
+	if err != nil || verified.Goal.Status != core.GoalVerified {
+		t.Fatalf("goal became %q after passing independent check: %v", verified.Goal.Status, err)
+	}
+	if checker.calls != 1 {
+		t.Fatalf("independent checker ran %d times, want once", checker.calls)
 	}
 }
 
