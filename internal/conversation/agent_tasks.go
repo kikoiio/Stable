@@ -374,9 +374,16 @@ func (c *AgentTaskCoordinator) CancelParent(sessionID, runID string) {
 }
 func (c *AgentTaskCoordinator) Close() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	pending := make([]<-chan struct{}, 0, len(c.active))
 	for _, state := range c.active {
 		state.cancel()
+		pending = append(pending, state.done)
+	}
+	c.mu.Unlock()
+	// The workspace manager closes after this method returns. Wait until each
+	// runner has stopped and its writer lease has been settled first.
+	for _, done := range pending {
+		<-done
 	}
 }
 func (s *Service) getAgentTask(sessionID, id string) (agent.AgentTaskSnapshot, error) {
