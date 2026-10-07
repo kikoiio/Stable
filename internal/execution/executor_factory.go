@@ -236,6 +236,12 @@ func (f ToolExecutorFactory) ForRun(request agent.ExecutionRequest) (agent.RunEx
 	if authority.FormalRoot == "" {
 		authority.FormalRoot = authority.AllowedRoot
 	}
+	deps := f.deps
+	if authority.ReadOnly {
+		// Temporary print sessions live under the caller's project directory,
+		// while the long-lived service itself is installed elsewhere.
+		deps.SessionRoot = authority.AllowedRoot
+	}
 	runRoot := filepath.Join(filepath.Dir(authority.CandidateRoot), ".stable-runs", request.RunID)
 	if err = secfile.MkdirAllPrivate(runRoot, 0700); err != nil {
 		return nil, err
@@ -247,5 +253,5 @@ func (f ToolExecutorFactory) ForRun(request agent.ExecutionRequest) (agent.RunEx
 	if err = secfile.ChmodPrivate(runRoot, 0700); err != nil {
 		return nil, err
 	}
-	return &toolRunExecutor{deps: f.deps, request: request, authority: authority, runRoot: runRoot}, nil
+	return &toolRunExecutor{deps: deps, request: request, authority: authority, runRoot: runRoot}, nil
 }

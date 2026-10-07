@@ -90,12 +90,16 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 			return e.finish(outcome, started), nil
 		}
 	}
+	if e.authority.ReadOnly && call.Name != "read_file" && call.Name != "glob" && call.Name != "grep" {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: tool is not allowed in a read-only session"
+		return e.finish(outcome, started), nil
+	}
 	if e.deps.SessionRoot != "" {
 		if _, logErr := sessionlog.Append(e.deps.SessionRoot, e.request.Work.SessionID, sessionlog.EventToolCall, sessionlog.ToolCall{CallID: call.ID, Name: call.Name, Input: redactJSON(args, e.deps.ProviderCredential)}); logErr != nil {
 			return outcome, fmt.Errorf("record tool call: %w", logErr)
 		}
 	}
-	if e.deps.HookRunner != nil {
+	if !e.authority.ReadOnly && e.deps.HookRunner != nil {
 		rejected, hookID, message := e.deps.HookRunner.PreToolUse(e.request.Work.SessionID, call.Name, args)
 		if rejected {
 			outcome.Status = agent.ToolDenied
@@ -149,6 +153,10 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		return e.finish(outcome, started), nil
 	}
 	if decision.Kind == permission.DecisionAsk {
+		if e.authority.ReadOnly {
+			outcome.Status, outcome.Content = agent.ToolDenied, "Error: read operation requires interactive approval"
+			return e.finish(outcome, started), nil
+		}
 		if e.approvalObserver != nil {
 			e.approvalObserver()
 		}

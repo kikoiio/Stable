@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"stable/internal/core"
 )
@@ -357,6 +359,25 @@ func TestEventPersistenceAndDeduplication(t *testing.T) {
 	}
 	if err = s.SetEventStatus(ctx, "event-1", "signaled"); err == nil {
 		t.Fatal("event moved backward")
+	}
+}
+
+func TestRecentGoalEventsReturnsBoundedNewestEvents(t *testing.T) {
+	s, _ := newGoalStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC()
+	for i := 1; i <= 3; i++ {
+		_, _, err := s.InsertEventIfAbsent(ctx, core.Event{ID: fmt.Sprintf("recent-%d", i), GoalID: "goal-1", Kind: fmt.Sprintf("kind-%d", i), ReceivedAt: base.Add(time.Duration(i) * time.Second)})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := s.RecentGoalEvents(ctx, "goal-1", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].ID != "recent-3" || events[1].ID != "recent-2" {
+		t.Fatalf("recent events = %+v", events)
 	}
 }
 

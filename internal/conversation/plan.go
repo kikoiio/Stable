@@ -375,6 +375,9 @@ func (s *Service) broadcastPlanApproval(sessionID string, msg ServerMsg) {
 		if sub.sessionID != sessionID {
 			continue
 		}
+		if sub.remoteRoot != "" && s.remoteRoots[sessionID] != sub.remoteRoot {
+			continue
+		}
 		select {
 		case ch <- msg:
 		default:

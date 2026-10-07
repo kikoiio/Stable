@@ -106,14 +106,15 @@ func (s *Service) appendMCPReload(sessionID string, beforeCount int, trigger str
 	rejections := s.mcp.Rejections()
 	s.eventMu.Lock()
 	defer s.eventMu.Unlock()
-	_, err := sessionlog.Append(s.deps.ProjectRoot, sessionID, sessionlog.EventMCPReload, sessionlog.MCPReload{
+	root := s.sessionProjectRoot(sessionID)
+	_, err := sessionlog.Append(root, sessionID, sessionlog.EventMCPReload, sessionlog.MCPReload{
 		Before: beforeCount, After: len(statuses), Rejections: rejections, Trigger: trigger,
 	})
 	if err != nil {
 		return err
 	}
 	for _, status := range statuses {
-		if _, err = sessionlog.Append(s.deps.ProjectRoot, sessionID, sessionlog.EventMCPServer, sessionlog.MCPServer{
+		if _, err = sessionlog.Append(root, sessionID, sessionlog.EventMCPServer, sessionlog.MCPServer{
 			Name: status.Name, Source: status.Source, State: status.State, Error: status.Error, ToolCount: status.ToolCount,
 		}); err != nil {
 			return err

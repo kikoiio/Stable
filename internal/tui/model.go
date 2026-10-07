@@ -40,39 +40,41 @@ const (
 )
 
 type Model struct {
-	Socket, Root        string
-	Width, Height       int
-	Panel               Panel // retained as an internal compatibility cursor for pre-M01 tests
-	Sessions            []sessionlog.SessionInfo
-	ActiveSession       string
-	Events              []sessionlog.Event
-	Goals               []core.Goal
-	SelectedGoal        int
-	Proposals           []core.CriteriaProposal
-	SelectedProposal    int
-	Composer            Composer
-	Mode                InputMode
-	Navigation          NavigationState
-	Transcript          Transcript
-	Layout              LayoutMetrics
-	Candidates          []CompletionItem
-	CandidateIndex      int
-	Pending             bool
-	Status              string
-	Review              *candidate.Review
-	ReviewCandidate     string
-	ReviewConfirmed     map[string]bool
-	ReviewCursor        int
-	ReviewSnapshots     []sessionlog.SnapshotRef
-	RewindPick          bool
-	RewindCursor        int
-	RewindArmed         bool
-	Questions           []sessionlog.PendingQuestion
-	SearchHits          []sessionlog.SearchHit
-	SearchCorrupt       []sessionlog.SearchError
-	Approvals           []permission.ApprovalPrompt
-	SelectedApproval    int
-	approvalPollStarted bool
+	Socket, Root         string
+	Width, Height        int
+	Panel                Panel // retained as an internal compatibility cursor for pre-M01 tests
+	Sessions             []sessionlog.SessionInfo
+	ActiveSession        string
+	Events               []sessionlog.Event
+	Goals                []core.Goal
+	SelectedGoal         int
+	Proposals            []core.CriteriaProposal
+	SelectedProposal     int
+	Composer             Composer
+	Mode                 InputMode
+	Navigation           NavigationState
+	Transcript           Transcript
+	Layout               LayoutMetrics
+	Candidates           []CompletionItem
+	CandidateIndex       int
+	Pending              bool
+	Status               string
+	Review               *candidate.Review
+	ReviewCandidate      string
+	ReviewConfirmed      map[string]bool
+	ReviewCursor         int
+	ReviewSnapshots      []sessionlog.SnapshotRef
+	RewindPick           bool
+	RewindCursor         int
+	RewindArmed          bool
+	Questions            []sessionlog.PendingQuestion
+	SearchHits           []sessionlog.SearchHit
+	SearchCorrupt        []sessionlog.SearchError
+	Approvals            []permission.ApprovalPrompt
+	SelectedApproval     int
+	RemoteAccessRequests []conversation.RemoteAccessRequest
+	SelectedRemoteAccess int
+	approvalPollStarted  bool
 	// Plan is the session plan-mode runtime state restored by session_load
 	// and refreshed by plan_state pushes; it only feeds the status line.
 	Plan              *conversation.PlanState
@@ -142,9 +144,14 @@ type runStreamMsg struct {
 	err     error
 }
 type approvalPollTick time.Time
+type remoteAccessPollTick time.Time
 
 func approvalPollCmd() tea.Cmd {
 	return tea.Tick(2*time.Second, func(now time.Time) tea.Msg { return approvalPollTick(now) })
+}
+
+func remoteAccessPollCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(now time.Time) tea.Msg { return remoteAccessPollTick(now) })
 }
 
 func openRunCmd(socket string, request agent.ExecutionRequest) tea.Cmd {
@@ -514,7 +521,10 @@ func renderHelp(cmds []*commands.Command) string {
 	return b.String()
 }
 func (m Model) Init() tea.Cmd {
-	return requestCmd(m.Socket, conversation.ClientMsg{Op: "session_list", ProjectRoot: m.Root})
+	return tea.Batch(
+		requestCmd(m.Socket, conversation.ClientMsg{Op: "session_list", ProjectRoot: m.Root}),
+		remoteAccessPollCmd(),
+	)
 }
 func requestCmd(socket string, req conversation.ClientMsg) tea.Cmd {
 	return func() tea.Msg {
@@ -536,6 +546,7 @@ const (
 	DialogPlan
 	DialogReview
 	DialogProposal
+	DialogRemoteAccess
 )
 
 // pendingDialog returns the dialog that should claim the keyboard and the
@@ -545,6 +556,9 @@ const (
 // and the View render short-circuit through this function, so closing the
 // top layer automatically drops the next one into place.
 func (m Model) pendingDialog() DialogKind {
+	if len(m.RemoteAccessRequests) > 0 {
+		return DialogRemoteAccess
+	}
 	if len(m.Approvals) > 0 {
 		return DialogApproval
 	}
@@ -574,6 +588,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, approvalPollCmd()
 		}
 		return m, tea.Batch(requestCmd(m.Socket, conversation.ClientMsg{Op: "approval_list", SessionID: m.ActiveSession}), approvalPollCmd())
+	case remoteAccessPollTick:
+		return m, tea.Batch(requestCmd(m.Socket, conversation.ClientMsg{Op: "remote_access_list"}), remoteAccessPollCmd())
 	case resultMsg:
 		return m.handleResult(v)
 	case runStreamStartedMsg:
@@ -659,6 +675,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (AC7): closing or resolving the top layer drops the next one into
 		// place on the following key.
 		switch m.pendingDialog() {
+		case DialogRemoteAccess:
+			return m.handleRemoteAccessKey(v)
 		case DialogApproval:
 			return m.handleApprovalKey(v)
 		case DialogQuestion:
@@ -867,6 +885,13 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 			if x.Approval != nil {
 				m.upsertApproval(*x.Approval)
 			}
+		case "remote_access_requests":
+			m.RemoteAccessRequests = append([]conversation.RemoteAccessRequest(nil), x.RemoteAccessRequests...)
+			if m.SelectedRemoteAccess >= len(m.RemoteAccessRequests) {
+				m.SelectedRemoteAccess = max(0, len(m.RemoteAccessRequests)-1)
+			}
+		case "remote_access_resolve":
+			m.Status = "远程目录访问决定已提交。"
 		case "sessions":
 			m.Sessions = x.Sessions
 			m.Goals = x.Goals
@@ -1822,6 +1847,8 @@ func (m Model) View() string {
 	// The same decision queue that owns the keyboard owns the view: the
 	// highest-priority pending dialog renders in place of the chat view.
 	switch m.pendingDialog() {
+	case DialogRemoteAccess:
+		return renderRemoteAccessDialog(m.RemoteAccessRequests, m.SelectedRemoteAccess, m.Width)
 	case DialogApproval:
 		return renderApprovalDialog(m.Approvals, m.SelectedApproval, m.Width)
 	case DialogQuestion:

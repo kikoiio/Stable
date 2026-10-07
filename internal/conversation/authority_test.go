@@ -54,6 +54,29 @@ func TestAuthorityConstruction(t *testing.T) {
 	}
 }
 
+func TestEphemeralSessionBuildsReadOnlyAuthority(t *testing.T) {
+	project := t.TempDir()
+	session, err := sessionlog.CreateEphemeral(project, "print")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := agent.ExecutionRequest{RunID: "run-print", Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: session.ID}, Intent: "inspect"}
+	authority, err := BuildAuthority(context.Background(), nil, project, request, permission.ModeBypass, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.ReadOnly {
+		t.Fatal("ephemeral session did not produce read-only authority")
+	}
+	request.PermissionBounds = []byte(`{"read_only":false}`)
+	// BuildAuthority derives the flag from the session log and ignores the
+	// client-provided execution bounds entirely.
+	authority, err = BuildAuthority(context.Background(), nil, project, request, permission.ModeBypass, "")
+	if err != nil || !authority.ReadOnly {
+		t.Fatalf("authority=%+v err=%v", authority, err)
+	}
+}
+
 func sessionlogPrepareDir(path string) error { return os.MkdirAll(path, 0700) }
 func coreGoal(id, root, session string) core.Goal {
 	return core.Goal{ID: id, Objective: "goal", AllowedRoot: root, SourceSessionID: session}

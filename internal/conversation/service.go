@@ -56,12 +56,20 @@ type Deps struct {
 // events. Client connections are thin terminals; all state lives here and in
 // the store.
 type Service struct {
-	deps              Deps
-	ln                net.Listener
-	mu                sync.Mutex
-	clients           map[chan ServerMsg]*clientSubscription
-	statuses          map[string]core.GoalStatus
-	activeRuns        map[string]string
+	deps       Deps
+	ln         net.Listener
+	mu         sync.Mutex
+	clients    map[chan ServerMsg]*clientSubscription
+	statuses   map[string]core.GoalStatus
+	activeRuns map[string]string
+	// ephemeralRoots binds short-lived sessions to the project root explicitly
+	// selected by the local print client. The binding is service-only and is
+	// discarded with the session.
+	ephemeralRoots map[string]string
+	// remoteRoots binds ordinary sessions opened through an approved remote
+	// connection to the grant's canonical project root.
+	remoteRoots       map[string]string
+	remoteAccess      *RemoteAccessRegistry
 	notifiedApprovals map[string]bool
 	eventMu           sync.Mutex
 	// askMu guards the per-session count of runs blocked inside the question
@@ -98,6 +106,7 @@ type clientSubscription struct {
 	ch            chan ServerMsg
 	sessionID     string
 	runID         string
+	remoteRoot    string
 	pendingCursor uint64
 }
 
@@ -109,7 +118,7 @@ func Serve(ctx context.Context, deps Deps) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{deps: deps, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks, mcp: deps.MCP, mcpInstructions: map[string]bool{}}
+	s := &Service{deps: deps, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, ephemeralRoots: map[string]string{}, remoteRoots: map[string]string{}, remoteAccess: NewRemoteAccessRegistry(), notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks, mcp: deps.MCP, mcpInstructions: map[string]bool{}}
 	if deps.Skills != nil {
 		deps.Skills.Bind(s)
 	}
@@ -119,7 +128,7 @@ func Serve(ctx context.Context, deps Deps) (*Service, error) {
 	go s.pollGoals(ctx)
 	go func() {
 		<-ctx.Done()
-		ln.Close()
+		_ = s.Close()
 	}()
 	go s.acceptLoop(ctx)
 	return s, nil
@@ -138,7 +147,12 @@ func (s *Service) acceptLoop(ctx context.Context) {
 	}
 }
 
-func (s *Service) Close() error { return s.ln.Close() }
+func (s *Service) Close() error {
+	if s.remoteAccess != nil {
+		s.remoteAccess.Close()
+	}
+	return s.ln.Close()
+}
 
 func (s *Service) serveConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
@@ -178,6 +192,34 @@ func (s *Service) readLoop(ctx context.Context, conn net.Conn, updates chan Serv
 			updates <- ServerMsg{Type: "done"}
 			continue
 		}
+		if s.handleRemoteAccessMessage(ctx, c, updates) {
+			continue
+		}
+		remoteRoot := ""
+		if c.RemoteConnectionID != "" {
+			var err error
+			remoteRoot, err = s.authorizeRemoteMessage(&c)
+			if err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+				updates <- ServerMsg{Type: "done"}
+				continue
+			}
+			s.mu.Lock()
+			if sub := s.clients[updates]; sub != nil {
+				if sub.remoteRoot != "" && sub.remoteRoot != remoteRoot {
+					s.mu.Unlock()
+					updates <- ServerMsg{Type: "error", Error: "remote connection cannot change its approved project directory"}
+					updates <- ServerMsg{Type: "done"}
+					continue
+				}
+				sub.remoteRoot = remoteRoot
+			}
+			s.mu.Unlock()
+		} else if c.RemoteGrantID != "" {
+			updates <- ServerMsg{Type: "error", Error: "remote grant is valid only on an approved remote connection"}
+			updates <- ServerMsg{Type: "done"}
+			continue
+		}
 		switch c.Op {
 		case "run_start":
 			if err := s.startRun(ctx, c, updates); err != nil {
@@ -205,6 +247,17 @@ func (s *Service) readLoop(ctx context.Context, conn net.Conn, updates chan Serv
 			} else {
 				updates <- ServerMsg{Type: "done", RunID: c.RunID}
 			}
+			continue
+		case "session_discard":
+			messages, err := s.handle(ctx, c)
+			if err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			} else {
+				for _, message := range messages {
+					updates <- message
+				}
+			}
+			updates <- ServerMsg{Type: "done"}
 			continue
 		case "review_get":
 			review, err := s.reviewCandidate(ctx, c.CandidateID, c.SessionID)
@@ -298,8 +351,19 @@ func (s *Service) readLoop(ctx context.Context, conn net.Conn, updates chan Serv
 			s.mu.Unlock()
 		}
 		msgs, err := s.handle(ctx, c)
+		if err == nil && c.RemoteConnectionID != "" && (c.Op == "session_create" || c.Op == "session_load") {
+			s.bindRemoteSession(c.SessionID, remoteRoot)
+			if c.Op == "session_create" && len(msgs) > 0 && msgs[0].Session != nil {
+				s.bindRemoteSession(msgs[0].Session.ID, remoteRoot)
+			}
+		}
 		for i := range msgs {
-			s.broadcast(msgs[i])
+			if c.RemoteConnectionID != "" {
+				filterRemoteMessage(&msgs[i], remoteRoot)
+				updates <- msgs[i]
+			} else {
+				s.broadcast(msgs[i])
+			}
 		}
 		if err != nil {
 			updates <- ServerMsg{Type: "error", Error: err.Error()}
@@ -313,7 +377,16 @@ func (s *Service) readLoop(ctx context.Context, conn net.Conn, updates chan Serv
 func (s *Service) broadcast(msg ServerMsg) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for ch := range s.clients {
+	for ch, sub := range s.clients {
+		if sub.remoteRoot != "" {
+			// Remote clients receive their own request responses directly and
+			// only receive global goal status broadcasts when they match the
+			// approved project root. This prevents another local/remote client
+			// from broadcasting session or plan data across roots.
+			if msg.Goal == nil || !goalBelongsToRoot(*msg.Goal, sub.remoteRoot) {
+				continue
+			}
+		}
 		select {
 		case ch <- msg:
 		default: // drop for slow clients; history replay covers reconnects

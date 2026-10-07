@@ -7,6 +7,16 @@ import (
 )
 
 func Create(root, title string) (SessionInfo, error) {
+	return create(root, title, false)
+}
+
+// CreateEphemeral creates a session whose transcript is intended to be
+// discarded after a one-shot run.
+func CreateEphemeral(root, title string) (SessionInfo, error) {
+	return create(root, title, true)
+}
+
+func create(root, title string, ephemeral bool) (SessionInfo, error) {
 	if _, err := Prepare(root); err != nil {
 		return SessionInfo{}, err
 	}
@@ -15,7 +25,7 @@ func Create(root, title string) (SessionInfo, error) {
 		return SessionInfo{}, err
 	}
 	now := time.Now().UTC()
-	info := SessionInfo{ID: id, Title: title, CreatedAt: now, UpdatedAt: now}
+	info := SessionInfo{ID: id, Title: title, CreatedAt: now, UpdatedAt: now, Ephemeral: ephemeral}
 	if info.Title == "" {
 		info.Title = "新会话"
 	}
@@ -46,6 +56,9 @@ func List(root string) ([]SessionInfo, error) {
 			return out, fmt.Errorf("load session %s: %w", id, e)
 		}
 		info := replay.Session
+		if info.Ephemeral {
+			continue
+		}
 		if len(replay.Events) > 0 {
 			info.UpdatedAt = replay.Events[len(replay.Events)-1].At
 		}

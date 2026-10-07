@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Stable Remote</title>
+    <link rel="stylesheet" href="/ui/app.css">
+  </head>
+  <body>
+    <main>
+      <header class="topbar"><div><p class="eyebrow">STABLE · REMOTE</p><h1>Project sessions</h1></div><span id="connection" class="pill">Not paired</span></header>
+      <section id="pair-panel" class="panel pair-panel">
+        <p>Use the one-time token printed by <code>stable remote pair</code>.</p>
+        <form id="pair-form" class="inline-form"><label class="sr-only" for="pair-token">Pairing token</label><input id="pair-token" name="token" type="password" autocomplete="off" placeholder="Paste pairing token" required><button type="submit">Pair device</button></form>
+      </section>
+      <section id="workspace" class="workspace hidden">
+        <aside class="sidebar panel">
+          <label for="project-root">Project directory</label><div class="inline-form"><input id="project-root" placeholder="/path/to/project" required><button id="connect">Request access</button></div>
+          <p class="hint">The local TUI must approve each connection.</p>
+          <div class="section-title"><h2>Sessions</h2><button id="refresh" class="quiet">Refresh</button></div>
+          <button id="new-session" class="secondary">＋ New session</button><div id="sessions" class="session-list"></div>
+          <section class="targets"><h2>Goals</h2><div id="goals" class="goal-list"><p class="hint">Connect to view goal status.</p></div></section>
+        </aside>
+        <section class="conversation panel">
+          <div class="chat-heading"><div><p class="eyebrow" id="root-label">NO PROJECT</p><h2 id="session-title">Choose a session</h2></div><span id="run-status" class="hint"></span></div>
+          <div id="transcript" class="transcript"><p class="empty">Request access to a project directory to begin.</p></div>
+          <div id="requests" class="requests"></div>
+          <form id="message-form" class="composer"><label class="sr-only" for="message">Message</label><textarea id="message" rows="3" placeholder="Message Stable…" disabled></textarea><div class="composer-actions"><button id="cancel-run" type="button" class="quiet hidden">Cancel run</button><button id="send" type="submit" disabled>Send message</button></div></form>
+        </section>
+      </section>
+      <p id="status" role="status" class="status-line"></p>
+    </main>
+    <script type="module" src="/ui/app.js"></script>
+  </body>
+</html>

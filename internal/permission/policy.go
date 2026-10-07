@@ -42,6 +42,9 @@ func (p Policy) Decide(a Authority, o Operation) PermissionDecision {
 	deny := func(reason string) PermissionDecision {
 		return PermissionDecision{Kind: DecisionDeny, Reason: reason, ScopeDigest: scope, OperationDigest: operation}
 	}
+	if a.ReadOnly && o.Kind != OpRead {
+		return deny("operation is not allowed in a read-only session")
+	}
 	// The only ask-free write in plan mode is the session's plan file; it is
 	// exempt from the candidate-only write restriction but must still resolve
 	// inside the authorized root and is still subject to exact rules below.
@@ -97,6 +100,9 @@ func (p Policy) Decide(a Authority, o Operation) PermissionDecision {
 	for _, r := range p.Rules {
 		match, _ := matchesExact(r, a, o, scope)
 		if match && r.Effect == EffectAsk {
+			if a.ReadOnly {
+				return deny("read operation requires interactive approval")
+			}
 			return PermissionDecision{Kind: DecisionAsk, Reason: "operation requires user approval by rule", ScopeDigest: scope, OperationDigest: operation}
 		}
 	}

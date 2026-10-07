@@ -32,6 +32,7 @@ import (
 	"stable/internal/platform/proc"
 	"stable/internal/platform/sandbox"
 	"stable/internal/platform/secfile"
+	"stable/internal/remote"
 	"stable/internal/sessioncontext"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
@@ -165,6 +166,8 @@ func Supervise(c appconfig.AppConfig, p paths.Paths, sbx sandbox.SandboxManager)
 	defer listener.Close()
 	defer os.Remove(p.Socket)
 	defer os.Remove(p.ChatSocket)
+	remoteManager := remote.NewManager(p.ChatSocket)
+	defer stopRemoteManager(remoteManager)
 	temporalLog, err := secfile.OpenFilePrivate(p.TemporalLog, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
@@ -239,14 +242,11 @@ func Supervise(c appconfig.AppConfig, p paths.Paths, sbx sandbox.SandboxManager)
 		}
 		line, _ := bufio.NewReader(conn).ReadString('\n')
 		line = strings.TrimSpace(line)
-		if line == "status" || line == "down" {
-			_ = json.NewEncoder(conn).Encode(status)
-			conn.Close()
-			if line == "down" {
-				return nil
-			}
-		} else {
-			conn.Close()
+		response, exit := dispatchSupervisorControl(line, status, remoteManager)
+		_ = json.NewEncoder(conn).Encode(response)
+		_ = conn.Close()
+		if exit {
+			return nil
 		}
 		if !proc.Alive(temporal) || !proc.Alive(worker) {
 			return errors.New("runtime child exited unexpectedly")
@@ -256,6 +256,94 @@ func Supervise(c appconfig.AppConfig, p paths.Paths, sbx sandbox.SandboxManager)
 			return errors.New("chat session service exited unexpectedly; see " + p.ChatLog)
 		default:
 		}
+	}
+}
+
+type remoteController interface {
+	Start(context.Context, remote.Config) (remote.RemoteStatus, error)
+	Stop(context.Context) error
+	Status() remote.RemoteStatus
+	IssuePairingToken() (string, time.Time, error)
+}
+
+// dispatchSupervisorControl preserves the original string status/down
+// protocol while handling typed remote lifecycle requests on the same private
+// socket. A down request stops the remote listener before its reply is sent.
+func dispatchSupervisorControl(line string, status Status, manager remoteController) (any, bool) {
+	switch line {
+	case "status":
+		return status, false
+	case "down":
+		if manager != nil {
+			if err := stopRemote(manager); err != nil {
+				log.Printf("stop remote service during runtime shutdown: %v", err)
+			}
+		}
+		return status, true
+	}
+
+	var request RemoteControlRequest
+	if err := json.Unmarshal([]byte(line), &request); err != nil {
+		return RemoteControlResult{ErrorCode: "invalid_request", Error: "invalid remote control request"}, false
+	}
+	if err := request.Validate(); err != nil {
+		return RemoteControlResult{ErrorCode: "invalid_request", Error: err.Error()}, false
+	}
+	if manager == nil {
+		return RemoteControlResult{ErrorCode: "unavailable", Error: "remote service is unavailable"}, false
+	}
+
+	var result RemoteControlResult
+	switch request.Action {
+	case RemoteControlStart:
+		remoteStatus, err := manager.Start(context.Background(), remote.Config{
+			ListenAddress: request.ListenAddr,
+			CertFile:      request.TLSCertFile,
+			KeyFile:       request.TLSKeyFile,
+		})
+		if err != nil {
+			return remoteControlFailure(err), false
+		}
+		result = remoteControlStatus(remoteStatus)
+	case RemoteControlStop:
+		if err := stopRemote(manager); err != nil {
+			return remoteControlFailure(err), false
+		}
+		result = remoteControlStatus(manager.Status())
+	case RemoteControlStatus:
+		result = remoteControlStatus(manager.Status())
+	case RemoteControlPair:
+		token, expires, err := manager.IssuePairingToken()
+		if err != nil {
+			return remoteControlFailure(err), false
+		}
+		result = remoteControlStatus(manager.Status())
+		result.PairingToken = token
+		result.PairExpires = expires
+	}
+	return result, false
+}
+
+func remoteControlStatus(status remote.RemoteStatus) RemoteControlResult {
+	return RemoteControlResult{Running: status.Running, ListenAddr: status.ListenAddr}
+}
+
+func remoteControlFailure(err error) RemoteControlResult {
+	return RemoteControlResult{ErrorCode: "operation_failed", Error: err.Error()}
+}
+
+func stopRemote(manager remoteController) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return manager.Stop(ctx)
+}
+
+func stopRemoteManager(manager remoteController) {
+	if manager == nil {
+		return
+	}
+	if err := stopRemote(manager); err != nil {
+		log.Printf("stop remote service during supervisor cleanup: %v", err)
 	}
 }
 

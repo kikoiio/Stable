@@ -40,6 +40,7 @@ type Authority struct {
 	CandidateRoot string `json:"candidate_root"`
 	FormalRoot    string `json:"formal_root,omitempty"`
 	Mode          Mode   `json:"mode"`
+	ReadOnly      bool   `json:"read_only,omitempty"`
 	// PlanFilePath is the session's plan file inside the formal project
 	// (.stable/plans/<sessionID>.md); empty means the session is not in plan
 	// mode. Like the other run-scoped identifiers it is excluded from the
@@ -121,6 +122,7 @@ func (a Authority) ScopeDigest() (string, error) {
 	a.WorkItemID = ""
 	a.CandidateRoot = ""
 	a.PlanFilePath = ""
+	a.ReadOnly = false
 	return digest(a)
 }
 

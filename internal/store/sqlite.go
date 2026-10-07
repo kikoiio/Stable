@@ -1204,6 +1204,17 @@ func (s *Store) UpsertSession(ctx context.Context, c core.ComputerSession) error
 func (s *Store) events(ctx context.Context, id string) ([]core.Event, error) {
 	return s.queryEvents(ctx, `SELECT id,goal_id,kind,payload_json,received_at,status FROM events WHERE goal_id=? ORDER BY received_at,id`, id)
 }
+
+// RecentGoalEvents returns the latest bounded event history for one goal.
+// Callers that expose this data remotely should project only the fields they
+// need; event payloads may contain internal details.
+func (s *Store) RecentGoalEvents(ctx context.Context, goalID string, limit int) ([]core.Event, error) {
+	if limit < 1 || limit > 10 {
+		limit = 5
+	}
+	return s.queryEvents(ctx, `SELECT id,goal_id,kind,payload_json,received_at,status FROM events WHERE goal_id=? ORDER BY received_at DESC,id DESC LIMIT ?`, goalID, limit)
+}
+
 func (s *Store) queryEvents(ctx context.Context, q string, args ...any) ([]core.Event, error) {
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {

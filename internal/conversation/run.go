@@ -50,7 +50,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if request.Work.SessionID != msg.SessionID {
 		return errors.New("run session does not match request session")
 	}
-	if s.mcp != nil {
+	if s.mcp != nil && !s.sessionIsEphemeral(msg.SessionID) {
 		if err := s.ensureMCPFresh(msg.SessionID); err != nil {
 			return fmt.Errorf("refresh MCP configuration: %w", err)
 		}
@@ -58,9 +58,10 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if err := agent.ValidateRequest(request); err != nil {
 		return err
 	}
+	projectRoot := s.sessionProjectRoot(msg.SessionID)
 	plan := s.PlanStateOf(msg.SessionID)
 	mode, planFilePath := planRunAuthority(plan, request.Work.Kind)
-	authority, err := BuildAuthority(ctx, s.deps.Store, s.deps.ProjectRoot, request, mode, planFilePath)
+	authority, err := BuildAuthority(ctx, s.deps.Store, projectRoot, request, mode, planFilePath)
 	if err != nil {
 		return fmt.Errorf("build trusted run authority: %w", err)
 	}
@@ -69,7 +70,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if err != nil {
 		return fmt.Errorf("encode trusted run authority: %w", err)
 	}
-	if _, err := sessionlog.SessionPath(s.deps.ProjectRoot, msg.SessionID); err != nil {
+	if _, err := sessionlog.SessionPath(projectRoot, msg.SessionID); err != nil {
 		return err
 	}
 	work := sessionlog.RunStarted{RunID: request.RunID, WorkKind: string(request.Work.Kind), GoalID: request.Work.GoalID, WorkItemID: request.Work.WorkItemID, Intent: request.Intent}
@@ -90,7 +91,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		}
 	}
 	var mcpPrefix []llm.Message
-	if request.Work.Kind == agent.WorkSession && s.mcp != nil {
+	if request.Work.Kind == agent.WorkSession && s.mcp != nil && !s.sessionIsEphemeral(msg.SessionID) {
 		if instructions := s.mcp.Instructions(); instructions != "" {
 			s.mcpMu.Lock()
 			if !s.mcpInstructions[msg.SessionID] {
@@ -108,7 +109,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	}
 	s.eventMu.Lock()
 	if request.Work.Kind == agent.WorkSession {
-		history := sessionConversationMessages(s.deps.ProjectRoot, msg.SessionID)
+		history := sessionConversationMessages(projectRoot, msg.SessionID)
 		prefix := []llm.Message{{Role: "system", Content: "你是 Stable 的通用 agent。读、搜、列只能访问正式工程只读视图；写、编辑只能写入本次运行的候选区。工具路径使用工作区相对路径。工具结果代表真实受控执行结果。"}}
 		// The skill inventory text is per-run context like the plan reminder:
 		// it rides after the system prefix (before the replayed history, so
@@ -127,7 +128,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 			// first plan run and repeats every fifth run, the compact
 			// reminder fills the turns in between.
 			plan = s.recordPlanRun(msg.SessionID)
-			exists, existsErr := planfile.Exists(s.deps.ProjectRoot, msg.SessionID)
+			exists, existsErr := planfile.Exists(projectRoot, msg.SessionID)
 			if existsErr != nil {
 				s.eventMu.Unlock()
 				return fmt.Errorf("check plan file: %w", existsErr)
@@ -145,14 +146,14 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		if len(request.Messages) > 0 {
 			last := request.Messages[len(request.Messages)-1]
 			if last.Role == "user" && last.Content != "" {
-				if _, err := sessionlog.Append(s.deps.ProjectRoot, msg.SessionID, sessionlog.EventMessage, sessionlog.Message{Role: "user", Text: last.Content, Kind: "text"}); err != nil {
+				if _, err := sessionlog.Append(projectRoot, msg.SessionID, sessionlog.EventMessage, sessionlog.Message{Role: "user", Text: last.Content, Kind: "text"}); err != nil {
 					s.eventMu.Unlock()
 					return err
 				}
 			}
 		}
 	}
-	if _, err := sessionlog.Append(s.deps.ProjectRoot, msg.SessionID, sessionlog.EventRunStarted, work); err != nil {
+	if _, err := sessionlog.Append(projectRoot, msg.SessionID, sessionlog.EventRunStarted, work); err != nil {
 		s.eventMu.Unlock()
 		return err
 	}
@@ -165,7 +166,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if request.Work.Kind != agent.WorkSession && len(hookPrefix) > 0 {
 		request.Messages = append(hookPrefix, request.Messages...)
 	}
-	if s.hooks != nil {
+	if s.hooks != nil && !s.sessionIsEphemeral(msg.SessionID) {
 		s.hooks.RunStart(msg.SessionID, request.RunID, request.Intent)
 	}
 
@@ -175,7 +176,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		if idErr == nil {
 			failed := sessionlog.RunEvent{ID: eventID, RunID: request.RunID, SessionID: request.Work.SessionID, RunSeq: 1, At: time.Now().UTC(), Kind: string(agent.EventTerminal), Payload: map[string]any{"status": agent.RunFailed, "reason": "runner could not start"}}
 			s.eventMu.Lock()
-			stored, appendErr := sessionlog.Append(s.deps.ProjectRoot, msg.SessionID, sessionlog.EventRunEvent, failed)
+			stored, appendErr := sessionlog.Append(projectRoot, msg.SessionID, sessionlog.EventRunEvent, failed)
 			s.eventMu.Unlock()
 			if appendErr == nil {
 				s.broadcastRun(ServerMsg{Type: "run_event", RunID: request.RunID, RunEvent: &failed, Cursor: stored.Seq}, msg.SessionID, request.RunID, stored.Seq)
@@ -301,14 +302,31 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 				Text string `json:"text"`
 			}
 			_ = json.Unmarshal(event.Payload, &payload)
+			payload.Text = redactRunCredential(payload.Text, s.deps.ProviderCredential)
 			textOut.WriteString(payload.Text)
+			event.Payload, _ = json.Marshal(payload)
+		} else if event.Kind == agent.EventError {
+			var providerErr llm.ProviderError
+			if json.Unmarshal(event.Payload, &providerErr) == nil {
+				providerErr.Message = redactRunCredential(providerErr.Message, s.deps.ProviderCredential)
+				event.Payload, _ = json.Marshal(providerErr)
+			}
+		} else if event.Kind == agent.EventTerminal {
+			var payload struct {
+				Status agent.RunStatus    `json:"status"`
+				Error  *llm.ProviderError `json:"error"`
+			}
+			if json.Unmarshal(event.Payload, &payload) == nil && payload.Error != nil {
+				payload.Error.Message = redactRunCredential(payload.Error.Message, s.deps.ProviderCredential)
+				event.Payload, _ = json.Marshal(payload)
+			}
 		}
 		persisted := sessionlog.RunEvent{
 			ID: event.ID, RunID: event.RunID, SessionID: event.SessionID,
 			RunSeq: event.RunSeq, At: event.At, Kind: string(event.Kind), Payload: event.Payload,
 		}
 		s.eventMu.Lock()
-		stored, err := sessionlog.Append(s.deps.ProjectRoot, request.Work.SessionID, sessionlog.EventRunEvent, persisted)
+		stored, err := sessionlog.Append(s.sessionProjectRoot(request.Work.SessionID), request.Work.SessionID, sessionlog.EventRunEvent, persisted)
 		if err == nil && event.Kind == agent.EventCompactionBoundary {
 			// The conversation service is the only session log writer: the
 			// runner-issued boundary becomes a run-scope compaction boundary
@@ -317,7 +335,7 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 			if json.Unmarshal(event.Payload, &boundary) != nil {
 				err = errors.New("compaction boundary has invalid payload")
 			} else {
-				_, err = sessionlog.Append(s.deps.ProjectRoot, request.Work.SessionID, sessionlog.EventBoundary, sessionlog.Boundary{
+				_, err = sessionlog.Append(s.sessionProjectRoot(request.Work.SessionID), request.Work.SessionID, sessionlog.EventBoundary, sessionlog.Boundary{
 					FromSeq: boundary.FromSeq, ToSeq: boundary.ToSeq, Summary: boundary.Summary,
 					Scope: sessionlog.BoundaryScopeRun, RunID: boundary.RunID,
 				})
@@ -332,7 +350,7 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 				err = errors.New("tool result has invalid payload")
 			} else {
 				for _, snap := range outcome.Snapshots {
-					if _, err = sessionlog.Append(s.deps.ProjectRoot, request.Work.SessionID, sessionlog.EventSnapshot, sessionlog.SnapshotRef{
+					if _, err = sessionlog.Append(s.sessionProjectRoot(request.Work.SessionID), request.Work.SessionID, sessionlog.EventSnapshot, sessionlog.SnapshotRef{
 						SnapshotID: snap.SnapshotID, SessionID: request.Work.SessionID, CandidateID: snap.CandidateID,
 						RunID: snap.RunID, Label: snap.Label, Digest: snap.Digest, CreatedAt: snap.CreatedAt,
 					}); err != nil {
@@ -352,7 +370,12 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 		s.broadcastRun(ServerMsg{Type: "run_event", RunID: request.RunID, RunEvent: &persisted, Cursor: stored.Seq}, request.Work.SessionID, request.RunID, stored.Seq)
 	}
 	outcome := <-handle.Done
-	if s.hooks != nil {
+	if outcome.Error != nil {
+		outcome.Error.Message = redactRunCredential(outcome.Error.Message, s.deps.ProviderCredential)
+	}
+	var authority permission.Authority
+	_ = json.Unmarshal(request.PermissionBounds, &authority)
+	if s.hooks != nil && !authority.ReadOnly {
 		message := textOut.String()
 		if outcome.Status != agent.RunCompleted {
 			summary := string(outcome.Status)
@@ -369,10 +392,16 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 	if err := s.finalizeRunCandidate(context.Background(), request); err != nil {
 		s.broadcastRun(ServerMsg{Type: "error", RunID: request.RunID, Error: "could not finalize candidate: " + err.Error()}, request.Work.SessionID, request.RunID, 0)
 	}
-	s.broadcastRun(ServerMsg{Type: "run_outcome", RunID: request.RunID, Outcome: &outcome}, request.Work.SessionID, request.RunID, 0)
+	if authority.ReadOnly {
+		runRoot := filepath.Join(filepath.Dir(authority.CandidateRoot), ".stable-runs", request.RunID)
+		if removeErr := os.RemoveAll(runRoot); removeErr != nil {
+			s.broadcastRun(ServerMsg{Type: "error", RunID: request.RunID, Error: "could not clean temporary run data"}, request.Work.SessionID, request.RunID, 0)
+		}
+	}
 	s.mu.Lock()
 	delete(s.activeRuns, request.RunID)
 	s.mu.Unlock()
+	s.broadcastRun(ServerMsg{Type: "run_outcome", RunID: request.RunID, Outcome: &outcome}, request.Work.SessionID, request.RunID, 0)
 }
 
 func (s *Service) finalizeRunCandidate(ctx context.Context, request agent.ExecutionRequest) error {
@@ -462,7 +491,7 @@ func (s *Service) subscribeRun(ctx context.Context, msg ClientMsg, updates chan 
 	foundRun := msg.RunID == ""
 	var replayOutcome *agent.RunOutcome
 	if msg.RunID != "" {
-		full, err := sessionlog.Replay(s.deps.ProjectRoot, msg.SessionID)
+		full, err := sessionlog.Replay(s.sessionProjectRoot(msg.SessionID), msg.SessionID)
 		if err != nil {
 			return err
 		}
@@ -487,7 +516,7 @@ func (s *Service) subscribeRun(ctx context.Context, msg ClientMsg, updates chan 
 			}
 		}
 	}
-	transcript, err := sessionlog.ReplayAfter(s.deps.ProjectRoot, msg.SessionID, msg.AfterSeq)
+	transcript, err := sessionlog.ReplayAfter(s.sessionProjectRoot(msg.SessionID), msg.SessionID, msg.AfterSeq)
 	if err != nil {
 		return err
 	}
@@ -560,6 +589,9 @@ func (s *Service) broadcastRun(msg ServerMsg, sessionID, runID string, cursor ui
 	defer s.mu.Unlock()
 	for _, sub := range s.clients {
 		if sub.sessionID != sessionID || (sub.runID != "" && sub.runID != runID) {
+			continue
+		}
+		if sub.remoteRoot != "" && s.remoteRoots[sessionID] != sub.remoteRoot {
 			continue
 		}
 		if sub.pendingCursor != 0 {

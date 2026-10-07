@@ -210,7 +210,7 @@ func (j rewindJournalAdapter) Advance(ctx context.Context, id string, from, to c
 }
 
 func (s *Service) searchSessions(c ClientMsg) (sessionlog.SearchResult, error) {
-	root, err := s.trustedSessionRoot(c.ProjectRoot)
+	root, err := s.requestProjectRoot(c)
 	if err != nil {
 		return sessionlog.SearchResult{}, err
 	}

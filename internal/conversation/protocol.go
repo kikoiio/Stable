@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"stable/internal/agent"
 	"stable/internal/candidate"
@@ -17,29 +18,38 @@ import (
 
 // ClientMsg is one line of JSON sent from a chat client to the session service.
 type ClientMsg struct {
-	Op              string                  `json:"op"`             // existing session operations plus run_start | run_subscribe | run_cancel
-	Goal            string                  `json:"goal,omitempty"` // focused goal (required for say/reply)
-	Text            string                  `json:"text,omitempty"` // natural-language content
-	ID              string                  `json:"id,omitempty"`   // proposal ID for confirm/reject
-	ProjectRoot     string                  `json:"project_root,omitempty"`
-	SessionID       string                  `json:"session_id,omitempty"`
-	RunID           string                  `json:"run_id,omitempty"`
-	AfterSeq        uint64                  `json:"after_seq,omitempty"`
-	Run             *agent.ExecutionRequest `json:"run,omitempty"`
-	CandidateID     string                  `json:"candidate_id,omitempty"`
-	DecisionID      string                  `json:"decision_id,omitempty"`
-	PreviewDigest   string                  `json:"preview_digest,omitempty"`
-	CandidateDigest string                  `json:"candidate_digest,omitempty"`
-	FormalDigest    string                  `json:"formal_digest,omitempty"`
-	AcceptanceMode  string                  `json:"acceptance_mode,omitempty"`
-	Confirmed       []string                `json:"confirmed_findings,omitempty"`
-	ApprovalID      string                  `json:"approval_id,omitempty"`
-	ApprovalChoice  string                  `json:"approval_choice,omitempty"`
-	SnapshotID      string                  `json:"snapshot_id,omitempty"`
-	QuestionID      string                  `json:"question_id,omitempty"`
-	SkillName       string                  `json:"skill_name,omitempty"`
-	SkillArgs       string                  `json:"skill_args,omitempty"`
-	Limit           int                     `json:"limit,omitempty"`
+	Op          string `json:"op"`             // existing session operations plus run_start | run_subscribe | run_cancel
+	Goal        string `json:"goal,omitempty"` // focused goal (required for say/reply)
+	Text        string `json:"text,omitempty"` // natural-language content
+	ID          string `json:"id,omitempty"`   // proposal ID for confirm/reject
+	ProjectRoot string `json:"project_root,omitempty"`
+	// RemoteGrantID is supplied by a remote connection on scoped operations.
+	// The service resolves the project root from the grant rather than trusting
+	// the root supplied by the browser.
+	RemoteGrantID         string                  `json:"remote_grant_id,omitempty"`
+	RemoteClientLabel     string                  `json:"remote_client_label,omitempty"`
+	RemoteAccessRequestID string                  `json:"remote_access_request_id,omitempty"`
+	RemoteAccessDecision  string                  `json:"remote_access_decision,omitempty"` // approve | deny
+	RemoteConnectionID    string                  `json:"remote_connection_id,omitempty"`
+	SessionID             string                  `json:"session_id,omitempty"`
+	Ephemeral             bool                    `json:"ephemeral,omitempty"`
+	RunID                 string                  `json:"run_id,omitempty"`
+	AfterSeq              uint64                  `json:"after_seq,omitempty"`
+	Run                   *agent.ExecutionRequest `json:"run,omitempty"`
+	CandidateID           string                  `json:"candidate_id,omitempty"`
+	DecisionID            string                  `json:"decision_id,omitempty"`
+	PreviewDigest         string                  `json:"preview_digest,omitempty"`
+	CandidateDigest       string                  `json:"candidate_digest,omitempty"`
+	FormalDigest          string                  `json:"formal_digest,omitempty"`
+	AcceptanceMode        string                  `json:"acceptance_mode,omitempty"`
+	Confirmed             []string                `json:"confirmed_findings,omitempty"`
+	ApprovalID            string                  `json:"approval_id,omitempty"`
+	ApprovalChoice        string                  `json:"approval_choice,omitempty"`
+	SnapshotID            string                  `json:"snapshot_id,omitempty"`
+	QuestionID            string                  `json:"question_id,omitempty"`
+	SkillName             string                  `json:"skill_name,omitempty"`
+	SkillArgs             string                  `json:"skill_args,omitempty"`
+	Limit                 int                     `json:"limit,omitempty"`
 }
 
 // ServerMsg is one line of JSON pushed from the session service to clients.
@@ -50,6 +60,7 @@ type ServerMsg struct {
 	Goal       *core.Goal                     `json:"goal,omitempty"`
 	Error      string                         `json:"error,omitempty"`
 	Session    *sessionlog.SessionInfo        `json:"session,omitempty"`
+	SessionID  string                         `json:"session_id,omitempty"`
 	Sessions   []sessionlog.SessionInfo       `json:"sessions,omitempty"`
 	Transcript *sessionlog.Transcript         `json:"transcript,omitempty"`
 	Goals      []core.Goal                    `json:"goals,omitempty"`
@@ -84,12 +95,24 @@ type ServerMsg struct {
 	SkillReport *SkillReport `json:"skill_report,omitempty"`
 	// Skills and SkillActivated carry the skill_list response: the current
 	// catalog infos and the session's activated skill names.
-	Skills         []sessionlog.SkillInfo `json:"skills,omitempty"`
-	SkillActivated []string               `json:"skill_activated,omitempty"`
-	HookList       *HookListMsg           `json:"hook_list,omitempty"`
-	HookReport     *HookReportMsg         `json:"hook_report,omitempty"`
-	MCPList        *MCPListMsg            `json:"mcp_list,omitempty"`
-	MCPReport      *MCPReportMsg          `json:"mcp_report,omitempty"`
+	Skills               []sessionlog.SkillInfo `json:"skills,omitempty"`
+	SkillActivated       []string               `json:"skill_activated,omitempty"`
+	HookList             *HookListMsg           `json:"hook_list,omitempty"`
+	HookReport           *HookReportMsg         `json:"hook_report,omitempty"`
+	MCPList              *MCPListMsg            `json:"mcp_list,omitempty"`
+	MCPReport            *MCPReportMsg          `json:"mcp_report,omitempty"`
+	RemoteAccessRequests []RemoteAccessRequest  `json:"remote_access_requests,omitempty"`
+	RemoteGrant          *RemoteGrant           `json:"remote_grant,omitempty"`
+	GoalEvents           []GoalEventSummary     `json:"goal_events,omitempty"`
+}
+
+// GoalEventSummary is the payload-free recent-event projection used by the
+// read-only target summary surface.
+type GoalEventSummary struct {
+	GoalID     string    `json:"goal_id"`
+	Kind       string    `json:"kind"`
+	Status     string    `json:"status"`
+	ReceivedAt time.Time `json:"received_at"`
 }
 
 // HookSummary is one loaded hook in the merged view.
@@ -146,7 +169,7 @@ type SkillReport struct {
 
 func validOp(op string) bool {
 	switch op {
-	case "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list", "hooks_list", "hooks_reload", "mcp_list", "mcp_reload":
+	case "session_list", "session_create", "session_discard", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list", "hooks_list", "hooks_reload", "mcp_list", "mcp_reload", "remote_access_request", "remote_access_list", "remote_access_resolve", "remote_access_release", "remote_access_cancel":
 		return true
 	}
 	return false
@@ -170,9 +193,31 @@ func validateClient(m ClientMsg) error {
 		return fmt.Errorf("unknown op %q", m.Op)
 	}
 	switch m.Op {
+	case "remote_access_request":
+		if m.ProjectRoot == "" || m.RemoteConnectionID == "" || m.RemoteAccessRequestID == "" || len(m.RemoteConnectionID) > 128 || len(m.RemoteAccessRequestID) > 128 || len(m.RemoteClientLabel) > 128 {
+			return fmt.Errorf("op remote_access_request requires project_root, connection ID, and request ID")
+		}
+	case "remote_access_list":
+		// The service exposes this operation only to the local TUI socket.
+	case "remote_access_resolve":
+		if m.RemoteAccessRequestID == "" || len(m.RemoteAccessRequestID) > 128 || (m.RemoteAccessDecision != "approve" && m.RemoteAccessDecision != "deny") {
+			return fmt.Errorf("op remote_access_resolve requires request ID and approve/deny decision")
+		}
+	case "remote_access_release":
+		if m.RemoteGrantID == "" || len(m.RemoteGrantID) > 128 || m.RemoteConnectionID == "" || len(m.RemoteConnectionID) > 128 {
+			return fmt.Errorf("op remote_access_release requires remote_grant_id and connection ID")
+		}
+	case "remote_access_cancel":
+		if m.RemoteAccessRequestID == "" || len(m.RemoteAccessRequestID) > 128 || m.RemoteConnectionID == "" || len(m.RemoteConnectionID) > 128 {
+			return fmt.Errorf("op remote_access_cancel requires request ID and connection ID")
+		}
 	case "session_list", "session_create":
 		if m.ProjectRoot == "" {
 			return fmt.Errorf("op %s requires project_root", m.Op)
+		}
+	case "session_discard":
+		if m.ProjectRoot == "" || m.SessionID == "" {
+			return fmt.Errorf("op session_discard requires project_root and session_id")
 		}
 	case "session_load":
 		if m.ProjectRoot == "" || m.SessionID == "" {

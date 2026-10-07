@@ -134,6 +134,58 @@ func TestExactRules(t *testing.T) {
 	}
 }
 
+func TestReadOnlyAuthorityCannotUseExactAllowAndDoesNotChangeScope(t *testing.T) {
+	root := t.TempDir()
+	project, candidate := filepath.Join(root, "project"), filepath.Join(root, "candidate")
+	for _, path := range []string{project, candidate} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := Authority{RunID: "r", SessionID: "s", AllowedRoot: project, CandidateRoot: candidate, FormalRoot: project, Mode: ModeBypass}
+	readOnly := a
+	readOnly.ReadOnly = true
+	scope, err := a.ScopeDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	readOnlyScope, err := readOnly.ScopeDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope != readOnlyScope {
+		t.Fatal("read-only bit changed persistent permission scope")
+	}
+	op := Operation{ID: "write-1", Kind: OpWrite, Name: "write_file", Target: filepath.Join(candidate, "x"), Parameters: []byte(`{"path":"x"}`)}
+	params, err := digest(op.Parameters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := ExactRule{Effect: EffectAllow, Kind: op.Kind, Name: op.Name, Target: "candidate:x", ParametersDigest: params, ScopeDigest: scope}
+	if got := (Policy{Rules: []ExactRule{rule}}).Decide(readOnly, op); got.Kind != DecisionDeny {
+		t.Fatalf("exact allow bypassed read-only: %+v", got)
+	}
+	read := Operation{ID: "read-1", Kind: OpRead, Name: "read_file", Target: filepath.Join(project, "x")}
+	if got := (Policy{}).Decide(readOnly, read); got.Kind != DecisionAllow {
+		t.Fatalf("read was denied: %+v", got)
+	}
+	readScope, _ := readOnly.ScopeDigest()
+	readParams, _ := digest(read.Parameters)
+	readAsk := ExactRule{Effect: EffectAsk, Kind: read.Kind, Name: read.Name, Target: "project:x", ParametersDigest: readParams, ScopeDigest: readScope}
+	if got := (Policy{Rules: []ExactRule{readAsk}}).Decide(readOnly, read); got.Kind != DecisionDeny {
+		t.Fatalf("read requiring approval was not rejected noninteractively: %+v", got)
+	}
+	for _, kind := range []OperationKind{OpCommand, OpMCPTool, OpNetwork, OpLegacy} {
+		operation := Operation{ID: string(kind), Kind: kind, Name: "operation", Target: filepath.Join(candidate, "x")}
+		if kind == OpNetwork {
+			operation.Protocol, operation.Host, operation.Port = "tcp", "localhost", 80
+		}
+		if got := (Policy{}).Decide(readOnly, operation); got.Kind != DecisionDeny {
+			t.Errorf("%s was not denied: %+v", kind, got)
+		}
+	}
+}
+
 // A read-only operation must not be denied just because the lazily created
 // candidate root does not exist yet (read-first normal task flows).
 func TestReadAllowedBeforeCandidateExists(t *testing.T) {

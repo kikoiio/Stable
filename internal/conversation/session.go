@@ -31,7 +31,7 @@ func jsonDecoder(r interface{ Read([]byte) (int, error) }) *json.Decoder {
 func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) {
 	switch c.Op {
 	case "session_list":
-		root, err := s.trustedSessionRoot(c.ProjectRoot)
+		root, err := s.requestProjectRoot(c)
 		if err != nil {
 			return nil, err
 		}
@@ -47,22 +47,44 @@ func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) 
 		if err != nil {
 			return nil, err
 		}
-		return []ServerMsg{{Type: "sessions", Sessions: sessions, Goals: goals}}, nil
-	case "session_create":
-		root, err := s.trustedSessionRoot(c.ProjectRoot)
+		goalEvents, err := s.recentGoalEventSummaries(ctx, goals)
 		if err != nil {
 			return nil, err
 		}
-		info, err := sessionlog.Create(root, "")
+		return []ServerMsg{{Type: "sessions", Sessions: sessions, Goals: goals, GoalEvents: goalEvents}}, nil
+	case "session_create":
+		var root string
+		var err error
+		if c.Ephemeral {
+			root, err = sessionRoot(c.ProjectRoot)
+		} else {
+			root, err = s.requestProjectRoot(c)
+		}
+		if err != nil {
+			return nil, err
+		}
+		var info sessionlog.SessionInfo
+		if c.Ephemeral {
+			info, err = sessionlog.CreateEphemeral(root, "")
+		} else {
+			info, err = sessionlog.Create(root, "")
+		}
 		if err != nil {
 			return nil, err
 		}
 		// Plan mode is session runtime state: a fresh session starts in the
 		// default mode with no plan file.
 		s.initPlanState(info.ID)
+		if c.Ephemeral {
+			s.mu.Lock()
+			s.ephemeralRoots[info.ID] = root
+			s.mu.Unlock()
+		}
 		return []ServerMsg{{Type: "session", Session: &info}}, nil
+	case "session_discard":
+		return s.discardSession(c)
 	case "session_load":
-		root, err := s.trustedSessionRoot(c.ProjectRoot)
+		root, err := s.requestProjectRoot(c)
 		if err != nil {
 			return nil, err
 		}
@@ -99,8 +121,12 @@ func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) 
 		if err != nil {
 			return nil, err
 		}
+		goalEvents, err := s.recentGoalEventSummaries(ctx, goals)
+		if err != nil {
+			return nil, err
+		}
 		plan := s.PlanStateOf(c.SessionID)
-		return []ServerMsg{{Type: "transcript", Transcript: &replay, Goals: goals, Plan: &plan}}, nil
+		return []ServerMsg{{Type: "transcript", Transcript: &replay, Goals: goals, GoalEvents: goalEvents, Plan: &plan}}, nil
 	case "plan_mode":
 		return s.planMode(c)
 	case "plan_resolve":
@@ -189,6 +215,21 @@ func (s *Service) withEvidenceSummaries(ctx context.Context, goals []core.Goal) 
 	}
 	return goals, nil
 }
+
+func (s *Service) recentGoalEventSummaries(ctx context.Context, goals []core.Goal) ([]GoalEventSummary, error) {
+	var summaries []GoalEventSummary
+	for _, goal := range goals {
+		events, err := s.deps.Store.RecentGoalEvents(ctx, goal.ID, 5)
+		if err != nil {
+			return nil, err
+		}
+		for _, event := range events {
+			summaries = append(summaries, GoalEventSummary{GoalID: event.GoalID, Kind: event.Kind, Status: event.Status, ReceivedAt: event.ReceivedAt})
+		}
+	}
+	return summaries, nil
+}
+
 func evidenceSummary(evidence []core.Evidence) string {
 	if len(evidence) == 0 {
 		return "尚无验证证据"
@@ -304,7 +345,7 @@ func (s *Service) sessionChat(ctx context.Context, c ClientMsg) ([]ServerMsg, er
 	if s.deps.ChatProvider == nil {
 		return nil, errors.New("chat model provider not configured; run stable config check")
 	}
-	root, err := s.trustedSessionRoot(c.ProjectRoot)
+	root, err := s.requestProjectRoot(c)
 	if err != nil {
 		return nil, err
 	}

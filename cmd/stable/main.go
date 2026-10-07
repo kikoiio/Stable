@@ -34,6 +34,9 @@ func usage() {
 Usage:
   stable                (start runtime if needed, enter the production TUI)
   stable demo           (quickstart: run one built-in goal, export, stop)
+  stable --print [TEXT] (one-shot read-only answer; reads stdin when TEXT is omitted)
+  stable provider list|show|use
+  stable remote up|down|status|pair
   stable prototype      (launch the isolated interactive TUI prototype)
   stable doctor
   stable config init
@@ -99,6 +102,12 @@ func run(args []string) error {
 	}
 	if args[0] == "chat" {
 		return errors.New("stable chat was removed; run stable in an interactive terminal to open the TUI")
+	}
+	if args[0] == "--print" {
+		return runPrint(args[1:], os.Stdin, os.Stdout, os.Stderr)
+	}
+	if args[0] == "provider" {
+		return runProvider(args[1:], os.Stdout, os.Stderr)
 	}
 	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		usage()
@@ -174,6 +183,8 @@ func run(args []string) error {
 			return err
 		}
 		return json.NewEncoder(os.Stdout).Encode(s)
+	case "remote":
+		return runRemote(args[1:], c, p)
 	case "down":
 		if len(args) != 1 {
 			return errors.New("down takes no arguments")
