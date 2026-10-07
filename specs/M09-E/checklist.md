@@ -1,6 +1,6 @@
 # M09-E 团队、消息与只读协调器 Checklist
 
-> 状态：规格已批准，实施代码已提交；AC1–9 与完整场景仍按实际证据逐项验收。SHA `e24331a` 的 Go 全量和 package 通过，通用 E2E 的 `e2e-core` 在依赖恢复阶段失败（2026-10-08）。
+> 状态：规格已批准，实施代码已提交；AC1–9 与完整场景仍按实际证据逐项验收。SHA `f8fce2d` 的 unit 与 `e2e-core` 已通过；Go package 因依赖安装超过 30 分钟而 timeout，Go build job 停滞后取消；`e2e-m03` 和 `cases` 因依赖安装无进展取消（2026-10-08）。
 
 ## 功能验收
 
@@ -50,6 +50,8 @@ E实现与运行验收进行中。每项完成后记录实际证据；D/A/B/C旧
 | Preview regression first run / repair | `90ed0d7` → `75594bd2c4279c115c18fb5f22c741f868dcfcb5` | [failed Go run 37643405245](https://github.com/kikoiio/Stable/actions/runs/37643405245), `build-and-test`; [repaired Go run 37644076609](https://github.com/kikoiio/Stable/actions/runs/37644076609), `build-and-test` | 首次单测失败仅因 preview lifecycle fixture 未带可信 authority；修复 fixture 后 build 与 `go test ./...` 通过。package job 与 E2E workflow 仍在运行。 |
 | 组合代码 Go build/unit + package | `e24331a0ac6d9745f9dc80fc8aed0142d47d2210` | [Go run 37651671848](https://github.com/kikoiio/Stable/actions/runs/37651671848), `build-and-test`, `test-package` | 两个 jobs 均通过；包含 lead 消息自动唤醒 idle member 的 fake-runner 集成测试。此结果不替代 E AC1–9 的逐项证明。 |
 | 组合代码 E2E | `e24331a0ac6d9745f9dc80fc8aed0142d47d2210` | [E2E run 37651671760](https://github.com/kikoiio/Stable/actions/runs/37651671760) | `unit`、`cases`、`e2e-m03`、`e2e-m04`、`e2e-sessions` 成功；`e2e-core` 的 `dependency_change.sh` 在 checker 版本恢复后未收敛，goal agent run 终态为 failed。不能记录全量 E2E 通过。 |
+| 修复后组合代码 E2E | `f8fce2d15bc3262a770300057cc7638209f4c672` | [E2E run 37664859557](https://github.com/kikoiio/Stable/actions/runs/37664859557) | `unit`、`e2e-core`、`e2e-m04`、`e2e-sessions` 成功；`e2e-m03`、`cases` 因 `setup-e2e-deps` 无进展取消。`dependency_change.sh` checker 恢复已通过；现有 workflow 仍不能替代 E AC1–9 的完整多轮/恢复组合验收。 |
+| 修复后组合代码 Go/package | `f8fce2d15bc3262a770300057cc7638209f4c672` | [Go run 37664859562](https://github.com/kikoiio/Stable/actions/runs/37664859562) | `test-package` 的 `setup-e2e-deps` 超过 30 分钟上限；`build-and-test` 停滞在同一步后取消。全量 Go 单测由同 SHA 的 E2E `unit` job 通过；package acceptance 未完成。 |
 
 | 本地定向检查 | 实际结果 | 覆盖范围与限制 |
 |---|---|---|

@@ -10,6 +10,14 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Use the canonical HTTPS Ubuntu mirror
+      shell: bash
+      run: |
+        ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+        if [[ -f "$ubuntu_sources" ]] && grep -q 'http://azure.archive.ubuntu.com/ubuntu' "$ubuntu_sources"; then
+          sudo sed -i 's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' "$ubuntu_sources"
+        fi
+
     - name: Install KiCad 9 and display tooling
       if: inputs.kicad == 'true'
       shell: bash
