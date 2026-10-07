@@ -543,6 +543,15 @@ func (s *Service) handleTeamRequest(ctx context.Context, msg ClientMsg) (ServerM
 	case "team_send", "team_messages":
 		if msg.RunID == "" {
 			request, err = s.teamUserRequest(ctx, msg.SessionID, msg.TeamID)
+		} else if msg.Op == "team_send" {
+			request, err = s.activeRunRequest(msg.SessionID, msg.RunID)
+			if err == nil {
+				var work agent.WorkRef
+				work, err = persistedRunWork(root, msg.SessionID, msg.RunID)
+				if err == nil && work != request.Work {
+					err = teams.ErrPermission
+				}
+			}
 		} else {
 			request.Work, err = persistedRunWork(root, msg.SessionID, msg.RunID)
 		}
