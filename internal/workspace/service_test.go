@@ -147,6 +147,7 @@ func TestWorkspacePreviewPersistsBoundedConflictSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	scope := testScope()
+	scope.Authority = permission.Authority{RunID: "lead-run", SessionID: scope.SessionID, AllowedRoot: formal, FormalRoot: formal, CandidateRoot: filepath.Join(parent, "candidate")}
 	service, err := NewService(layout, Limits{}, ServiceDependencies{Exporter: previewWorkspaceExporter{}})
 	if err != nil {
 		t.Fatal(err)
