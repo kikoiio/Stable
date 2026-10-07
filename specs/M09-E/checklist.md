@@ -1,6 +1,6 @@
 # M09-E 团队、消息与只读协调器 Checklist
 
-> 状态：已批准，实施中（2026-10-07）。用户批准 M09-E 四份规格文档；验收项取得实际证据后逐项勾选。
+> 状态：规格已批准，实施代码已提交；AC1–9 与完整场景仍按实际证据逐项验收。SHA `e24331a` 的 Go 全量和 package 通过，通用 E2E 的 `e2e-core` 在依赖恢复阶段失败（2026-10-08）。
 
 ## 功能验收
 
@@ -48,6 +48,8 @@ E实现与运行验收进行中。每项完成后记录实际证据；D/A/B/C旧
 | E2E workflow | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [E2E run 37640598926](https://github.com/kikoiio/Stable/actions/runs/37640598926), `unit`, `e2e-core`, `e2e-m03`, `e2e-m04`, `e2e-sessions`, `cases` | 所有 job 通过；现有 workflow 未单独覆盖 checklist 要求的完整 team 多轮/恢复组合，不能据此勾选 AC9。 |
 | Go package acceptance | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [Go run 37640598695](https://github.com/kikoiio/Stable/actions/runs/37640598695), `test-package` | 通过；run 总结由 in_progress 更新为 success，job 完成于 2026-10-07 15:16 UTC。仅是预览改动前 SHA 的结果。 |
 | Preview regression first run / repair | `90ed0d7` → `75594bd2c4279c115c18fb5f22c741f868dcfcb5` | [failed Go run 37643405245](https://github.com/kikoiio/Stable/actions/runs/37643405245), `build-and-test`; [repaired Go run 37644076609](https://github.com/kikoiio/Stable/actions/runs/37644076609), `build-and-test` | 首次单测失败仅因 preview lifecycle fixture 未带可信 authority；修复 fixture 后 build 与 `go test ./...` 通过。package job 与 E2E workflow 仍在运行。 |
+| 组合代码 Go build/unit + package | `e24331a0ac6d9745f9dc80fc8aed0142d47d2210` | [Go run 37651671848](https://github.com/kikoiio/Stable/actions/runs/37651671848), `build-and-test`, `test-package` | 两个 jobs 均通过；包含 lead 消息自动唤醒 idle member 的 fake-runner 集成测试。此结果不替代 E AC1–9 的逐项证明。 |
+| 组合代码 E2E | `e24331a0ac6d9745f9dc80fc8aed0142d47d2210` | [E2E run 37651671760](https://github.com/kikoiio/Stable/actions/runs/37651671760) | `unit`、`cases`、`e2e-m03`、`e2e-m04`、`e2e-sessions` 成功；`e2e-core` 的 `dependency_change.sh` 在 checker 版本恢复后未收敛，goal agent run 终态为 failed。不能记录全量 E2E 通过。 |
 
 | 本地定向检查 | 实际结果 | 覆盖范围与限制 |
 |---|---|---|

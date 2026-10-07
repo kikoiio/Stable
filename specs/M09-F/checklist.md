@@ -1,6 +1,6 @@
 # M09-F 受控工作树与并行写入 Checklist
 
-> 状态：已批准，实施中（2026-10-07）。用户批准 M09-F 四份规格文档；验收项取得实际证据后逐项勾选。A/B/C/D旧CI不作为F实现证据。
+> 状态：规格已批准，实施代码已提交；AC1–9 仍需逐项验收。SHA `e24331a` 的 Go 全量、package 与真实 Linux writer/sandbox/quota workflow 通过；通用 E2E `e2e-core` 在依赖恢复阶段失败（2026-10-08）。A/B/C/D旧CI不作为F实现证据。
 
 ## 审批与追溯
 
@@ -78,6 +78,9 @@
 | 检查 | 代码SHA | Workflow / run / job | 结果与限制 |
 |---|---|---|---|
 | Go build + `go test ./...` | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [Go run 37640598695](https://github.com/kikoiio/Stable/actions/runs/37640598695), `build-and-test` | 通过；通用单测不替代真实 writer sandbox/quota 与 AC1–9 组合验收。 |
+| 组合代码 Go build/unit + package | `e24331a0ac6d9745f9dc80fc8aed0142d47d2210` | [Go run 37651671848](https://github.com/kikoiio/Stable/actions/runs/37651671848), `build-and-test`, `test-package` | 两个 jobs 均通过；仍不替代真实 sandbox/quota 与 F AC1–9 逐项验收。 |
+| 真实 writer sandbox + 磁盘 quota + metadata 攻击 | `e24331a0ac6d9745f9dc80fc8aed0142d47d2210` | [M09 Workspace Linux run 37651671803](https://github.com/kikoiio/Stable/actions/runs/37651671803), `writer-sandbox-volume` | 成功；使用 disposable ext4 loop volume、真实 helper 与 fake model fixture，验证受限容量及 metadata attack cases；不代表完整 workspace lifecycle/用户接收闭环。 |
+| 组合代码全量 E2E | `e24331a0ac6d9745f9dc80fc8aed0142d47d2210` | [E2E run 37651671760](https://github.com/kikoiio/Stable/actions/runs/37651671760) | `e2e-core` 的 `dependency_change.sh` checker 版本恢复阶段未收敛，goal agent run 终态为 failed；其它 E2E jobs 通过。 |
 | 全量 E2E workflow | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [E2E run 37640598926](https://github.com/kikoiio/Stable/actions/runs/37640598926), `unit`, `e2e-core`, `e2e-m03`, `e2e-m04`, `e2e-sessions`, `cases` | 所有 job 通过；workflow 没有覆盖 F 的冲突用户 resolution、真实 writer quota/sandbox 集成和生命周期用户接受闭环。 |
 | Go package acceptance | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [Go run 37640598695](https://github.com/kikoiio/Stable/actions/runs/37640598695), `test-package` | 通过；run 总结由 in_progress 更新为 success，job 完成于 2026-10-07 15:16 UTC。仅是预览改动前 SHA 的结果。 |
 | Preview regression first run / repair | `90ed0d7` → `75594bd2c4279c115c18fb5f22c741f868dcfcb5` | [failed Go run 37643405245](https://github.com/kikoiio/Stable/actions/runs/37643405245), `build-and-test`; [repaired Go run 37644076609](https://github.com/kikoiio/Stable/actions/runs/37644076609), `build-and-test` | 首次单测失败仅因 preview lifecycle fixture 未带可信 authority；修复 fixture 后 build 与 `go test ./...` 通过。package job 与 E2E workflow 仍在运行。 |

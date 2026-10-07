@@ -1,6 +1,6 @@
 # M09-D Agent 定义与后台任务 Checklist
 
-> 状态：D 的 AC1–8 与完整功能场景已按测试逐项核对；`75594bd2c4279c115c18fb5f22c741f868dcfcb5` 云端 Go/package/E2E 已通过。本轮 E/F 组合代码仍需新的精确 SHA 云端复验，AC9 保留待验（2026-10-07）。
+> 状态：D 的 AC1–8 与完整功能场景已按测试逐项核对；SHA `e24331a0ac6d9745f9dc80fc8aed0142d47d2210` 的 Go build/unit 与 package 已通过，M09 Workspace Linux 已通过；E2E `e2e-core` 在 `dependency_change.sh` checker 版本恢复阶段失败，故 AC9 保留待验（2026-10-08）。
 
 ## 功能验收
 
@@ -55,4 +55,5 @@
 | 受信边界 | `TestAgentTaskExplicitParentCancelAndSessionOwnership` + `TestAgentTaskGoalAuthorityMatchesWorkAndRejectsMismatch` + `execution.TestReadOnlyExecutorRejectsWritesAndCommands` + `TestAgentCatalogSocketInventoryReloadIsPrivateAndSessionOwned` | 另一session/错误Goal authority/客户端根/越权工具均拒绝；正式sentinel和候选不存在性有断言。 |
 
 - 最近已完成云端基线：代码 SHA `75594bd2c4279c115c18fb5f22c741f868dcfcb5` 的 [Go/package run 37644076609](https://github.com/kikoiio/Stable/actions/runs/37644076609) 与 [E2E run 37644076736](https://github.com/kikoiio/Stable/actions/runs/37644076736) 所有 job 成功。
+- 最新组合代码：SHA `e24331a0ac6d9745f9dc80fc8aed0142d47d2210` 的 [Go run 37651671848](https://github.com/kikoiio/Stable/actions/runs/37651671848) 中 `build-and-test` 与 `test-package` 成功；[E2E run 37651671760](https://github.com/kikoiio/Stable/actions/runs/37651671760) 除 `e2e-core` 外所有 jobs 成功，`e2e-core` 在 `dependency_change.sh` checker 版本恢复阶段超时，agent run 状态为 failed；[M09 Workspace Linux run 37651671803](https://github.com/kikoiio/Stable/actions/runs/37651671803) 成功。AC9 待复验。
 - AC9 在新 E/F 组合代码的 Go/package/E2E 与 sandbox/quota 结果完成后再勾选；以上基线不代替新提交验证。
