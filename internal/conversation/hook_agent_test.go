@@ -25,9 +25,12 @@ type hookAgentDelegator struct {
 	result   agent.DelegationResult
 	err      error
 	called   bool
+	calls    int
 	deadline time.Time
 	entered  chan struct{}
 	release  chan struct{}
+	canceled chan struct{}
+	tasks    []agent.DelegationTask
 }
 
 func (d *hookAgentDelegator) RunBatch(context.Context, agent.ParentRun, []agent.DelegationTask) ([]agent.DelegationResult, error) {
@@ -36,6 +39,8 @@ func (d *hookAgentDelegator) RunBatch(context.Context, agent.ParentRun, []agent.
 
 func (d *hookAgentDelegator) RunTask(ctx context.Context, parent agent.ParentRun, task agent.DelegationTask) (agent.DelegationResult, error) {
 	d.parent, d.task, d.called = parent, task, true
+	d.calls++
+	d.tasks = append(d.tasks, task)
 	d.deadline, _ = ctx.Deadline()
 	if d.entered != nil {
 		close(d.entered)
@@ -44,10 +49,134 @@ func (d *hookAgentDelegator) RunTask(ctx context.Context, parent agent.ParentRun
 		select {
 		case <-d.release:
 		case <-ctx.Done():
+			if d.canceled != nil {
+				close(d.canceled)
+			}
 			return agent.DelegationResult{Status: agent.DelegationCanceled, Error: ctx.Err().Error()}, nil
 		}
 	}
 	return d.result, d.err
+}
+
+func TestHookAgentCoversSessionAndGoalLifecycleEvents(t *testing.T) {
+	for _, kind := range []agent.WorkKind{agent.WorkSession, agent.WorkGoal} {
+		t.Run(string(kind), func(t *testing.T) {
+			delegator := &hookAgentDelegator{result: agent.DelegationResult{Status: agent.DelegationSucceeded}}
+			gate := newHookAgentGate(t, `hooks:
+  - id: start
+    event: run_start
+    action: {type: agent, message: inspect-start}
+  - id: pre
+    event: pre_tool_use
+    action: {type: agent, message: inspect-pre}
+  - id: post
+    event: post_tool_use
+    action: {type: agent, message: inspect-post}
+  - id: end
+    event: run_end
+    action: {type: agent, message: inspect-end}
+`, delegator)
+			work := agent.WorkRef{Kind: kind, SessionID: "session-lifecycle"}
+			if kind == agent.WorkGoal {
+				work.GoalID, work.WorkItemID = "goal-lifecycle", "item-lifecycle"
+			}
+			parent := agent.ParentRun{
+				RunID: "parent-lifecycle", Work: work,
+				Provider: hookAgentTestProvider{}, ProviderName: "fake", Model: "fake-model", ProjectRoot: t.TempDir(),
+			}
+			gate.RunStartRun(context.Background(), parent, work.SessionID, "start event")
+			if rejected, _, _ := gate.PreToolUseRun(context.Background(), parent, work.SessionID, "read_file", map[string]any{"path": "a"}); rejected {
+				t.Fatal("pre_tool_use was rejected unexpectedly")
+			}
+			gate.PostToolUseRun(context.Background(), parent, work.SessionID, "read_file", map[string]any{"path": "a"}, "result")
+			gate.RunEndRun(context.Background(), parent, work.SessionID, string(agent.RunCompleted), "done")
+			if delegator.calls != 4 {
+				t.Fatalf("expected all four lifecycle hooks, got %d calls", delegator.calls)
+			}
+			for i, event := range []string{"run_start", "pre_tool_use", "post_tool_use", "run_end"} {
+				if !strings.Contains(delegator.tasks[i].Instruction, `"event":"`+event+`"`) {
+					t.Fatalf("task %d does not contain %s: %s", i, event, delegator.tasks[i].Instruction)
+				}
+			}
+			if delegator.parent.Work != work {
+				t.Fatalf("last event lost parent work scope: got=%+v want=%+v", delegator.parent.Work, work)
+			}
+		})
+	}
+}
+
+func TestAsyncHookAgentSurvivesNormalParentRunCompletion(t *testing.T) {
+	delegator := &hookAgentDelegator{
+		result:  agent.DelegationResult{Status: agent.DelegationSucceeded, Summary: "async complete"},
+		entered: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{}),
+	}
+	gate := newHookAgentGate(t, `hooks:
+  - id: async-review
+    event: post_tool_use
+    async: true
+    action:
+      type: agent
+      message: "review result"
+`, delegator)
+	parent := agent.ParentRun{
+		RunID: "parent-async-complete", Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: "session-async-complete"},
+		Provider: hookAgentTestProvider{}, Model: "fake-model", ProjectRoot: t.TempDir(),
+	}
+	parentCtx, cancelParent := context.WithCancel(context.Background())
+	gate.PostToolUseRun(parentCtx, parent, parent.Work.SessionID, "read_file", map[string]any{"path": "a"}, "result")
+	select {
+	case <-delegator.entered:
+	case <-time.After(time.Second):
+		t.Fatal("async child did not start")
+	}
+	cancelParent()
+	gate.RunEndRun(context.Background(), parent, parent.Work.SessionID, string(agent.RunCompleted), "done")
+	select {
+	case <-delegator.canceled:
+		t.Fatal("normal parent completion canceled the async child")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(delegator.release)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if notice := gate.DrainNotifications(parent.Work.SessionID); strings.Contains(notice, "async complete") {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("async child result was not delivered after parent completion")
+}
+
+func TestAsyncHookAgentCanceledWhenParentRunIsCancelled(t *testing.T) {
+	delegator := &hookAgentDelegator{
+		entered: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{}),
+	}
+	gate := newHookAgentGate(t, `hooks:
+  - id: async-review
+    event: post_tool_use
+    async: true
+    action:
+      type: agent
+      message: "review result"
+`, delegator)
+	parent := agent.ParentRun{
+		RunID: "parent-async-cancel", Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: "session-async-cancel"},
+		Provider: hookAgentTestProvider{}, Model: "fake-model", ProjectRoot: t.TempDir(),
+	}
+	parentCtx, cancelParent := context.WithCancel(context.Background())
+	gate.PostToolUseRun(parentCtx, parent, parent.Work.SessionID, "read_file", map[string]any{"path": "a"}, "result")
+	select {
+	case <-delegator.entered:
+	case <-time.After(time.Second):
+		t.Fatal("async child did not start")
+	}
+	cancelParent()
+	gate.RunEndRun(context.Background(), parent, parent.Work.SessionID, string(agent.RunCancelled), "cancelled")
+	select {
+	case <-delegator.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("parent run cancellation did not stop the async child")
+	}
 }
 
 func TestHookAgentRejectRemainsStatic(t *testing.T) {

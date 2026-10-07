@@ -37,6 +37,9 @@ type HookGate struct {
 	modTimes    map[string]time.Time
 	onceFired   map[string]map[string]bool
 	queue       map[string][]queuedNotice
+	asyncAgents map[string]map[uint64]context.CancelFunc
+	asyncSeq    uint64
+	closing     bool
 }
 
 func NewHookGate(service *Service, userPath, projectPath string) *HookGate {
@@ -71,7 +74,17 @@ func (g *HookGate) Close() {
 	stop := g.serviceStop
 	g.serviceStop = nil
 	g.serviceCtx = nil
+	g.closing = true
+	var cancelAgents []context.CancelFunc
+	for _, tasks := range g.asyncAgents {
+		for _, cancel := range tasks {
+			cancelAgents = append(cancelAgents, cancel)
+		}
+	}
 	g.mu.Unlock()
+	for _, cancel := range cancelAgents {
+		cancel()
+	}
 	if stop != nil {
 		stop()
 	}
@@ -193,6 +206,9 @@ func (g *HookGate) RunEnd(sessionID, runID, status, message string) {
 
 func (g *HookGate) RunEndRun(ctx context.Context, parent agent.ParentRun, sessionID, status, message string) {
 	parent.Deadline = time.Time{}
+	if status == string(agent.RunCancelled) {
+		g.cancelAsyncAgents(parent.RunID)
+	}
 	g.fire(ctx, parent, sessionID, hooks.Context{Event: hooks.EventRunEnd, Message: message}, parent.RunID, false)
 }
 
@@ -219,7 +235,11 @@ func (g *HookGate) fire(ctx context.Context, parent agent.ParentRun, sessionID s
 		}
 		g.mu.Unlock()
 		if h.Async && !stopOnReject {
-			go g.runOne(ctx, parent, sessionID, h, hookCtx, runID)
+			if strings.EqualFold(h.Action.Type, "agent") {
+				g.startAsyncAgent(ctx, parent, sessionID, h, hookCtx, runID)
+			} else {
+				go g.runOne(ctx, parent, sessionID, h, hookCtx, runID)
+			}
 			continue
 		}
 		result := g.runOne(ctx, parent, sessionID, h, hookCtx, runID)
@@ -237,6 +257,53 @@ func (g *HookGate) fire(ctx context.Context, parent agent.ParentRun, sessionID s
 		return true, firstReject.HookID, msg
 	}
 	return false, "", ""
+}
+
+// Async agent children use the service lifetime so a normally completed run
+// does not cancel them. RunEndRun cancels only children of canceled parents.
+func (g *HookGate) startAsyncAgent(_ context.Context, parent agent.ParentRun, sessionID string, h hooks.Hook, hookCtx hooks.Context, runID string) {
+	g.mu.Lock()
+	if g.closing {
+		g.mu.Unlock()
+		return
+	}
+	base := g.serviceCtx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithCancel(base)
+	g.asyncSeq++
+	id := g.asyncSeq
+	if g.asyncAgents == nil {
+		g.asyncAgents = map[string]map[uint64]context.CancelFunc{}
+	}
+	if g.asyncAgents[parent.RunID] == nil {
+		g.asyncAgents[parent.RunID] = map[uint64]context.CancelFunc{}
+	}
+	g.asyncAgents[parent.RunID][id] = cancel
+	g.mu.Unlock()
+	go func() {
+		defer func() {
+			cancel()
+			g.mu.Lock()
+			delete(g.asyncAgents[parent.RunID], id)
+			if len(g.asyncAgents[parent.RunID]) == 0 {
+				delete(g.asyncAgents, parent.RunID)
+			}
+			g.mu.Unlock()
+		}()
+		g.runOne(ctx, parent, sessionID, h, hookCtx, runID)
+	}()
+}
+
+func (g *HookGate) cancelAsyncAgents(runID string) {
+	g.mu.Lock()
+	tasks := g.asyncAgents[runID]
+	delete(g.asyncAgents, runID)
+	g.mu.Unlock()
+	for _, cancel := range tasks {
+		cancel()
+	}
 }
 
 func (g *HookGate) runOne(ctx context.Context, parent agent.ParentRun, sessionID string, h hooks.Hook, hookCtx hooks.Context, runID string) hooks.Result {

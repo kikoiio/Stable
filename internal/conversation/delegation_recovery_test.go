@@ -126,3 +126,62 @@ func TestRecoverDelegationClosesOpenToolCallAndIsIdempotent(t *testing.T) {
 		t.Fatalf("interrupted=%d toolResults=%d terminal=%v events=%+v", interrupted, toolResults, terminal, second.Events)
 	}
 }
+
+func TestRecoverInterruptedRunEndHookChildAfterTerminal(t *testing.T) {
+	root := t.TempDir()
+	session, err := sessionlog.Create(root, "hook-agent-recovery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sessionlog.Append(root, session.ID, sessionlog.EventRunStarted, sessionlog.RunStarted{RunID: "run-end", WorkKind: string(agent.WorkSession), Intent: "finish"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sessionlog.Append(root, session.ID, sessionlog.EventRunEvent, sessionlog.RunEvent{
+		ID: "terminal", RunID: "run-end", SessionID: session.ID, RunSeq: 1, At: time.Now().UTC(),
+		Kind: string(agent.EventTerminal), Payload: map[string]any{"status": agent.RunCompleted},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sessionlog.Append(root, session.ID, sessionlog.EventRunEvent, sessionlog.RunEvent{
+		ID: "hook-running", RunID: "run-end", SessionID: session.ID, RunSeq: 2, At: time.Now().UTC(),
+		Kind: string(agent.EventDelegation), Payload: agent.DelegationEvent{
+			BatchID: "hook-batch", TaskID: "hook-task", TaskName: "hook agent: notify", Status: agent.DelegationRunning,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err = recoverDelegationRuns(root); err != nil {
+		t.Fatal(err)
+	}
+	first, err := sessionlog.Replay(root, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = recoverDelegationRuns(root); err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessionlog.Replay(root, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Events) != len(first.Events) {
+		t.Fatalf("second recovery appended duplicate events: before=%d after=%d", len(first.Events), len(second.Events))
+	}
+	var interrupted int
+	for _, event := range second.Events {
+		if event.Type != sessionlog.EventRunEvent {
+			continue
+		}
+		var runEvent sessionlog.RunEvent
+		if decodeSessionData(event.Data, &runEvent) != nil || runEvent.Kind != string(agent.EventDelegation) {
+			continue
+		}
+		var update agent.DelegationEvent
+		if decodeSessionData(runEvent.Payload, &update) == nil && update.TaskID == "hook-task" && update.Status == agent.DelegationInterrupted {
+			interrupted++
+		}
+	}
+	if interrupted != 1 {
+		t.Fatalf("expected one interrupted hook child event, got %d: %+v", interrupted, second.Events)
+	}
+}

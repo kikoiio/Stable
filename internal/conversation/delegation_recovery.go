@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -247,6 +248,36 @@ func recoverSessionDelegation(root, sessionID string, events []sessionlog.Event)
 	for runID := range forkSkillOwners {
 		if !terminal[runID] {
 			interruptedRuns[runID] = true
+		}
+	}
+	// Hook agent actions do not have a parent tool call to pair with their
+	// child result. Recover their latest non-terminal progress event directly,
+	// including run_end hooks whose parent terminal was already persisted.
+	latestHookTasks := map[string]recoveredDelegationEvent{}
+	for _, stored := range delegations {
+		if !strings.HasPrefix(stored.event.TaskName, "hook agent") {
+			continue
+		}
+		key := stored.runID + "\x00" + stored.event.BatchID + "\x00" + stored.event.TaskID
+		if previous, ok := latestHookTasks[key]; !ok || stored.sessionSeq > previous.sessionSeq {
+			latestHookTasks[key] = stored
+		}
+	}
+	pendingHookTasks := make([]recoveredDelegationEvent, 0, len(latestHookTasks))
+	for _, stored := range latestHookTasks {
+		pendingHookTasks = append(pendingHookTasks, stored)
+	}
+	sort.Slice(pendingHookTasks, func(i, j int) bool {
+		return pendingHookTasks[i].sessionSeq < pendingHookTasks[j].sessionSeq
+	})
+	for _, stored := range pendingHookTasks {
+		if stored.event.Status.IsTerminal() {
+			continue
+		}
+		stored.event.Status = agent.DelegationInterrupted
+		stored.event.Error = "service restarted before the hook child task completed"
+		if err = appendDelegationRunEvent(root, sessionID, stored.runID, &lastSeq, stored.event); err != nil {
+			return err
 		}
 	}
 	for runID := range hasDelegations {
