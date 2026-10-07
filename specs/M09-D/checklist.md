@@ -1,6 +1,6 @@
 # M09-D Agent 定义与后台任务 Checklist
 
-> 状态：D 的 AC1–8 与完整功能场景已按测试逐项核对；SHA `f8fce2d15bc3262a770300057cc7638209f4c672` 的 unit 与 E2E `e2e-core` 已通过；Go `test-package` 因依赖安装超过 30 分钟上限，`build-and-test` 同步无进展后取消。E2E `e2e-m03`/`cases` 也因依赖安装无进展取消，AC9 保留待完整回归与组合逐项核对（2026-10-08）。
+> 状态：D 的 AC1–8 与完整功能场景已按测试逐项核对；最终 SHA `f458c91a587004af839409c65ee8c44bd4b93b13` 的 Go build/unit、package 与全量 E2E 均通过。AC9 保留待组合覆盖逐项核对（2026-10-08）。
 
 ## 功能验收
 
@@ -56,5 +56,6 @@
 
 - 最近已完成云端基线：代码 SHA `75594bd2c4279c115c18fb5f22c741f868dcfcb5` 的 [Go/package run 37644076609](https://github.com/kikoiio/Stable/actions/runs/37644076609) 与 [E2E run 37644076736](https://github.com/kikoiio/Stable/actions/runs/37644076736) 所有 job 成功。
 - 最新组合代码：SHA `e24331a0ac6d9745f9dc80fc8aed0142d47d2210` 的 [Go run 37651671848](https://github.com/kikoiio/Stable/actions/runs/37651671848) 中 `build-and-test` 与 `test-package` 成功；[E2E run 37651671760](https://github.com/kikoiio/Stable/actions/runs/37651671760) 除 `e2e-core` 外所有 jobs 成功，`e2e-core` 在 `dependency_change.sh` checker 版本恢复阶段超时，agent run 状态为 failed；[M09 Workspace Linux run 37651671803](https://github.com/kikoiio/Stable/actions/runs/37651671803) 成功。AC9 待复验。
-- 修复后复验：SHA `f8fce2d15bc3262a770300057cc7638209f4c672` 的 [E2E run 37664859557](https://github.com/kikoiio/Stable/actions/runs/37664859557) 中 `unit`、`e2e-core`、`e2e-m04`、`e2e-sessions` 成功，`e2e-m03`/`cases` 因 `setup-e2e-deps` 无进展而取消。[Go run 37664859562](https://github.com/kikoiio/Stable/actions/runs/37664859562) 的 `test-package` 超过 30 分钟上限，`build-and-test` 停滞后取消；[M09 Workspace Linux run 37664859448](https://github.com/kikoiio/Stable/actions/runs/37664859448) 成功。E2E `unit` 已在同 SHA 通过全量 Go unit tests；`dependency_change.sh` checker 恢复问题在本轮 `e2e-core` 通过。
-- AC9 在 SHA `f8fce2d` 的 Go/package/E2E 完整终态及组合覆盖逐项核对后再决定是否勾选；全量回归结果不替代 D AC9 的逐项证据。
+- 最终验证：SHA `f458c91a587004af839409c65ee8c44bd4b93b13` 的 [Go run 37673116497](https://github.com/kikoiio/Stable/actions/runs/37673116497) (`build-and-test`, `test-package`)、[E2E run 37673116514](https://github.com/kikoiio/Stable/actions/runs/37673116514) (`unit`, `cases`, `e2e-core`, `e2e-m03`, `e2e-m04`, `e2e-sessions`) 与 [M09 Workspace Linux run 37673116455](https://github.com/kikoiio/Stable/actions/runs/37673116455) (`writer-sandbox-volume`) 全部成功。`dependency_change.sh` checker 恢复也通过。
+- 失败历史：`db55e0e` 的 [Go run 37669565807](https://github.com/kikoiio/Stable/actions/runs/37669565807) package 达到 30 分钟安装上限，E2E run 37669565678 的 `e2e-m04`/`e2e-sessions` 因同一 setup 卡住被取消；日志定位到 apt runner mirrorlist 仍选择 Azure HTTP。修正 mirrorlist 后在 `f458c91` 复验通过。
+- 全量回归结果不替代 D AC9 的逐项证据。

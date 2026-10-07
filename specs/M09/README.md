@@ -1,6 +1,6 @@
 # M09 并行协作与工作树：范围与进度
 
-> 2026-10-08 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。D/E/F 实现改动已提交并推送。当前 HEAD `f8fce2d15bc3262a770300057cc7638209f4c672` 的 E2E `unit`、`e2e-core`、`e2e-m04`、`e2e-sessions` 与 M09 Workspace Linux 已通过。Go `test-package` 因 `setup-e2e-deps` 超过 30 分钟上限，`build-and-test` 在同一步无进展后取消；E2E 的 `e2e-m03`/`cases` 在相同依赖安装步骤无进展后取消。D/E/F checklist 仍有逐项验收缺口。
+> 2026-10-08 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。D/E/F 实现改动已提交并推送。最终验证 SHA `f458c91a587004af839409c65ee8c44bd4b93b13` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 全部通过。此前 run 暴露 hosted runner mirrorlist 仍选择 Azure HTTP apt 源；CI setup action 切换到官方 HTTPS 源后复验通过。D/E/F checklist 仍有逐项验收缺口。
 
 ## 已完成
 
@@ -16,9 +16,9 @@
 
 | 建议子项 | 源端行为与文件 | 当前缺口 | 实施前置 |
 |---|---|---|---|
-| M09-D agent 定义与后台任务 | `internal/agents/definition.go`、`loader.go`、`agent_tool.go`、`subagent.go`；具名角色、定义覆盖、后台启动、状态/摘要、取消、完成通知 | 主实现已提交；AC1–8 有证据映射；AC9 仍待逐项核对 | SHA `f8fce2d` 的 `e2e-core` 与 unit 通过；package 因依赖安装超时、Go workflow build job 取消。按 [checklist](../M09-D/checklist.md) 保持 AC9 待验 |
-| M09-E 团队与协调器 | `internal/teams` 的 scope/预算/任务图，sessionlog typed facts/projection；shared-pool member 首轮 spawn、多轮显式/消息唤醒、child run 持久化/中断恢复、消息批次 handoff、plan/shutdown 请求、强停/延迟关闭、团队/task 工具与 TUI 命令；coordinator 下一 run 开关持久化、team-only schema 和 executor 硬 allowlist；有界 FIFO capacity 队列与 grant generation 取消/关闭校验 | 实现与自动 lead-message handoff 已接通，fake runner 用例和本轮 unit 通过；服务恢复、取消/关闭和完整 E/TUI 组合仍须逐项按 [checklist](../M09-E/checklist.md) 记录。E AC1–9 尚未整体验收 | SHA `f8fce2d` 的 unit、`e2e-core`、`e2e-m04`、`e2e-sessions` 通过；Go package timeout，Go build job 取消；E2E `e2e-m03`/`cases` 因依赖安装无进展取消；规格已批准 |
-| M09-F 受控工作树与并行写入 | `internal/workspace` ownership、manifest、配额预算、私有 Git、materializer、独立 lifecycle service 与 B/F/W 合并；candidate metadata 事务和身份恢复；conversation/TUI 生命周期、按完整 B/F/W digest 绑定的逐路径 conflict resolution、用户 dirty-discard 预览/确认、D named-agent writer lease、受限文件工具和持久配额；CI 使用 disposable ext4 验证真实磁盘上限与 metadata 攻击 | Linux writer/sandbox/quota 组合 workflow 已通过；F AC1–9 的私有 Git、生命周期故障、用户决策完整闭环和 Team+F 组合仍需逐项审计，不把单项 workflow 当成整体验收 | SHA `f8fce2d` 的 M09 Workspace Linux、unit 与 `e2e-core` 通过；Go package timeout，Go build job 取消；E2E `e2e-m03`/`cases` 因依赖安装无进展取消；规格已批准 |
+| M09-D agent 定义与后台任务 | `internal/agents/definition.go`、`loader.go`、`agent_tool.go`、`subagent.go`；具名角色、定义覆盖、后台启动、状态/摘要、取消、完成通知 | 主实现已提交；AC1–8 有证据映射；AC9 仍待逐项核对 | SHA `f458c91` 的 Go build/unit、package 与全量 E2E 通过。按 [checklist](../M09-D/checklist.md) 保持 AC9 待组合核对 |
+| M09-E 团队与协调器 | `internal/teams` 的 scope/预算/任务图，sessionlog typed facts/projection；shared-pool member 首轮 spawn、多轮显式/消息唤醒、child run 持久化/中断恢复、消息批次 handoff、plan/shutdown 请求、强停/延迟关闭、团队/task 工具与 TUI 命令；coordinator 下一 run 开关持久化、team-only schema 和 executor 硬 allowlist；有界 FIFO capacity 队列与 grant generation 取消/关闭校验 | 实现与自动 lead-message handoff 已接通，fake runner 用例和全量 Go/E2E 回归通过；服务恢复、取消/关闭和完整 E/TUI 组合仍须逐项按 [checklist](../M09-E/checklist.md) 记录。E AC1–9 尚未整体验收 | SHA `f458c91` 的 Go build/unit、package、E2E 全部 jobs 通过；规格已批准 |
+| M09-F 受控工作树与并行写入 | `internal/workspace` ownership、manifest、配额预算、私有 Git、materializer、独立 lifecycle service 与 B/F/W 合并；candidate metadata 事务和身份恢复；conversation/TUI 生命周期、按完整 B/F/W digest 绑定的逐路径 conflict resolution、用户 dirty-discard 预览/确认、D named-agent writer lease、受限文件工具和持久配额；CI 使用 disposable ext4 验证真实磁盘上限与 metadata 攻击 | Linux writer/sandbox/quota 组合 workflow 已通过；F AC1–9 的私有 Git、生命周期故障、用户决策完整闭环和 Team+F 组合仍需逐项审计，不把单项 workflow 当成整体验收 | SHA `f458c91` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 均通过；规格已批准 |
 
 源文件位于本机 `/home/neo/Projects/mewcode-golang`。核对使用源码读取，未执行源项目、真实 provider 或重型构建。
 
@@ -35,4 +35,4 @@ Linux 为当前首发平台，源端 iTerm 专用后端不属于本轮 Linux 验
 
 ## 下一步
 
-完成 SHA `f8fce2d` 的在途 Go/package/E2E jobs 记录；继续完成 [M09-E checklist](../M09-E/checklist.md) 与 [M09-F checklist](../M09-F/checklist.md) 的逐项证据映射。`dependency_change.sh` checker 恢复问题已在本轮 `e2e-core` 通过；只有 D/E/F 全部验收通过后才更新整体完成状态。
+继续完成 [M09-D](../M09-D/checklist.md)、[M09-E](../M09-E/checklist.md) 与 [M09-F](../M09-F/checklist.md) 的逐项证据映射和剩余组合场景。`dependency_change.sh` checker 恢复问题已在最终 SHA 的 `e2e-core` 通过；只有 D/E/F 全部验收通过后才更新整体完成状态。

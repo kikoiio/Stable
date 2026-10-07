@@ -49,7 +49,7 @@ mewcode 的 TUI 主文件直接引用二十多个内部模块，涵盖模型、�
 
 ### M09 当前进度（2026-10-08）
 
-M09-A（同步只读协作）、M09-B（fork skill）和 M09-C（hook agent）已完成实现与验收；M09-D/E/F 已实现并提交，但仍有逐项验收缺口，**M09 整体仍未完成**。SHA `f8fce2d15bc3262a770300057cc7638209f4c672` 的 E2E `unit`、`e2e-core`、`e2e-m04`、`e2e-sessions` 与 M09 Workspace Linux 已通过；Go package 因依赖安装超过 30 分钟上限，Go build job 停滞后取消；E2E `e2e-m03` 与 `cases` 因相同依赖安装步骤无进展而取消。
+M09-A（同步只读协作）、M09-B（fork skill）和 M09-C（hook agent）已完成实现与验收；M09-D/E/F 已实现并提交，但仍有逐项验收缺口，**M09 整体仍未完成**。最终验证 SHA `f458c91a587004af839409c65ee8c44bd4b93b13` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 全部通过。此前 apt mirrorlist 选到 Azure HTTP 源导致 setup jobs 挂起，CI action 修正为官方 HTTPS 源后复验通过。
 
 完整源端对照、已通过证据和剩余完成条件见 [M09 范围与进度](specs/M09/README.md)。D/E/F 的规格均已批准；总体验收以各自 checklist 中的证据和未完成项为准。
 

@@ -1,6 +1,6 @@
 # M09-E 团队、消息与只读协调器 Checklist
 
-> 状态：规格已批准，实施代码已提交；AC1–9 与完整场景仍按实际证据逐项验收。SHA `f8fce2d` 的 unit 与 `e2e-core` 已通过；Go package 因依赖安装超过 30 分钟而 timeout，Go build job 停滞后取消；`e2e-m03` 和 `cases` 因依赖安装无进展取消（2026-10-08）。
+> 状态：规格已批准，实施代码已提交；AC1–9 与完整场景仍按实际证据逐项验收。最终 SHA `f458c91` 的 Go build/unit、package 与 E2E 全部 jobs 通过；E AC1–9 仍有逐项验收缺口（2026-10-08）。
 
 ## 功能验收
 
@@ -52,9 +52,12 @@ E实现与运行验收进行中。每项完成后记录实际证据；D/A/B/C旧
 | 组合代码 E2E | `e24331a0ac6d9745f9dc80fc8aed0142d47d2210` | [E2E run 37651671760](https://github.com/kikoiio/Stable/actions/runs/37651671760) | `unit`、`cases`、`e2e-m03`、`e2e-m04`、`e2e-sessions` 成功；`e2e-core` 的 `dependency_change.sh` 在 checker 版本恢复后未收敛，goal agent run 终态为 failed。不能记录全量 E2E 通过。 |
 | 修复后组合代码 E2E | `f8fce2d15bc3262a770300057cc7638209f4c672` | [E2E run 37664859557](https://github.com/kikoiio/Stable/actions/runs/37664859557) | `unit`、`e2e-core`、`e2e-m04`、`e2e-sessions` 成功；`e2e-m03`、`cases` 因 `setup-e2e-deps` 无进展取消。`dependency_change.sh` checker 恢复已通过；现有 workflow 仍不能替代 E AC1–9 的完整多轮/恢复组合验收。 |
 | 修复后组合代码 Go/package | `f8fce2d15bc3262a770300057cc7638209f4c672` | [Go run 37664859562](https://github.com/kikoiio/Stable/actions/runs/37664859562) | `test-package` 的 `setup-e2e-deps` 超过 30 分钟上限；`build-and-test` 停滞在同一步后取消。全量 Go 单测由同 SHA 的 E2E `unit` job 通过；package acceptance 未完成。 |
+| 最终组合代码 Go/package | `f458c91a587004af839409c65ee8c44bd4b93b13` | [Go run 37673116497](https://github.com/kikoiio/Stable/actions/runs/37673116497) | `build-and-test` 与 `test-package` 均成功；不替代 E AC1–9 的逐项证明。 |
+| 最终组合代码 E2E | `f458c91a587004af839409c65ee8c44bd4b93b13` | [E2E run 37673116514](https://github.com/kikoiio/Stable/actions/runs/37673116514) | `unit`、`cases`、`e2e-core`、`e2e-m03`、`e2e-m04`、`e2e-sessions` 全部成功；`dependency_change.sh` checker 恢复通过。仍缺完整 team 多轮/取消/恢复与 client/TUI AC9 组合场景。 |
 
 | 本地定向检查 | 实际结果 | 覆盖范围与限制 |
 |---|---|---|
 | conversation/sessionlog/workspace 定向 Go 测试 | 通过（2026-10-07）；选择 `TestTeam*`、`TestThreeWay*` | 验证FIFO队首阻塞/硬上限、容量等待重启转 interrupted、提交后发布失败补偿、terminal/member-state恢复间隙、team event 投影与三方合并；不是AC2/AC9或全量验收。首次默认`/tmp`链接因配额失败，改用缓存盘`TMPDIR`后通过。 |
 | team conversation/sessionlog 定向 Go 测试 | 通过（2026-10-07）；`TestTeamMemberContinuesAcrossRestartWithExplicitRoleChangeAcceptance`、`TestTeamRecovery*`、`TestTeamRoleMetadataCanChangeOnlyOnExplicitLeadResume`，`TMPDIR=/home/neo/.cache/tmp GOMAXPROCS=2 go test -p 1` | Fake child runner验证同一成员两轮、摘要与消息延续、角色正文未入日志、重启不自动重跑、角色变化先提示后显式接受；recovery把存活idle/awaiting_plan成员标为interrupted。未覆盖共享池屏障/队满公平、双parent取消和完整AC2/AC6。 |
+| `team_send` 协议入口与 idle member handoff | `TestLeadMessageAutomaticallyResumesIdleTeamMember`；最终 SHA `f458c91` 的 E2E `unit` job | `validateClient` 和 `handleTeamRequest` 真实入口返回有序、接收者固定的消息；sessionlog投影与响应一致；同一逻辑member收到消息后仅启动一个新turn。覆盖此子场景，不覆盖 p2p/broadcast 批次恢复、共享池公平或完整 AC2/AC3。 |
 | team TUI 定向 Go 测试 | 通过（2026-10-07）；`TestTeamCommands`，`TMPDIR=/home/neo/.cache/tmp GOMAXPROCS=2 go test -p 1` | 验证 `/team ... resume ... --accept-role-change` 编码显式确认；不代表完整client/TUI协作路径或AC9。 |
