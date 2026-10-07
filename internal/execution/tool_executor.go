@@ -91,7 +91,7 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		}
 	}
 	if e.deps.SessionRoot != "" {
-		if _, logErr := sessionlog.Append(e.deps.SessionRoot, e.request.Work.SessionID, sessionlog.EventToolCall, sessionlog.ToolCall{CallID: call.ID, Name: call.Name, Input: redactJSON(args, e.deps.ProviderCredential)}); logErr != nil {
+		if _, logErr := sessionlog.Append(e.deps.SessionRoot, e.request.Work.SessionID, sessionlog.EventToolCall, sessionlog.ToolCall{CallID: call.ID, Name: call.Name, Input: redactJSON(memoryAuditInput(call.Name, args), e.deps.ProviderCredential)}); logErr != nil {
 			return outcome, fmt.Errorf("record tool call: %w", logErr)
 		}
 	}
@@ -587,12 +587,30 @@ func (e *toolRunExecutor) finish(outcome agent.ToolOutcome, started time.Time) a
 	}
 	if e.deps.SessionRoot != "" && outcome.CallID != "" {
 		errText := ""
-		if outcome.IsError {
-			errText = outcome.Content
+		loggedResult := outcome.Content
+		if outcome.ToolName == "memory_read" {
+			loggedResult = "[memory content omitted]"
 		}
-		_, _ = sessionlog.Append(e.deps.SessionRoot, e.request.Work.SessionID, sessionlog.EventToolResult, sessionlog.ToolResult{CallID: outcome.CallID, Result: outcome.Content, Error: errText})
+		if outcome.IsError {
+			errText = loggedResult
+		}
+		_, _ = sessionlog.Append(e.deps.SessionRoot, e.request.Work.SessionID, sessionlog.EventToolResult, sessionlog.ToolResult{CallID: outcome.CallID, Result: loggedResult, Error: errText})
 	}
 	return outcome
+}
+
+func memoryAuditInput(name string, args map[string]any) map[string]any {
+	if name != "memory_save" {
+		return args
+	}
+	copy := make(map[string]any, len(args))
+	for key, value := range args {
+		if key != "body" {
+			copy[key] = value
+		}
+	}
+	copy["body"] = "[memory content omitted]"
+	return copy
 }
 
 // redact strips the provider credential from tool output before it reaches
@@ -674,6 +692,26 @@ func (e *toolRunExecutor) executeHostTool(ctx context.Context, call llm.ToolUse,
 		if e.deps.MCP != nil {
 			return e.executeToolSearch(args, outcome), true
 		}
+	case "memory_list", "memory_read", "memory_save", "memory_delete":
+		if e.deps.Memory != nil {
+			content, operation, scope, entry, err := e.executeMemoryTool(ctx, call.Name, args)
+			state := "success"
+			if err != nil {
+				state = "failure"
+				content = "Error: " + err.Error()
+			}
+			if e.deps.SessionRoot != "" {
+				_, _ = sessionlog.Append(e.deps.SessionRoot, e.request.Work.SessionID, sessionlog.EventMemoryAction, sessionlog.MemoryActionRecord{
+					Scope: scope, Entry: boundedMemoryEventText(entry), Operation: operation, State: state, At: memoryActionTime(e.deps.Now),
+				})
+			}
+			outcome.Content = content
+			if err != nil {
+				return outcome, true
+			}
+			outcome.Status, outcome.IsError = agent.ToolSucceeded, false
+			return outcome, true
+		}
 	case "write_file", "edit_file":
 		if target, ok := e.planFileTarget(args); ok {
 			return e.executePlanFileWrite(ctx, call, args, target, outcome), true
@@ -684,6 +722,14 @@ func (e *toolRunExecutor) executeHostTool(ctx context.Context, call llm.ToolUse,
 		}
 	}
 	return outcome, false
+}
+
+func boundedMemoryEventText(value string) string {
+	runes := []rune(value)
+	if len(runes) > sessionlog.MaxMemoryEventText {
+		return string(runes[:sessionlog.MaxMemoryEventText])
+	}
+	return value
 }
 
 // executePlanFileWrite writes the session plan file on the host. The

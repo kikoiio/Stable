@@ -70,6 +70,9 @@ type ToolExecutorDeps struct {
 	// index. Nil keeps all three entries on the plain unknown-tool path, so
 	// deployments without MCP stay unchanged.
 	MCP MCPCaller
+	// MemoryProvider serves the scoped memory host tools. Nil leaves them
+	// unavailable and preserves the unknown-tool behavior.
+	Memory MemoryProvider
 	// HookRunner runs optional pre/post tool-use hooks. A nil runner leaves
 	// existing tool execution behavior unchanged.
 	HookRunner HookRunner
@@ -185,6 +188,11 @@ func WithSkillProvider(provider SkillProvider) ToolExecutorOption {
 // the mcp_call bridge and tool_search.
 func WithMCPCaller(caller MCPCaller) ToolExecutorOption {
 	return func(deps *ToolExecutorDeps) { deps.MCP = caller }
+}
+
+// WithMemoryProvider injects the bound memory service used by memory_* tools.
+func WithMemoryProvider(provider MemoryProvider) ToolExecutorOption {
+	return func(deps *ToolExecutorDeps) { deps.Memory = provider }
 }
 
 // WithHookRunner injects the lifecycle hook runner for tool calls.
