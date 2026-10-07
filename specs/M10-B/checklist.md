@@ -5,7 +5,7 @@
 ## AC1：Remote 生命周期与传输
 
 - [x] `stable remote status` 能显示停止和运行状态；无参数启动 remote 时监听地址为 loopback（验证：`TestRemoteStatusIsStoppedWhenRuntimeIsDown`、`TestRemoteStatusReportsSupervisorRemoteState`、`TestRemoteConfigDefaults` 与 `TestRemoteManagerServesEmbeddedIndexAndStops`）。
-- [ ] `stable up` 不会自行启动 remote；`stable remote up` 在 runtime 未运行时会启动 runtime 后监听；`stable remote down` 关闭 remote 但保留 runtime（验证：生命周期集成测试，分别检查 runtime/remote 状态）。
+- [x] `stable up` 不会自行启动 remote；`stable remote up` 在 runtime 未运行时会启动 runtime 后监听；`stable remote down` 关闭 remote 但保留 runtime（验证：package acceptance `tests/package/cli.sh` 使用安装包真实 CLI 检查三种生命周期及 runtime 状态）。
 - [x] 非 loopback 监听缺少证书或私钥时启动失败，错误不会回退到明文；提供有效自签证书后 HTTPS 可访问（验证：`TestRemoteConfigNonLoopbackRequiresCertificateAndKey` 与 `TestRemoteManagerTLSUsesSecureCookie`；后者将 listener 绑定 `0.0.0.0` 并通过 HTTPS 请求配对）。
 - [x] 执行 `stable down` 后 remote listener 关闭且 WebSocket 连接结束（验证：`TestDispatchSupervisorDownStopsRemoteBeforeReply` 确认 supervisor down 先停止 remote；`TestRemoteManagerServesEmbeddedIndexAndStops`/`TestWebSocketAccessGrantAndScopedConversationBridge` 确认 listener 关闭、WebSocket 结束并释放 grant）。
 
@@ -55,4 +55,4 @@
 
 - [x] 用户启动 remote 并配对；服务端建立同源 HttpOnly cookie；用户请求项目目录；本机 TUI 显示客户端与规范目录并批准；远程会话完成创建、流式聊天、取消 run 和权限审批（验证：`TestRemoteConversationEndToEndWithLocalApprovalAndFakeProvider` 逐段通过真实 manager、WebSocket、conversation service、fake provider 与本机 IPC 审批替身）。
 - [x] 同一连接获批后断开并重连；第二次目录请求被 TUI 再次展示。随后尝试跨站 Origin、无效 grant 和 LAN 无证书启动；三者均被拒绝，原获批目录与目标状态未被越权访问（验证：remote end-to-end 重连申请新 grant 并拒绝远程 `create_goal`、确认目标状态未变；Origin、grant/root 和无 TLS 边界分别由 `TestWebSocketRequiresAuthenticationAndSameOrigin`、`TestAuthorizeRemoteMessageUsesGrantAndServerRunBounds`、`TestRemoteConfigNonLoopbackRequiresCertificateAndKey` 覆盖）。
-- [ ] 远程连接仍活动时执行 `stable down`；浏览器连接终止，remote 端口关闭，runtime 退出（验证：生命周期端到端测试检查 WebSocket close、listener 拒绝新连接及 runtime 状态）。
+- [x] 远程连接仍活动时执行 `stable down`；浏览器连接终止，remote 端口关闭，runtime 退出（验证：package acceptance `tests/package/cli.sh` 用一次性配对 cookie 建立真实 WebSocket，再检查 `stable down` 关闭 socket、监听端口并退出 runtime）。
