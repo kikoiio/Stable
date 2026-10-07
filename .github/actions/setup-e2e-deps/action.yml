@@ -17,6 +17,10 @@ runs:
         if [[ -f "$ubuntu_sources" ]] && grep -q 'http://azure.archive.ubuntu.com/ubuntu' "$ubuntu_sources"; then
           sudo sed -i 's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' "$ubuntu_sources"
         fi
+        mirror_list=/etc/apt/apt-mirrors.txt
+        if [[ -f "$mirror_list" ]] && grep -q 'http://azure.archive.ubuntu.com/ubuntu' "$mirror_list"; then
+          sudo sed -i 's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' "$mirror_list"
+        fi
 
     - name: Install KiCad 9 and display tooling
       if: inputs.kicad == 'true'
