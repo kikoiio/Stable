@@ -92,24 +92,32 @@ func (s *Service) replyQuestion(ctx context.Context, c ClientMsg) ([]ServerMsg, 
 		ReplyText:  redactProviderCredential(c.Text, s.deps.ChatProvider, s.deps.Provider),
 		RepliedAt:  time.Now().UTC(),
 	}
+	// The append, the waiter check and the conditional queueing must be one
+	// critical section: an Ask waiting on this question can consume the reply
+	// event and deregister its waiter between the append and the check,
+	// leaving a consumed reply double-queued as a user message (CI flake in
+	// TestAskAdapterAskReplyLoop). Holding eventMu across all three steps
+	// orders this whole block before the Ask side's consume+exitAskWait,
+	// which also runs under eventMu, so the waiter count is still valid when
+	// checked.
 	s.eventMu.Lock()
 	_, err = sessionlog.Append(root, c.SessionID, sessionlog.EventReply, reply)
-	s.eventMu.Unlock()
-	if err != nil {
-		return nil, fmt.Errorf("record reply: %w", err)
-	}
-	if s.askWaiterCount(c.SessionID) == 0 {
+	if err == nil && s.askWaiterCount(c.SessionID) == 0 {
 		// No run is waiting for this answer: the question outlived its run
 		// (cancel, crash, completion). Queue the reply as an ordinary user
 		// message so the next run picks it up from the conversation history,
 		// matching the /say semantics.
 		message := sessionlog.Message{Role: "user", Kind: "text", Text: reply.ReplyText}
-		s.eventMu.Lock()
 		_, err = sessionlog.Append(root, c.SessionID, sessionlog.EventMessage, message)
-		s.eventMu.Unlock()
 		if err != nil {
-			return nil, fmt.Errorf("queue reply as message: %w", err)
+			err = fmt.Errorf("queue reply as message: %w", err)
 		}
+	} else if err != nil {
+		err = fmt.Errorf("record reply: %w", err)
+	}
+	s.eventMu.Unlock()
+	if err != nil {
+		return nil, err
 	}
 	return []ServerMsg{{Type: "reply", Reply: &reply}}, nil
 }
