@@ -158,7 +158,7 @@
 - `cmd/stable/main.go` / `cmd/stable/oneshot.go` — down/demo 路径在 runtime 停止后调用 StopSessionProcesses 清理跨调用 GUI 残留并打印计数。
 - `tests/e2e/m03_computer_session_test.go` — 会话停止后 pgrep 断言无 Xvfb/eeschema 残留、旧 generation handle 被拒、正式工程 digest 不变(L83–198)。
 
-**证据类型与已执行验证**:可运行验证——`go test ./internal/sandbox/ -count=1`(ok,bwrap 实跑,含 TestRunProcessGroupStopsDescendantsOnContextCancellation 组级终止)、`go test ./internal/runtime/...`(ok)、`python3 -m unittest discover -s workers/computer`(OK,guest 侧契约)。仅代码审阅——supervisor 的 processAlive/stopProcess 与 sessions.go 的 terminateIf 误杀防护无自动测试(需真实子进程编排/伪造 SQLite 句柄);m03 e2e 全套未在本阶段执行(重)。
+**证据类型与已执行验证**:可运行验证——`go test ./internal/sandbox/ -count=1`(ok,bwrap 实跑,含 TestRunProcessGroupStopsDescendantsOnContextCancellation 组级终止)、`go test ./internal/runtime/...`(ok);`go test ./internal/runtime -run '^TestStopSessionProcessesIgnoresUnrelatedPID$' -count=1`(2026-10-07 PASS,伪造 SQLite runtime_handle 指向无关 sleep 进程后未发送信号)、`python3 -m unittest workers/computer/test_candidate.py`(2026-10-07 PASS,7 项，含进程身份不匹配及非自有锁保护);M03 computer session e2e(2026-10-06 PASS)覆盖真实会话清理、stale 与 formal digest 不变。原“误杀防护无自动测试”缺口已关闭。
 
 **macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
 
@@ -176,7 +176,7 @@
 - AC-PROC-3〔降级〕:`python3 -m unittest discover -s workers/computer` → 通过(已执行,OK)。
 - AC-PROC-4:`stable down` → 报 stopped N leftover GUI session process(es) 计数如实(手工)。
 - AC-PROC-5:`bash tests/e2e/m03_computer_session.sh`(需沙箱+GUI)→ 停止后 pgrep 无残留、stale handle 被拒、formal digest 不变(已执行,2026-10-06,PASS)。
-- AC-PROC-6〔降级〕:向 computer_sessions 写入指向无关进程的伪造 runtime_handle 后 StopSessionProcesses → 无关进程不收到任何信号(现状无自动测试,需新增定向测试或手工验证)。
+- AC-PROC-6〔降级〕:向 computer_sessions 写入指向无关进程的伪造 runtime_handle 后 StopSessionProcesses → 无关进程不收到任何信号(`TestStopSessionProcessesIgnoresUnrelatedPID`,2026-10-07,PASS)。
 
 **边界与矩阵外备注**:bwrap --die-with-parent 承担部分进程树清理责任,抽象进程托管契约时须显式化;guest 侧 bridge.py 是进程托管的另一半实现(Python),平台审计不能只看 Go;Pdeathsig 语义是「创建线程死亡」而非「父进程死亡」,靠 --die-with-parent 兜底(仅代码审阅);工具超时(600s)经 ctx 取消落到 runProcessGroup 组终止,抽象时需一并考虑;会话控制 socket 目录经 MkdirTemp 落 /tmp(路径差异归 C01)。
 
@@ -356,7 +356,7 @@
 - `internal/runtime/doctor.go`(22、26)— 固定文件检查(libexec/agentctl、agentworker、temporal、fixture、schemas、两个 bridge.py)+ exec.LookPath 主机 PATH 检查 python3、kicad-cli、kicad、eeschema、Xvfb、xvfb-run、xprop、xwininfo、import;缺失提示安装系统包;有缺失即非零退出(main.go:144–146)。
 - `internal/dependency/collector.go`(31)+ `workers/kicad/erc.py`(38–68)— 桥不可用即报错;`kicad-cli version` 失败返回 'blocked',reason 'kicad-cli version unavailable; result not verifiable'(不猜版本)。
 
-**证据类型与已执行验证**:可运行验证——`go test ./internal/candidate/... -count=1`(ok,含 ERC pass/fail、报告边界和候选写入失效断言);`python3 -m unittest discover -s workers/kicad`(OK);`bash tests/e2e/m03_kicad_candidate.sh`(TestM03KicadRepairRunsOnlyAgainstCandidateInLinuxSandbox,PASS);`go test ./internal/runtime -run 'Test.*Doctor|Test.*Missing' -count=1`(PASS)。`make cases` 仍未执行,不作为本阶段通过证据。
+**证据类型与已执行验证**:可运行验证——`go test ./internal/candidate/... -count=1`(ok,含 ERC pass/fail、报告边界和候选写入失效断言);`python3 -m unittest discover -s workers/kicad`(OK);`bash tests/e2e/m03_kicad_candidate.sh`(TestM03KicadRepairRunsOnlyAgainstCandidateInLinuxSandbox,PASS);`go test ./internal/runtime -run 'Test.*Doctor|Test.*Missing' -count=1`(PASS)。另于 2026-10-07 以当前源码构建完整 CLI/helper 并在 `/tmp` 组装 fixtures/schemas/workers，使用临时 HOME/XDG 与空配置运行 `stable doctor`，退出码 0；隔离 sandbox、KiCad CLI/GUI、窗口/截图、模板及全部安装资源均逐项 OK，未读取用户配置。`make cases` 仍未执行,不作为本阶段通过证据。
 
 **macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
 
@@ -397,7 +397,7 @@
 - `internal/execution/python_bridge.go`(138–174)— computer.\* 强制走持久会话(候选绑定),请求失败即 StopIsolatedSession。
 - `tests/e2e/m03_computer_session_test.go` — 断言 applied/open/generation=1/窗口身份非空/截图证据在 run root 内非空,停止后 observe 报 stale。
 
-**证据类型与已执行验证**:可运行验证——`go test ./internal/execution/ -run 'TestComputerBridgeUsesPersistentCandidateBoundSession|TestBridgeFailsClosedWithoutSandbox' -count=1`(ok);`python3 -m unittest discover -s workers/computer`(OK);`go test ./internal/sandbox/ -count=1`(ok,含 session control/generation);`bash tests/e2e/m03_computer_session.sh`(TestM03ComputerIsolatedSessionLifecycle,PASS,开窗/截图/generation/stop 无残留)。仅代码审阅/未执行——StopSessionProcesses 无独立 fixture;AC-GUI-3 降级路径(import 缺失)无现成自动化。
+**证据类型与已执行验证**:可运行验证——`go test ./internal/execution/ -run 'TestComputerBridgeUsesPersistentCandidateBoundSession|TestBridgeFailsClosedWithoutSandbox' -count=1`(ok);`python3 -m unittest discover -s workers/computer`(OK,含进程身份不匹配和非自有锁保护);`go test ./internal/runtime -run '^TestStopSessionProcessesIgnoresUnrelatedPID$' -count=1`(PASS,无关 PID 未收到信号);`go test ./internal/sandbox/ -count=1`(ok,含 session control/generation);`bash tests/e2e/m03_computer_session.sh`(TestM03ComputerIsolatedSessionLifecycle,PASS,开窗/截图/generation/stop 无残留)。AC-GUI-3 import 缺失降级路径仍无独立自动化。
 
 **macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
 
