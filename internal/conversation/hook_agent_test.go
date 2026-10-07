@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"stable/internal/agent"
 	"stable/internal/llm"
+	"stable/internal/sessionlog"
 )
 
 type hookAgentTestProvider struct{}
@@ -273,6 +275,160 @@ func TestHookAgentCommandFallbackAndErrorReject(t *testing.T) {
 	if notice := gate.DrainNotifications("session-2"); !strings.Contains(notice, "child failed") {
 		t.Fatalf("failure reason was not queued: %q", notice)
 	}
+}
+
+func TestHookAgentMessageTakesPriorityAndEmptyActionIsRejected(t *testing.T) {
+	delegator := &hookAgentDelegator{result: agent.DelegationResult{Status: agent.DelegationSucceeded}}
+	gate := newHookAgentGate(t, `hooks:
+  - id: priority
+    event: run_start
+    action:
+      type: agent
+      message: "preferred instruction"
+      command: "legacy fallback"
+`, delegator)
+	parent := agent.ParentRun{
+		RunID: "parent-priority", Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: "session-priority"},
+		Provider: hookAgentTestProvider{}, Model: "fake-model", ProjectRoot: t.TempDir(),
+	}
+	gate.RunStartRun(context.Background(), parent, parent.Work.SessionID, "start")
+	if !delegator.called || !strings.Contains(delegator.task.Instruction, "preferred instruction") || strings.Contains(delegator.task.Instruction, "legacy fallback") {
+		t.Fatalf("message did not take priority over command: %+v", delegator.task)
+	}
+
+	invalid := newHookAgentGate(t, `hooks:
+  - id: missing-instruction
+    event: run_start
+    action: {type: agent}
+`, nil)
+	if rejections := strings.Join(invalid.Rejections(), "\n"); !strings.Contains(rejections, "agent action requires message or command") {
+		t.Fatalf("empty agent action was not rejected during config loading: %q", rejections)
+	}
+}
+
+func TestHookAgentPreToolUseWaitsEvenWhenConfiguredAsync(t *testing.T) {
+	delegator := &hookAgentDelegator{
+		result:  agent.DelegationResult{Status: agent.DelegationSucceeded},
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	gate := newHookAgentGate(t, `hooks:
+  - id: synchronous-gate
+    event: pre_tool_use
+    async: true
+    action:
+      type: agent
+      message: "inspect before tool"
+`, delegator)
+	parent := agent.ParentRun{
+		RunID: "parent-pre-sync", Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: "session-pre-sync"},
+		Provider: hookAgentTestProvider{}, Model: "fake-model", ProjectRoot: t.TempDir(),
+	}
+	result := make(chan struct {
+		rejected bool
+		id       string
+		message  string
+	}, 1)
+	go func() {
+		rejected, id, message := gate.PreToolUseRun(context.Background(), parent, parent.Work.SessionID, "read_file", map[string]any{"path": "a"})
+		result <- struct {
+			rejected bool
+			id       string
+			message  string
+		}{rejected, id, message}
+	}()
+	select {
+	case <-delegator.entered:
+	case <-time.After(time.Second):
+		t.Fatal("pre_tool_use child did not start")
+	}
+	select {
+	case <-result:
+		t.Fatal("pre_tool_use returned before its child completed")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(delegator.release)
+	select {
+	case got := <-result:
+		if got.rejected || got.id != "" || got.message != "" {
+			t.Fatalf("successful child unexpectedly rejected tool: %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pre_tool_use did not return after child completion")
+	}
+}
+
+func TestHookAgentParentCarriesRunAuthorityAndReadOnlyTools(t *testing.T) {
+	provider := hookAgentTestProvider{}
+	bounds := json.RawMessage(`{"run_id":"run-authority","allowed_root":"/authorized","candidate_root":"/candidate"}`)
+	svc := &Service{deps: Deps{
+		ProjectRoot: "/workspace", ForkProvider: provider,
+		ForkToolSchemas: []llm.ToolSchema{{Name: "read_file"}},
+	}}
+	request := agent.ExecutionRequest{
+		RunID: "run-authority", Work: agent.WorkRef{Kind: agent.WorkGoal, SessionID: "session", GoalID: "goal", WorkItemID: "item"},
+		ProviderName: "fixture-provider", Model: "fixture-model", PermissionBounds: bounds,
+	}
+	parent := svc.hookAgentParent(request)
+	var authority map[string]any
+	if err := json.Unmarshal(parent.PermissionBounds, &authority); err != nil {
+		t.Fatal(err)
+	}
+	if parent.Provider != provider || parent.ProviderName != request.ProviderName || parent.Model != request.Model || parent.Work != request.Work || parent.ProjectRoot != "/authorized" || authority["allowed_root"] != "/authorized" {
+		t.Fatalf("parent run authority was not carried into hook delegation: parent=%+v authority=%v", parent, authority)
+	}
+	if len(parent.ToolSchemas) != 1 || parent.ToolSchemas[0].Name != "read_file" {
+		t.Fatalf("hook child did not receive the configured read-only schemas: %+v", parent.ToolSchemas)
+	}
+}
+
+func TestHookAgentJournalRedactsBoundsAndAssociatesChildRun(t *testing.T) {
+	root := t.TempDir()
+	session, err := sessionlog.Create(root, "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	delegator := &hookAgentDelegator{result: agent.DelegationResult{
+		ChildRunID: "child-journal", Status: agent.DelegationSucceeded,
+		Summary: "token-secret " + strings.Repeat("x", sessionlog.MaxHookOutput+10),
+	}}
+	hookPath := filepath.Join(root, "hooks.yaml")
+	if err = os.WriteFile(hookPath, []byte(`hooks:
+  - id: journal
+    event: run_start
+    action: {type: agent, message: "summarize"}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc := &Service{deps: Deps{ProjectRoot: root, ProviderCredential: "token-secret", Delegator: delegator}}
+	gate := NewHookGate(svc, hookPath, "")
+	gate.Bind(svc)
+	t.Cleanup(gate.Close)
+	parent := agent.ParentRun{
+		RunID: "parent-journal", Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: session.ID},
+		Provider: hookAgentTestProvider{}, Model: "fake-model", ProjectRoot: root,
+	}
+	gate.RunStartRun(context.Background(), parent, session.ID, "start")
+	replay, err := sessionlog.Replay(root, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range replay.Events {
+		if event.Type != sessionlog.EventHookFired {
+			continue
+		}
+		var fired sessionlog.HookFired
+		if err = decodeSessionData(event.Data, &fired); err != nil {
+			t.Fatal(err)
+		}
+		if fired.ChildRunID != "child-journal" || len(fired.Output) > sessionlog.MaxHookOutput || strings.Contains(fired.Output, "token-secret") {
+			t.Fatalf("hook journal did not associate and sanitize child result: %+v", fired)
+		}
+		if strings.Contains(fired.Output, "thinking") || strings.Contains(fired.Output, "transcript") {
+			t.Fatalf("hook journal exposed child internal stream: %+v", fired)
+		}
+		return
+	}
+	t.Fatal("hook agent result was not journaled")
 }
 
 func TestHookAgentOnErrorRejectBlocksPreToolUse(t *testing.T) {

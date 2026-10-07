@@ -49,7 +49,7 @@ func TestTruncateUTF8RespectsByteCap(t *testing.T) {
 
 func TestChildBudgetDefaultDurationIsBounded(t *testing.T) {
 	limits := DefaultDelegationLimits()
-	if limits.MaxDuration != 3*time.Minute || limits.MaxToolRounds != 8 {
+	if limits.Workers != 3 || limits.QueueCapacity != 32 || limits.MaxInputBytes != 64<<10 || limits.MaxToolRounds != 8 || limits.MaxDuration != 3*time.Minute || limits.MaxSummaryBytes != 8<<10 || limits.MaxToolOutputBytes != 50_000 {
 		t.Fatalf("unexpected child budget defaults: %+v", limits)
 	}
 }
@@ -78,10 +78,12 @@ func TestStreamingChildRunnerUsesOnlyAssignedTaskAndReadTools(t *testing.T) {
 		requests = append(requests, request)
 		call := len(requests)
 		mu.Unlock()
-		events := make(chan llm.Event, 2)
+		events := make(chan llm.Event, 3)
 		if call == 1 {
+			events <- llm.Event{Kind: llm.ThinkingDelta, Text: "private child reasoning"}
 			events <- llm.Event{Kind: llm.ToolCallComplete, Tool: &llm.ToolCall{ID: "child-read", Name: "read_file", Arguments: json.RawMessage(`{"file_path":"config.yaml"}`), Complete: true}}
 		} else {
+			events <- llm.Event{Kind: llm.ThinkingDelta, Text: "private final reasoning"}
 			events <- llm.Event{Kind: llm.TextDelta, Text: "The config is at config.yaml."}
 		}
 		events <- llm.Event{Kind: llm.StreamEnd}
@@ -99,7 +101,7 @@ func TestStreamingChildRunnerUsesOnlyAssignedTaskAndReadTools(t *testing.T) {
 		ToolSchemas: []llm.ToolSchema{{Name: "read_file"}}, ExecutorFactory: captureChildFactory{exec: executor},
 	}
 	result := (StreamingChildRunner{}).Run(context.Background(), input)
-	if result.Status != DelegationSucceeded || !strings.Contains(result.Summary, "config.yaml") {
+	if result.Status != DelegationSucceeded || !strings.Contains(result.Summary, "config.yaml") || strings.Contains(result.Summary, "private") {
 		t.Fatalf("child result=%+v", result)
 	}
 	if len(requests) != 2 || requests[0].Model != "mock-model" || len(requests[0].Messages) != 2 || strings.Contains(requests[0].Messages[0].Content, "parent conversation") || requests[0].Messages[1].Content != input.Task.Instruction {
