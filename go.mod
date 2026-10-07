@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/charmbracelet/glamour v1.0.0
+	github.com/coder/websocket v1.8.15
 	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	go.temporal.io/api v1.63.5

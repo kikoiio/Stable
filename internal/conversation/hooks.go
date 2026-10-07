@@ -53,6 +53,14 @@ func (g *HookGate) Bind(service *Service) {
 	service.hooks = g
 }
 
+// DiscardSession releases per-session hook queues and one-shot state.
+func (g *HookGate) DiscardSession(sessionID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.queue, sessionID)
+	delete(g.onceFired, sessionID)
+}
+
 func (g *HookGate) ensureLoaded() {
 	changed := len(g.modTimes) == 0
 	for _, path := range []string{g.userPath, g.projectPath} {

@@ -45,6 +45,11 @@ func BuildAuthority(ctx context.Context, state *store.Store, projectRoot string,
 		}
 		planFilePath = filepath.Clean(planFilePath)
 	}
+	replay, err := sessionlog.Replay(root, request.Work.SessionID)
+	if err != nil {
+		return out, err
+	}
+	readOnly := replay.Session.Ephemeral
 	authorizedRoot := root
 	var goalID, workID string
 	var capabilities []string
@@ -116,7 +121,7 @@ func BuildAuthority(ctx context.Context, state *store.Store, projectRoot string,
 	} else if !os.IsNotExist(err) {
 		return out, err
 	}
-	return permission.Authority{RunID: request.RunID, SessionID: request.Work.SessionID, GoalID: goalID, WorkItemID: workID, AllowedRoot: allowed, CandidateRoot: candidateRoot, FormalRoot: formalRoot, Mode: mode, PlanFilePath: planFilePath, Capabilities: capabilities}, nil
+	return permission.Authority{RunID: request.RunID, SessionID: request.Work.SessionID, GoalID: goalID, WorkItemID: workID, AllowedRoot: allowed, CandidateRoot: candidateRoot, FormalRoot: formalRoot, Mode: mode, PlanFilePath: planFilePath, Capabilities: capabilities, ReadOnly: readOnly}, nil
 }
 
 func validComponent(value string) bool {

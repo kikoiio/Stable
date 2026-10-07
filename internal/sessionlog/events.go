@@ -18,6 +18,7 @@ type SessionInfo struct {
 	Title     string    `json:"title"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	Ephemeral bool      `json:"ephemeral,omitempty"`
 }
 
 type Message struct {

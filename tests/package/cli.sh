@@ -13,8 +13,10 @@ mkdir -p "$HOME"
 port=17389
 occupant_pid=
 mock_pid=
+remote_ws_pid=
 cleanup() {
   if [[ -x "$HOME/.local/bin/stable" ]]; then stable down >/dev/null 2>&1 || true; fi
+  if [[ -n "$remote_ws_pid" ]]; then kill "$remote_ws_pid" 2>/dev/null || true; wait "$remote_ws_pid" 2>/dev/null || true; fi
   if [[ -n "$occupant_pid" ]]; then kill "$occupant_pid" 2>/dev/null || true; wait "$occupant_pid" 2>/dev/null || true; fi
   if [[ -n "$mock_pid" ]]; then kill "$mock_pid" 2>/dev/null || true; wait "$mock_pid" 2>/dev/null || true; fi
   python3 "$project_root/tests/e2e/stop_sessions.py" "$HOME/.local/state/stable" 2>/dev/null || true
@@ -142,5 +144,73 @@ out=$(printf '/quit\n' | stable 2>&1) && fail 'bare stable should refuse non-int
 stable goal status --goal cli-test >/dev/null || fail 'goal lost after restart'
 kill "$unrelated_pid" 2>/dev/null || true
 stable down >/dev/null
+
+# --- M10-B remote lifecycle: explicit enable, auto-start, stop and stable down ---
+stable up >/dev/null || fail 'stable up failed before remote lifecycle checks'
+[[ "$(stable remote status)" == *'stopped'* ]] || fail 'stable up unexpectedly started remote'
+
+remote_up=$(stable remote up --listen 127.0.0.1:0) || fail 'remote up with an active runtime failed'
+remote_addr=${remote_up##* }
+[[ "$(stable remote status)" == *"$remote_addr"* ]] || fail 'remote status did not report the active listener'
+stable remote down >/dev/null || fail 'remote down failed'
+stable runtime status >/dev/null 2>&1 || fail 'remote down stopped the runtime'
+[[ "$(stable remote status)" == *'stopped'* ]] || fail 'remote down left the listener running'
+
+stable down >/dev/null
+for _ in $(seq 1 40); do stable runtime status >/dev/null 2>&1 || break; sleep 0.25; done
+! stable runtime status >/dev/null 2>&1 || fail 'runtime remained up after stable down'
+remote_up=$(stable remote up --listen 127.0.0.1:0) || fail 'remote up did not auto-start a stopped runtime'
+remote_addr=${remote_up##* }
+python3 - "$(stable runtime status)" <<'PY' || fail 'remote up left the runtime stopped'
+import json,sys
+assert json.loads(sys.argv[1])["running"]
+PY
+pairing_token=$(stable remote pair | awk '{print $NF}')
+[[ -n "$pairing_token" ]] || fail 'remote pair did not return a token'
+remote_ready="$test_root/remote-ws-ready"
+remote_log="$test_root/remote-ws.log"
+python3 - "$remote_addr" "$pairing_token" "$remote_ready" >"$remote_log" 2>&1 <<'PY' &
+import base64, http.client, json, os, socket, sys
+address, token, ready_path = sys.argv[1:]
+host, port = address.rsplit(":", 1)
+port = int(port)
+origin = f"http://{address}"
+http = http.client.HTTPConnection(host, port, timeout=5)
+http.request("POST", "/api/pair", body=json.dumps({"token": token}), headers={"Origin": origin, "Content-Type": "application/json"})
+response = http.getresponse()
+assert response.status == 204, response.status
+cookie = response.getheader("Set-Cookie").split(";", 1)[0]
+http.close()
+sock = socket.create_connection((host, port), timeout=5)
+key = base64.b64encode(os.urandom(16)).decode()
+sock.sendall((f"GET /ws HTTP/1.1\r\nHost: {address}\r\nOrigin: {origin}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\nCookie: {cookie}\r\n\r\n").encode())
+headers = bytearray()
+while not headers.endswith(b"\r\n\r\n"):
+    block = sock.recv(1)
+    if not block:
+        raise RuntimeError("WebSocket handshake closed early")
+    headers.extend(block)
+assert b" 101 " in headers.split(b"\r\n", 1)[0], headers.decode(errors="replace")
+open(ready_path, "w").write("connected")
+sock.settimeout(10)
+while sock.recv(1024):
+    pass
+sock.close()
+PY
+remote_ws_pid=$!
+for _ in $(seq 1 50); do [[ -s "$remote_ready" ]] && break; sleep 0.1; done
+[[ -s "$remote_ready" ]] || { cat "$remote_log" >&2; fail 'paired WebSocket did not connect'; }
+stable down >/dev/null || fail 'stable down failed with a remote WebSocket connected'
+wait "$remote_ws_pid" || { cat "$remote_log" >&2; fail 'stable down did not close the remote WebSocket'; }
+remote_ws_pid=
+for _ in $(seq 1 40); do stable runtime status >/dev/null 2>&1 || break; sleep 0.25; done
+! stable runtime status >/dev/null 2>&1 || fail 'stable down left the runtime running'
+python3 - "$remote_addr" <<'PY' || fail 'stable down left the remote listener open'
+import socket,sys
+host,port=sys.argv[1].rsplit(":",1)
+sock=socket.socket(); sock.settimeout(1)
+if sock.connect_ex((host,int(port))) == 0: sys.exit(1)
+PY
+echo 'M10-B remote lifecycle PASS'
 echo 'AC2 lifecycle PASS'
 printf 'PACKAGE CLI PASS %s\n' "$test_root"

@@ -33,6 +33,40 @@ stable
 
 `stable` 会在需要时启动运行时并进入常驻对话。直接输入文字会得到模型回复。`/goal <目标描述>` 生成验收标准提案，终端显示完整标准，`/confirm <提案ID>` 后开始运行并自动聚焦新目标。`/say <文字>` 可纠偏当前目标，`/reply <文字>` 可答复 agent 提问；`/focus <目标ID>` 切换已有目标。退出终端不影响目标运行，再次运行 `stable` 可接回会话。也可以用 `stable goal create --from goal.json` 以结构化定义文件非交互创建。
 
+### 一次性 Print 与 Provider
+
+```bash
+stable --print "总结当前目录的 README"
+cat question.txt | stable --print
+stable provider list
+stable provider show
+stable provider use openai --model gpt-4.1
+stable provider use openai-compatible --model local-model --base-url http://127.0.0.1:8080/v1
+```
+
+`stable --print [文本]` 在当前工作目录执行；省略文本时读取 stdin 到 EOF。回答文本只写 stdout，错误写 stderr 并以非零状态退出。Print 创建一次性临时会话，完成、失败或中断后清理记录。它只允许 `read_file`、`glob`、`grep` 等只读工具；写入、命令、MCP、network 和需要审批、提问或计划审批的请求都会被拒绝。Gemini 仅用于目标决策，不能用于流式 Print。
+
+`stable provider list/show/use` 查看 provider 能力、当前有效配置和字段来源，并持久切换 provider/model。切换 provider 会清除旧 provider 的配置密钥和 base URL；凭据从私有配置文件或 provider 专属环境变量读取，环境变量优先。运行时启动期间 `provider use` 会拒绝修改，请先运行 `stable down`。
+
+### Remote 浏览器会话
+
+Remote 默认只监听本机 `127.0.0.1:8765`。启动后在同一台机器打开 `http://127.0.0.1:8765`，运行 `stable remote pair` 并输入一次性配对 token。每次浏览器 WebSocket 连接都要在本机 TUI 批准项目目录；批准只绑定该连接，断开后重新连接需要再次批准。
+
+```bash
+stable remote up
+stable remote status
+stable remote pair
+stable remote down
+```
+
+如需让局域网设备连接，指定 LAN IP 并同时提供包含该 IP/DNS 名称的 TLS 证书和私钥：
+
+```bash
+stable remote up --listen 192.168.1.20:8765 --cert /path/to/fullchain.pem --key /path/to/private-key.pem
+```
+
+非 loopback 地址缺少有效证书时不会启动。`stable remote down` 只关闭 Remote 并保留 runtime；`stable down` 会关闭 Remote 和 runtime。浏览器配对凭证只保存在内存，Remote 或 runtime 停止后需要重新配对。远程页面支持会话聊天/流、取消运行、工具权限、计划审批、问题答复和项目目录内目标状态；provider 凭据和管理类操作不会发送给浏览器。
+
 ## 仓库布局
 
 - `cmd/stable` — 用户 CLI（打包后安装在 `bin/`）；`cmd/agentctl`、`cmd/agentworker` 是内部组件（`libexec/`）

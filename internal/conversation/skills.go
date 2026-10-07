@@ -56,6 +56,13 @@ func (g *SkillGate) Bind(service *Service) {
 	service.skills = g
 }
 
+// DiscardSession releases temporary inventory state for a one-shot session.
+func (g *SkillGate) DiscardSession(sessionID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.states, sessionID)
+}
+
 // LoadSkill implements execution.SkillProvider for the load_skill tool.
 func (g *SkillGate) LoadSkill(_ context.Context, sessionID, name, args string) (string, error) {
 	return g.activate(sessionID, name, args, sessionlog.SkillEntryTool)
@@ -164,7 +171,7 @@ func (g *SkillGate) restore(sessionID string) *sessionSkillState {
 	if svc == nil {
 		return state
 	}
-	replay, err := sessionlog.Replay(svc.deps.ProjectRoot, sessionID)
+	replay, err := sessionlog.Replay(svc.sessionProjectRoot(sessionID), sessionID)
 	if err != nil {
 		return state
 	}
@@ -255,7 +262,7 @@ func (g *SkillGate) appendEventLocked(sessionID string, typ string, data any) er
 		return errors.New("skill gate is not bound to a session service")
 	}
 	svc.eventMu.Lock()
-	_, err := sessionlog.Append(svc.deps.ProjectRoot, sessionID, typ, data)
+	_, err := sessionlog.Append(svc.sessionProjectRoot(sessionID), sessionID, typ, data)
 	svc.eventMu.Unlock()
 	return err
 }
