@@ -47,6 +47,12 @@ mewcode 的 TUI 主文件直接引用二十多个内部模块，涵盖模型、�
 
 源端目录归属核对（对照当前 `internal/` 子目录）：`tui`→M01；`llm`、`conversation`、`agent`、`prompt`→M02/M04/M05；`permissions`、`sandbox`→M03；`tools`、`toolresult`→M04；`session`、`history`、`filehistory`、`compact`→M05；`commands`、`planfile`、`todo`→M06；`mcp`、`skills`、`hooks`→M07；`memory`→M08；`agents`、`teams`、`worktree`→M09；`remote`、`config`、`crashlog`→M10。命令入口 `cmd/mewcode` 的交互、print 与远程启动行为按 M10 归属。跨项目目录按行为归属拆开验收，不能只以文件复制完成判断。
 
+### M09 当前进度（2026-10-07）
+
+M09-A（同步只读协作）、M09-B（fork skill）和 M09-C（hook agent）已完成实现与验收；**M09 整体仍未完成**。自定义 agent 定义/通用后台任务、团队/协调器，以及受控工作树/并行写入仍有缺口。建议分别按 M09-D/E/F 继续，每项仍须独立规格审批。
+
+完整源端对照、已通过证据和剩余完成条件见 [M09 范围与进度](specs/M09/README.md)。下一项 [M09-D 的四份文档](specs/M09-D/spec.md) 已准备为待审批草案，未开始运行实现，不能计为交付完成。
+
 ## 并行实施顺序与依赖
 
 将“可以开始设计或独立开发”与“可以接入共享执行并向用户开放”分开判断。M00 契约和 M02 的运行事件是共同输入；先为工具调用/结果、权限决定、隔离候选、检查预览与接收确定跨模块接口及唯一负责人，再按下表并行推进。各子项目仍须分别完成自己的规格、设计、任务和验收；本表不提前批准运行实现。

@@ -1,6 +1,6 @@
 # M09-C Hook Agent 执行 Checklist
 
-> 状态：已批准（2026-10-07）。按已批准 [spec.md](spec.md)、[plan.md](plan.md) 和 [task.md](task.md) 验收；未完成项不得标记通过。
+> 状态：实现与验收完成（2026-10-07）。按已批准 [spec.md](spec.md)、[plan.md](plan.md) 和 [task.md](task.md) 验收，全部条目通过；M09 整体范围和剩余项见 [M09 进度](../M09/README.md)。
 
 ## 功能验收
 
