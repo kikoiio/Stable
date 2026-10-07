@@ -38,7 +38,7 @@ func (d reportingForkSkillFixtureDelegator) RunBatch(ctx context.Context, parent
 		}
 	}
 	return []agent.DelegationResult{{
-		TaskID: tasks[0].ID, Name: tasks[0].Name, Status: agent.DelegationSucceeded, Summary: "review complete",
+		TaskID: tasks[0].ID, ChildRunID: "child-run", Name: tasks[0].Name, Status: agent.DelegationSucceeded, Summary: "review complete",
 	}}, nil
 }
 
@@ -117,10 +117,11 @@ completed:
 			}
 			if value.Kind == string(agent.EventTerminal) {
 				var payload struct {
-					Status  agent.RunStatus `json:"status"`
-					Summary string          `json:"summary"`
+					Status     agent.RunStatus `json:"status"`
+					ChildRunID string          `json:"child_run_id"`
+					Summary    string          `json:"summary"`
 				}
-				if decodeSessionData(value.Payload, &payload) == nil && payload.Status == agent.RunCompleted && payload.Summary == "review complete" {
+				if decodeSessionData(value.Payload, &payload) == nil && payload.Status == agent.RunCompleted && payload.ChildRunID == "child-run" && payload.Summary == "review complete" {
 					terminal = true
 				}
 			}

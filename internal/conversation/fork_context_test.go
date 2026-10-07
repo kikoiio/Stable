@@ -56,6 +56,7 @@ func TestForkContextFullIsBoundedAndSessionScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 	appendForkContextMessage(t, root, first.ID, "user", "text", strings.Repeat("old ", 1000))
+	appendForkContextMessage(t, root, first.ID, "user", "text", "latest question")
 	appendForkContextMessage(t, root, first.ID, "assistant", "text", "keep this latest answer")
 	appendForkContextMessage(t, root, second.ID, "user", "text", "other session secret")
 

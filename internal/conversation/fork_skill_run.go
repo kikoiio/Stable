@@ -50,7 +50,7 @@ func (s *Service) startForkSkillRun(ctx context.Context, sessionID string, prepa
 		return err
 	}
 	if err = s.skills.recordForkInvocation(sessionID, prepared, runID); err != nil {
-		_ = s.appendForkTerminal(sessionID, runID, &state.runSeq, agent.RunFailed, "", err.Error())
+		_ = s.appendForkTerminal(sessionID, runID, &state.runSeq, agent.RunFailed, "", "", err.Error())
 		cancel()
 		return err
 	}
@@ -124,7 +124,7 @@ func (s *Service) runForkSkill(ctx context.Context, parent agent.ParentRun, runI
 	if ctx.Err() != nil {
 		status, reason = agent.RunCancelled, "fork skill run canceled"
 	}
-	if err = s.appendForkTerminal(state.sessionID, runID, &state.runSeq, status, summary, reason); err != nil {
+	if err = s.appendForkTerminal(state.sessionID, runID, &state.runSeq, status, result.ChildRunID, summary, reason); err != nil {
 		s.broadcastRun(ServerMsg{Type: "error", RunID: runID, Error: "could not persist fork skill terminal"}, state.sessionID, runID, 0)
 	}
 	s.mu.Lock()
@@ -162,6 +162,7 @@ func (s *Service) executeForkTask(ctx context.Context, parent agent.ParentRun, p
 		return ForkSkillResult{}, err
 	}
 	instruction := renderForkInstruction(prepared.Instruction, messages)
+	instruction = redactRunCredential(instruction, s.deps.ProviderCredential)
 	if len([]byte(instruction)) > 64<<10 {
 		return ForkSkillResult{}, errors.New("fork skill instructions and context exceed 64 KiB")
 	}
@@ -180,11 +181,12 @@ func (s *Service) executeForkTask(ctx context.Context, parent agent.ParentRun, p
 	result := results[0]
 	credential := s.deps.ProviderCredential
 	return ForkSkillResult{
-		SkillName: prepared.Name,
-		Entry:     prepared.Entry,
-		Status:    result.Status,
-		Summary:   truncateDelegationText(redactRunCredential(result.Summary, credential), 8<<10),
-		Error:     truncateDelegationText(redactRunCredential(result.Error, credential), 1024),
+		ChildRunID: result.ChildRunID,
+		SkillName:  prepared.Name,
+		Entry:      prepared.Entry,
+		Status:     result.Status,
+		Summary:    truncateDelegationText(redactRunCredential(result.Summary, credential), 8<<10),
+		Error:      truncateDelegationText(redactRunCredential(result.Error, credential), 1024),
 	}, nil
 }
 
@@ -200,24 +202,47 @@ func renderForkInstruction(instruction string, messages []llm.Message) string {
 		if message.Role != "user" && message.Role != "assistant" {
 			continue
 		}
-		if strings.TrimSpace(message.Content) == "" {
+		if strings.TrimSpace(message.Content) == "" && len(message.ToolUses) == 0 && len(message.ToolResults) == 0 {
 			continue
 		}
 		b.WriteString("\n[")
 		b.WriteString(message.Role)
 		b.WriteString("]\n")
-		b.WriteString(message.Content)
-		b.WriteByte('\n')
+		if strings.TrimSpace(message.Content) != "" {
+			b.WriteString(message.Content)
+			b.WriteByte('\n')
+		}
+		for _, use := range message.ToolUses {
+			b.WriteString("[tool call: ")
+			b.WriteString(use.Name)
+			b.WriteString("]\n")
+			if len(use.Arguments) > 0 {
+				b.Write(use.Arguments)
+				b.WriteByte('\n')
+			}
+		}
+		for _, result := range message.ToolResults {
+			b.WriteString("[tool result")
+			if result.IsError {
+				b.WriteString(": error")
+			}
+			b.WriteString("]\n")
+			b.WriteString(result.Content)
+			b.WriteByte('\n')
+		}
 	}
 	return b.String()
 }
 
-func (s *Service) appendForkTerminal(sessionID, runID string, runSeq *uint64, status agent.RunStatus, summary, reason string) error {
+func (s *Service) appendForkTerminal(sessionID, runID string, runSeq *uint64, status agent.RunStatus, childRunID, summary, reason string) error {
 	id, err := sessionlog.NewID()
 	if err != nil {
 		return err
 	}
 	payload := map[string]any{"status": status}
+	if childRunID != "" {
+		payload["child_run_id"] = childRunID
+	}
 	if summary != "" {
 		payload["summary"] = truncateDelegationText(redactRunCredential(summary, s.deps.ProviderCredential), 8<<10)
 	}

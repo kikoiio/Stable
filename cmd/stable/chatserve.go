@@ -83,6 +83,8 @@ func chatserve(args []string) error {
 	var toolSchemas []llm.ToolSchema
 	var runnerError string
 	var snapshotStore *candidate.SnapshotStore
+	var forkProvider llm.Provider
+	var forkExecutorFactory agent.ExecutorFactory
 	delegationReporter := conversation.NewDelegationEventReporter()
 	var delegator *agent.PoolDelegator
 	// The interaction sinks need the conversation service, which only exists
@@ -104,6 +106,7 @@ func chatserve(args []string) error {
 	}
 	defer mcpManager.Shutdown()
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
+		forkProvider = streamingProvider
 		delegator, err = agent.NewPoolDelegator(agent.DefaultDelegationLimits(), agent.StreamingChildRunner{}, delegationReporter)
 		if err != nil {
 			return fmt.Errorf("delegation coordinator: %w", err)
@@ -130,6 +133,7 @@ func chatserve(args []string) error {
 			TodoProvider:       todoProvider,
 			Provider:           streamingProvider,
 		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate), execution.WithMCPCaller(mcpManager), execution.WithDelegator(delegator, streamingProvider))
+		forkExecutorFactory = execution.ReadOnlyExecutorFactory(executorFactory)
 		toolSchemas = chatserveToolSchemasWithDelegation(delegator, mcpManager)
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, model.(decision.ChatProvider))
 		if fellBack {
@@ -142,6 +146,7 @@ func chatserve(args []string) error {
 	permissionService := &permission.PermissionService{Repository: s, NewID: func() string { id, _ := sessionlog.NewID(); return id }}
 	svc, err := conversation.Serve(ctx, conversation.Deps{
 		Store: s, Provider: provider, ChatProvider: model.(decision.ChatProvider), Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket,
+		Delegator: delegator, ForkProvider: forkProvider, ForkExecutorFactory: forkExecutorFactory, ForkToolSchemas: execution.ReadOnlyToolSchemas(),
 		Refresher:           refresher,
 		CandidateCheckers:   chatCandidateCheckers(*runRoot, sbx),
 		ContextWindowTokens: c.Model.ContextWindowTokens,

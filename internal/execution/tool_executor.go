@@ -1114,9 +1114,9 @@ func (e *toolRunExecutor) executeTaskTool(call llm.ToolUse, args map[string]any,
 }
 
 // executeLoadSkill activates a skill through the host SkillProvider and
-// returns its rendered body as the tool result. The provider composes all
-// error cases — unknown skill (with the available names), fork-mode skills,
-// unreadable bodies — so the executor only validates the arguments.
+// returns its rendered body or fork result as the tool result. The provider
+// composes error cases such as unknown skills and unreadable bodies, so the
+// executor only validates the arguments.
 func (e *toolRunExecutor) executeLoadSkill(ctx context.Context, call llm.ToolUse, args map[string]any, outcome agent.ToolOutcome) agent.ToolOutcome {
 	name, _ := args["name"].(string)
 	if strings.TrimSpace(name) == "" {

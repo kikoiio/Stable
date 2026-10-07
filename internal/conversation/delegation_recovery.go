@@ -198,6 +198,8 @@ func recoverSessionDelegation(root, sessionID string, events []sessionlog.Event)
 	for _, item := range openForkSkills {
 		owner := forkSkillOwners[item.runID]
 		reason := "service restarted before the fork skill completed"
+		status := agent.DelegationInterrupted
+		var summary string
 		var latest *recoveredDelegationEvent
 		for i := range delegations {
 			stored := &delegations[i]
@@ -211,8 +213,12 @@ func recoverSessionDelegation(root, sessionID string, events []sessionlog.Event)
 			if err = appendDelegationRunEvent(root, sessionID, item.runID, &lastSeq, latest.event); err != nil {
 				return err
 			}
+		} else if latest != nil {
+			status = latest.event.Status
+			summary = latest.event.Summary
+			reason = latest.event.Error
 		}
-		result := ForkSkillResult{SkillName: owner.name, Entry: owner.entry, Status: agent.DelegationInterrupted, Error: reason}
+		result := ForkSkillResult{SkillName: owner.name, Entry: owner.entry, Status: status, Summary: summary, Error: reason}
 		encoded, _ := json.Marshal(result)
 		if _, err = sessionlog.Append(root, sessionID, sessionlog.EventToolResult, sessionlog.ToolResult{CallID: item.call.CallID, Result: string(encoded), Error: reason}); err != nil {
 			return err

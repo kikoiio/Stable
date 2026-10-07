@@ -42,11 +42,12 @@ type DelegationTask struct {
 }
 
 type DelegationResult struct {
-	TaskID  string           `json:"task_id"`
-	Name    string           `json:"name"`
-	Status  DelegationStatus `json:"status"`
-	Summary string           `json:"summary,omitempty"`
-	Error   string           `json:"error,omitempty"`
+	TaskID     string           `json:"task_id"`
+	ChildRunID string           `json:"child_run_id,omitempty"`
+	Name       string           `json:"name"`
+	Status     DelegationStatus `json:"status"`
+	Summary    string           `json:"summary,omitempty"`
+	Error      string           `json:"error,omitempty"`
 }
 
 type DelegationLimits struct {
@@ -141,6 +142,7 @@ type delegationWork struct {
 	parentContext context.Context
 	batchID       string
 	task          DelegationTask
+	childRunID    string
 	result        chan DelegationResult
 }
 
@@ -347,6 +349,7 @@ func (d *PoolDelegator) runWork(work delegationWork) DelegationResult {
 	if err != nil {
 		return d.terminal(work, DelegationFailed, "", "could not create child run ID")
 	}
+	work.childRunID = childID
 	var authority map[string]json.RawMessage
 	if json.Unmarshal(work.parent.PermissionBounds, &authority) != nil {
 		return d.terminal(work, DelegationFailed, "", "parent permission bounds are invalid")
@@ -421,7 +424,7 @@ func (d *PoolDelegator) terminal(work delegationWork, status DelegationStatus, s
 			errText = "child returned a non-terminal status"
 		}
 	}
-	result := DelegationResult{TaskID: work.task.ID, Name: work.task.Name, Status: status, Summary: summary, Error: errText}
+	result := DelegationResult{TaskID: work.task.ID, ChildRunID: work.childRunID, Name: work.task.Name, Status: status, Summary: summary, Error: errText}
 	if err := d.publish(work.parent.RunID, DelegationEvent{BatchID: work.batchID, TaskID: work.task.ID, TaskName: work.task.Name, Status: status, Summary: summary, Error: errText}); err != nil && result.Error == "" {
 		result.Status = DelegationFailed
 		result.Error = "could not record child result"
