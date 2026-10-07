@@ -25,6 +25,8 @@ import (
 
 type remoteFixtureProvider struct{}
 
+const remoteProviderCredentialMarker = "provider-key-marker-remote-5df891"
+
 func (remoteFixtureProvider) Stream(ctx context.Context, request llm.Request) (<-chan llm.Event, <-chan error) {
 	events := make(chan llm.Event, 2)
 	errs := make(chan error)
@@ -35,6 +37,10 @@ func (remoteFixtureProvider) Stream(ctx context.Context, request llm.Request) (<
 	go func() {
 		defer close(events)
 		defer close(errs)
+		if lastMessage == "trigger provider error" {
+			errs <- &llm.ProviderError{Class: llm.ErrorAuth, Message: remoteProviderCredentialMarker}
+			return
+		}
 		if lastMessage == "cancel this" {
 			events <- llm.Event{Kind: llm.TextDelta, Text: "partial"}
 			<-ctx.Done()
@@ -225,7 +231,7 @@ func TestRemoteConversationEndToEndWithLocalApprovalAndFakeProvider(t *testing.T
 	}
 	chatPath := filepath.Join(stateDir, "chat.sock")
 	runner := agent.NewRunner(remoteFixtureProvider{}, agent.RunnerOptions{MaxRetries: -1})
-	service, err := conversation.Serve(ctx, conversation.Deps{Store: db, Runner: runner, ProjectRoot: projectRoot, SocketPath: chatPath, ProviderName: "fixture", Model: "fixture"})
+	service, err := conversation.Serve(ctx, conversation.Deps{Store: db, Runner: runner, ProjectRoot: projectRoot, SocketPath: chatPath, ProviderName: "fixture", Model: "fixture", ProviderCredential: remoteProviderCredentialMarker})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,6 +484,30 @@ func TestRemoteConversationEndToEndWithLocalApprovalAndFakeProvider(t *testing.T
 		if getErr != nil || stored.Status != wantStatus {
 			t.Fatalf("stored permission approval = %+v, err %v; want %s", stored, getErr, wantStatus)
 		}
+	}
+	send("credential-run", conversation.ClientMsg{Op: "run_start", SessionID: sessionID, Run: &agent.ExecutionRequest{Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: sessionID}, Intent: "trigger provider error", Messages: []llm.Message{{Role: "user", Content: "trigger provider error"}}}})
+	var credentialRunDone bool
+	for !credentialRunDone {
+		response := receive()
+		if response.ID != "credential-run" {
+			t.Fatalf("credential run response ID = %q", response.ID)
+		}
+		encoded, marshalErr := json.Marshal(response.Message)
+		if marshalErr != nil || strings.Contains(string(encoded), remoteProviderCredentialMarker) {
+			t.Fatalf("provider credential leaked through remote stream: %s (err %v)", encoded, marshalErr)
+		}
+		if response.Message.Type == "run_outcome" {
+			credentialRunDone = true
+		}
+	}
+	send("credential-transcript", conversation.ClientMsg{Op: "session_load", SessionID: sessionID})
+	transcriptResponse := receive()
+	transcriptJSON, marshalErr := json.Marshal(transcriptResponse.Message.Transcript)
+	if marshalErr != nil || transcriptResponse.Message.Type != "transcript" || strings.Contains(string(transcriptJSON), remoteProviderCredentialMarker) {
+		t.Fatalf("provider credential leaked through transcript: %s (err %v)", transcriptJSON, marshalErr)
+	}
+	if got := receive(); got.Message.Type != "done" {
+		t.Fatalf("credential transcript completion = %+v", got)
 	}
 	send("list", conversation.ClientMsg{Op: "session_list", ProjectRoot: projectRoot})
 	listed := receive()

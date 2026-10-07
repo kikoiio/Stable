@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +36,7 @@ func TestWebSocketRejectsDuplicateAndSeventeenthActiveRequest(t *testing.T) {
 	projectRoot := t.TempDir()
 	acceptedRequests := make(chan conversation.ClientMsg, 32)
 	serverDone := make(chan struct{})
+	var ipcWorkers sync.WaitGroup
 	go func() {
 		defer close(serverDone)
 		for {
@@ -42,7 +44,9 @@ func TestWebSocketRejectsDuplicateAndSeventeenthActiveRequest(t *testing.T) {
 			if acceptErr != nil {
 				return
 			}
+			ipcWorkers.Add(1)
 			go func() {
+				defer ipcWorkers.Done()
 				defer conn.Close()
 				var request conversation.ClientMsg
 				if json.NewDecoder(bufio.NewReader(conn)).Decode(&request) != nil {
@@ -79,6 +83,13 @@ func TestWebSocketRejectsDuplicateAndSeventeenthActiveRequest(t *testing.T) {
 		case <-serverDone:
 		case <-ctx.Done():
 			t.Error("fake IPC server did not stop")
+		}
+		workersDone := make(chan struct{})
+		go func() { ipcWorkers.Wait(); close(workersDone) }()
+		select {
+		case <-workersDone:
+		case <-ctx.Done():
+			t.Error("fake IPC handlers remained after WebSocket shutdown")
 		}
 	}()
 

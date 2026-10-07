@@ -48,6 +48,9 @@ func TestRemoteManagerServesEmbeddedIndexAndStops(t *testing.T) {
 	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "Stable Remote") {
 		t.Fatalf("GET / = %d %q", response.StatusCode, body)
 	}
+	if strings.Contains(string(body), remoteProviderCredentialMarker) {
+		t.Fatal("embedded page exposed the provider credential marker")
+	}
 	if response.Header.Get("Content-Security-Policy") == "" {
 		t.Fatal("embedded page did not set a content security policy")
 	}
@@ -60,6 +63,9 @@ func TestRemoteManagerServesEmbeddedIndexAndStops(t *testing.T) {
 		asset.Body.Close()
 		if readErr != nil || asset.StatusCode != http.StatusOK || !strings.Contains(asset.Header.Get("Content-Type"), contentType) || len(assetBody) == 0 {
 			t.Fatalf("GET %s = %d %q, err %v", path, asset.StatusCode, assetBody, readErr)
+		}
+		if strings.Contains(string(assetBody), remoteProviderCredentialMarker) {
+			t.Fatalf("asset %s exposed the provider credential marker", path)
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -86,6 +92,18 @@ func TestPairEndpointRequiresExactOriginAndSetsCookie(t *testing.T) {
 		t.Fatal(err)
 	}
 	endpoint := "http://" + status.ListenAddr + "/api/pair"
+	badTokenBody, _ := json.Marshal(map[string]string{"token": remoteProviderCredentialMarker})
+	badTokenRequest, _ := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(string(badTokenBody)))
+	badTokenRequest.Header.Set("Origin", "http://"+status.ListenAddr)
+	badTokenResponse, err := http.DefaultClient.Do(badTokenRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badTokenResponseBody, readErr := io.ReadAll(badTokenResponse.Body)
+	badTokenResponse.Body.Close()
+	if readErr != nil || badTokenResponse.StatusCode != http.StatusUnauthorized || strings.Contains(string(badTokenResponseBody), remoteProviderCredentialMarker) {
+		t.Fatalf("failed pairing response exposed marker: status %d body %q err %v", badTokenResponse.StatusCode, badTokenResponseBody, readErr)
+	}
 	badRequest, _ := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(string(body)))
 	badRequest.Header.Set("Origin", "http://attacker.example")
 	badResponse, err := http.DefaultClient.Do(badRequest)
@@ -158,10 +176,15 @@ func TestPairEndpointRejectsOversizedBody(t *testing.T) {
 
 func TestRemoteManagerTLSUsesSecureCookie(t *testing.T) {
 	certPath, keyPath := writeSelfSignedPair(t)
-	manager, status := startTestManager(t, Config{ListenAddress: "127.0.0.1:0", CertFile: certPath, KeyFile: keyPath})
+	manager, status := startTestManager(t, Config{ListenAddress: "0.0.0.0:0", CertFile: certPath, KeyFile: keyPath})
 	if !status.TLS {
 		t.Fatalf("TLS status = %+v", status)
 	}
+	_, port, err := net.SplitHostPort(status.ListenAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientAddr := net.JoinHostPort("127.0.0.1", port)
 	token, _, err := manager.IssuePairingToken()
 	if err != nil {
 		t.Fatal(err)
@@ -170,8 +193,8 @@ func TestRemoteManagerTLSUsesSecureCookie(t *testing.T) {
 	transport := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport}
-	request, _ := http.NewRequest(http.MethodPost, "https://"+status.ListenAddr+"/api/pair", strings.NewReader(string(body)))
-	request.Header.Set("Origin", "https://"+status.ListenAddr)
+	request, _ := http.NewRequest(http.MethodPost, "https://"+clientAddr+"/api/pair", strings.NewReader(string(body)))
+	request.Header.Set("Origin", "https://"+clientAddr)
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)

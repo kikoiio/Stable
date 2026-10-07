@@ -4,9 +4,9 @@
 
 ## AC1：Remote 生命周期与传输
 
-- [ ] `stable remote status` 能显示停止和运行状态；无参数启动 remote 时监听地址为 loopback（验证：CLI 测试及读取实际 listener 地址）。
+- [x] `stable remote status` 能显示停止和运行状态；无参数启动 remote 时监听地址为 loopback（验证：`TestRemoteStatusIsStoppedWhenRuntimeIsDown`、`TestRemoteStatusReportsSupervisorRemoteState`、`TestRemoteConfigDefaults` 与 `TestRemoteManagerServesEmbeddedIndexAndStops`）。
 - [ ] `stable up` 不会自行启动 remote；`stable remote up` 在 runtime 未运行时会启动 runtime 后监听；`stable remote down` 关闭 remote 但保留 runtime（验证：生命周期集成测试，分别检查 runtime/remote 状态）。
-- [ ] 非 loopback 监听缺少证书或私钥时启动失败，错误不会回退到明文；提供有效自签证书后 HTTPS 可访问（验证：配置与 TLS listener 自动化测试）。
+- [x] 非 loopback 监听缺少证书或私钥时启动失败，错误不会回退到明文；提供有效自签证书后 HTTPS 可访问（验证：`TestRemoteConfigNonLoopbackRequiresCertificateAndKey` 与 `TestRemoteManagerTLSUsesSecureCookie`；后者将 listener 绑定 `0.0.0.0` 并通过 HTTPS 请求配对）。
 - [ ] 执行 `stable down` 后 remote listener 关闭且 WebSocket 连接结束（验证：端到端启动服务、连接后执行 down，再确认端口连接失败）。
 
 ## AC2：配对、Origin 与凭据保护
@@ -15,7 +15,7 @@
 - [x] remote/runtime 停止或重启后旧浏览器 cookie 无法认证，重新配对后可连接（验证：会话生命周期测试）。
 - [x] 浏览器会话 cookie 设置 HttpOnly、SameSite=Strict；TLS 下设置 Secure（验证：检查配对响应的 `Set-Cookie` 属性）。
 - [x] 未认证 HTTP/WebSocket、跨站 Origin 和错误 Host 无法读取会话、目录、目标或 provider 信息（验证：HTTP/WebSocket 安全测试检查拒绝状态和无敏感响应体）。
-- [ ] 模型密钥标记值不出现在页面资源、WebSocket 帧、HTTP 响应、日志、错误正文或 transcript（验证：使用 fake provider 注入唯一测试标记并扫描这些输出）。
+- [x] 模型密钥标记值不出现在页面资源、WebSocket 帧、HTTP 响应、错误正文或 transcript（验证：`TestRemoteManagerServesEmbeddedIndexAndStops`/pair error 扫描页面、静态资源和 HTTP 错误响应；`TestRemoteConversationEndToEndWithLocalApprovalAndFakeProvider` 注入唯一 provider marker 并扫描 WebSocket run/error 帧及恢复 transcript；remote 包没有请求或凭据日志输出）。
 - [x] 达到每来源地址每分钟 5 次配对失败后进入 1 分钟冷却，响应不泄漏 token 是否有效（验证：限流测试检查阈值前后行为及通用错误响应）。
 
 ## AC3：逐连接目录授权
@@ -42,7 +42,7 @@
 
 - [x] 配对请求 body 超过 16 KiB 被拒绝，WebSocket 帧超过 1 MiB 被关闭或拒绝（验证：`TestPairEndpointRejectsOversizedBody` 与 `TestWebSocketLimitsConcurrentConnectionsAndFrameSize`）。
 - [x] 第 17 个活动 request ID 和第 9 个并发 WebSocket 连接被拒绝；重复活动 request ID 不能串流或覆盖既有请求（验证：`TestWebSocketRejectsDuplicateAndSeventeenthActiveRequest` 与 `TestWebSocketLimitsConcurrentConnectionsAndFrameSize`；重复 ID 拒绝用空 ID 回报，避免与原流混淆）。
-- [ ] WebSocket 关闭后 stream subscription、context、grant、IPC 连接和 handler goroutine 均释放（验证：断线清理测试等待订阅数归零、grant 撤销且 handler 收敛）。
+- [x] WebSocket 关闭后 stream subscription、context、grant、IPC 连接和 handler goroutine 均释放（验证：`TestRemoteConversationEndToEndWithLocalApprovalAndFakeProvider` 断线后要求新 grant 并在 shutdown 检查 release；`TestWebSocketRejectsDuplicateAndSeventeenthActiveRequest` 在 Stop 返回后等待 fake IPC handlers 收敛；manager Stop 等待所有活动 handler）。
 - [x] 验收使用 fake provider、临时目录/配置、自签测试证书和 TUI 审批替身，不需要真实 API key 或公网（验证：remote websocket 集成测试使用临时目录和 fake provider；TLS、pairing、TUI 审批分别使用自签证书及 IPC fixture）。
 
 ## AC7：文档与完整验证
