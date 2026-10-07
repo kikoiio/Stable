@@ -1,9 +1,12 @@
 package sandbox
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"stable/internal/permission"
 )
 
 func TestSessionGeneration(t *testing.T) {
@@ -25,5 +28,20 @@ func TestSessionGeneration(t *testing.T) {
 	}
 	if err = ValidateSession(SandboxSession{ID: "session-1", Generation: first, CandidateID: "candidate-1"}); err == nil {
 		t.Fatal("old session handle was not invalidated")
+	}
+}
+
+func TestPersistentSessionRejectsNetworkAuthorization(t *testing.T) {
+	p := SandboxProfile{
+		ProjectRoot:   filepath.Join(t.TempDir(), "project"),
+		CandidateRoot: filepath.Join(t.TempDir(), "candidate"),
+		RunRoot:       filepath.Join(t.TempDir(), "run"),
+		CandidateID:   "candidate-1",
+		SessionArgv:   []string{"/bin/true"},
+		NetworkGrants: []permission.NetworkGrant{{Protocol: "tcp", Host: "target.test", Port: 443, ResolvedIPs: []string{"127.0.0.1"}}},
+	}
+	_, err := (LinuxManager{}).StartIsolatedSession(nil, p)
+	if !errors.Is(err, ErrSessionNetworkUnsupported) || !errors.Is(err, ErrNetworkGrantInvalid) {
+		t.Fatalf("persistent session grant was not classified: %v", err)
 	}
 }

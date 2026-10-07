@@ -5,6 +5,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = pathlib.Path(__file__).with_name('bridge.py')
@@ -63,6 +64,23 @@ class CandidateBridgeTests(unittest.TestCase):
         response = json.loads(lines[1])
         self.assertEqual(response['operation_id'], 'op-1')
         self.assertEqual(response['status'], 'stale')
+
+    def test_observe_reports_missing_screenshot_capability(self):
+        handle = {
+            'session_id': 'computer-goal-1', 'generation': 1,
+            'display': ':101', 'xvfb_pid': 101, 'eeschema_pid': 102,
+            'artifact_id': hashlib.sha256(b'candidate design').hexdigest(),
+            'path': str(self.design.resolve()),
+        }
+        with mock.patch.object(bridge, 'pid_alive', return_value=True), \
+             mock.patch.object(bridge, 'window', return_value='0x1 eeschema sensor'), \
+             mock.patch.object(bridge, 'import_tool', return_value=None):
+            response = bridge.observation(self.runtime, self.design, handle)
+        self.assertEqual(response['status'], 'stale')
+        self.assertEqual(response['reason'], 'screenshot_tool_unavailable')
+
+    def test_stop_classifies_invalid_owned_pid(self):
+        self.assertEqual(bridge.stop({'eeschema_pid': 'bad', 'xvfb_pid': 0}), ['eeschema:invalid_pid'])
 
 
 if __name__ == '__main__':

@@ -389,6 +389,18 @@ func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSe
 			return errors.New("hook reload event has invalid shape")
 		}
 		return checkHookReload(h)
+	case EventMCPReload:
+		var r MCPReload
+		if err := decodeData(data, &r); err != nil {
+			return errors.New("mcp reload event has invalid shape")
+		}
+		return checkMCPReload(r)
+	case EventMCPServer:
+		var s MCPServer
+		if err := decodeData(data, &s); err != nil {
+			return errors.New("mcp server event has invalid shape")
+		}
+		return checkMCPServer(s)
 	}
 	return nil
 }
@@ -406,6 +418,41 @@ func checkHookFired(h HookFired) error {
 func checkHookReload(h HookReload) error {
 	if h.Before < 0 || h.After < 0 {
 		return errors.New("hook reload counts must be non-negative")
+	}
+	return nil
+}
+
+func checkMCPReload(r MCPReload) error {
+	if r.Before < 0 || r.After < 0 {
+		return errors.New("mcp reload counts must be non-negative")
+	}
+	for _, rejection := range r.Rejections {
+		if len(rejection) > MaxMCPOutput {
+			return fmt.Errorf("mcp rejection exceeds %d bytes", MaxMCPOutput)
+		}
+	}
+	switch r.Trigger {
+	case "auto", "manual":
+	default:
+		return fmt.Errorf("mcp reload has invalid trigger %q", r.Trigger)
+	}
+	return nil
+}
+
+func checkMCPServer(s MCPServer) error {
+	if s.Name == "" || s.Source == "" {
+		return errors.New("mcp server event is missing name or source")
+	}
+	if s.ToolCount < 0 {
+		return errors.New("mcp server tool count must be non-negative")
+	}
+	switch s.State {
+	case "connected", "disconnected", "reload-failed":
+	default:
+		return fmt.Errorf("mcp server has invalid state %q", s.State)
+	}
+	if len(s.Error) > MaxMCPOutput {
+		return fmt.Errorf("mcp error exceeds %d bytes", MaxMCPOutput)
 	}
 	return nil
 }

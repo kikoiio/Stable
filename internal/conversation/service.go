@@ -11,6 +11,7 @@ import (
 	"stable/internal/core"
 	"stable/internal/decision"
 	"stable/internal/llm"
+	"stable/internal/mcp"
 	"stable/internal/permission"
 	"stable/internal/platform/ipc"
 	"stable/internal/sessionlog"
@@ -45,6 +46,7 @@ type Deps struct {
 	// per-run skill inventory injection. Nil keeps the skill surface closed.
 	Skills    *SkillGate
 	Hooks     *HookGate
+	MCP       *mcp.Manager
 	Refresher core.DependencyRefresher
 	PollEvery time.Duration // goal status poll interval; 0 defaults to 2s
 }
@@ -85,8 +87,11 @@ type Service struct {
 	// skills is the M07-A skill gate copied from deps at Serve; nil closes
 	// the skill surface. The gate itself also keeps a service reference (set
 	// by Bind) so its event appends share the service event mutex.
-	skills *SkillGate
-	hooks  *HookGate
+	skills          *SkillGate
+	hooks           *HookGate
+	mcp             *mcp.Manager
+	mcpMu           sync.Mutex
+	mcpInstructions map[string]bool
 }
 
 type clientSubscription struct {
@@ -104,7 +109,7 @@ func Serve(ctx context.Context, deps Deps) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{deps: deps, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks}
+	s := &Service{deps: deps, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks, mcp: deps.MCP, mcpInstructions: map[string]bool{}}
 	if deps.Skills != nil {
 		deps.Skills.Bind(s)
 	}

@@ -50,6 +50,11 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if request.Work.SessionID != msg.SessionID {
 		return errors.New("run session does not match request session")
 	}
+	if s.mcp != nil {
+		if err := s.ensureMCPFresh(msg.SessionID); err != nil {
+			return fmt.Errorf("refresh MCP configuration: %w", err)
+		}
+	}
 	if err := agent.ValidateRequest(request); err != nil {
 		return err
 	}
@@ -84,6 +89,17 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 			skillPrefix = append(skillPrefix, llm.Message{Role: "user", Content: deltaText})
 		}
 	}
+	var mcpPrefix []llm.Message
+	if request.Work.Kind == agent.WorkSession && s.mcp != nil {
+		if instructions := s.mcp.Instructions(); instructions != "" {
+			s.mcpMu.Lock()
+			if !s.mcpInstructions[msg.SessionID] {
+				s.mcpInstructions[msg.SessionID] = true
+				mcpPrefix = append(mcpPrefix, llm.Message{Role: "user", Content: "MCP Server Instructions\n" + instructions})
+			}
+			s.mcpMu.Unlock()
+		}
+	}
 	var hookPrefix []llm.Message
 	if s.hooks != nil {
 		if notice := s.hooks.DrainNotifications(msg.SessionID); notice != "" {
@@ -99,6 +115,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		// the stable snapshot sits at a fixed offset) and is deliberately not
 		// appended to the session log — the skill events keep it auditable.
 		prefix = append(prefix, skillPrefix...)
+		prefix = append(prefix, mcpPrefix...)
 		prefix = append(prefix, hookPrefix...)
 		if plan.Mode == sessionlog.PlanModePlan && plan.PlanPath != "" {
 			// The plan workflow reminder is per-turn context, not session

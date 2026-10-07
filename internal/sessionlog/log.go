@@ -38,7 +38,7 @@ func Append(root, id, typ string, data any) (Event, error) {
 		return Event{}, errors.New("event type is required")
 	}
 	switch typ {
-	case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload:
+	case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload, EventMCPReload, EventMCPServer:
 	default:
 		return Event{}, fmt.Errorf("unknown event type %q", typ)
 	}
@@ -79,7 +79,7 @@ func Append(root, id, typ string, data any) (Event, error) {
 			}
 		}
 		switch typ {
-		case EventBoundary, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload:
+		case EventBoundary, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload, EventMCPReload, EventMCPServer:
 			if err := validateOwnedAppend(id, typ, data, replay.Events, seq+1); err != nil {
 				return Event{}, err
 			}
@@ -320,7 +320,7 @@ func replayFile(path, id string) (Transcript, error) {
 			return out, fmt.Errorf("session log invalid envelope at seq %d", expected)
 		}
 		switch e.Type {
-		case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload:
+		case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload, EventMCPReload, EventMCPServer:
 		default:
 			return out, fmt.Errorf("session log has unknown event type %q at seq %d", e.Type, e.Seq)
 		}
@@ -443,6 +443,22 @@ func replayFile(path, id string) (Transcript, error) {
 			}
 			if err := checkHookReload(reload); err != nil {
 				return out, fmt.Errorf("session log has invalid hook reload event at seq %d: %v", e.Seq, err)
+			}
+		case EventMCPReload:
+			var reload MCPReload
+			if decodeData(e.Data, &reload) != nil {
+				return out, fmt.Errorf("session log has invalid mcp reload event at seq %d", e.Seq)
+			}
+			if err := checkMCPReload(reload); err != nil {
+				return out, fmt.Errorf("session log has invalid mcp reload event at seq %d: %v", e.Seq, err)
+			}
+		case EventMCPServer:
+			var server MCPServer
+			if decodeData(e.Data, &server) != nil {
+				return out, fmt.Errorf("session log has invalid mcp server event at seq %d", e.Seq)
+			}
+			if err := checkMCPServer(server); err != nil {
+				return out, fmt.Errorf("session log has invalid mcp server event at seq %d: %v", e.Seq, err)
 			}
 		case EventRunStarted:
 			var started RunStarted

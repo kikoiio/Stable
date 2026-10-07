@@ -484,6 +484,20 @@ func registerBuiltins(host *commandHost, registry *commands.Registry) {
 		m.Status = "正在列出 hooks…"
 		host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "hooks_list", SessionID: m.ActiveSession}))
 	})
+	set("mcp", "列出 MCP 服务器", "reload", func(args string) {
+		m := host.model
+		m.Composer.SetValue("")
+		if strings.TrimSpace(args) == "reload" {
+			m.Pending = true
+			m.Status = "正在重载 MCP…"
+			m.recordHistory(host.raw)
+			host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "mcp_reload", SessionID: m.ActiveSession}))
+			return
+		}
+		m.Pending = true
+		m.Status = "正在列出 MCP 服务器…"
+		host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "mcp_list", SessionID: m.ActiveSession}))
+	})
 }
 
 // renderHelp formats the merged command list for the /help transcript note;
@@ -774,6 +788,32 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 		case "hook_report":
 			if x.HookReport != nil {
 				m.Status = fmt.Sprintf("Hooks 重载: %d → %d", x.HookReport.Before, x.HookReport.After)
+			}
+		case "mcp_list":
+			if x.MCPList != nil {
+				var b strings.Builder
+				if len(x.MCPList.Servers) == 0 {
+					b.WriteString("（无 MCP 服务器）")
+				}
+				for _, server := range x.MCPList.Servers {
+					fmt.Fprintf(&b, "%s  %s  %s  工具:%d", server.Name, server.State, server.Source, server.ToolCount)
+					if server.Error != "" {
+						b.WriteString("  错误:" + server.Error)
+					}
+					b.WriteByte('\n')
+				}
+				for _, rejection := range x.MCPList.Rejections {
+					b.WriteString("跳过：" + rejection + "\n")
+				}
+				m.Events = append(m.Events, sessionlog.Event{Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "系统", Text: strings.TrimRight(b.String(), "\n"), Kind: "text"}})
+				m.Transcript.SetEvents(m.Events)
+			}
+		case "mcp_report":
+			if x.MCPReport != nil {
+				m.Status = fmt.Sprintf("MCP 重载: %d → %d", x.MCPReport.Before, x.MCPReport.After)
+				if x.MCPReport.Error != "" {
+					m.Status += "；" + x.MCPReport.Error
+				}
 			}
 		case "plan_state":
 			if x.PlanState != nil {

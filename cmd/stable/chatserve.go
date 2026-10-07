@@ -20,6 +20,7 @@ import (
 	"stable/internal/dependency"
 	"stable/internal/execution"
 	"stable/internal/llm"
+	"stable/internal/mcp"
 	"stable/internal/permission"
 	"stable/internal/platform/paths"
 	"stable/internal/platform/sandbox"
@@ -92,6 +93,14 @@ func chatserve(args []string) error {
 	// to the service so its event appends share the service event mutex.
 	skillGate := conversation.NewSkillGate(nil, userSkillsDir(), filepath.Join(*projectRoot, ".stable", "skills"))
 	hookGate := conversation.NewHookGate(nil, userHooksPath(), filepath.Join(*projectRoot, ".stable", "hooks.yaml"))
+	mcpManager := mcp.NewManager(c.MCPServers, filepath.Join(*projectRoot, ".stable", "mcp.yaml"))
+	if configPath, configErr := appconfig.ConfigPath(); configErr == nil {
+		mcpManager.SetUserConfigPath(configPath)
+	}
+	if err := mcpManager.ConnectAll(ctx); err != nil {
+		log.Printf("MCP startup: %v", err)
+	}
+	defer mcpManager.Shutdown()
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
 		var credentials []string
 		if c.Model.APIKey != "" {
@@ -112,8 +121,8 @@ func chatserve(args []string) error {
 			Snapshots:          snapshotStore,
 			QuestionSink:       askSink,
 			TodoProvider:       todoProvider,
-		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate))
-		toolSchemas = chatserveToolSchemas()
+		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate), execution.WithMCPCaller(mcpManager))
+		toolSchemas = chatserveToolSchemas(mcpManager)
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, model.(decision.ChatProvider))
 		if fellBack {
 			log.Printf("invalid context_window_tokens %d; using default %d", c.Model.ContextWindowTokens, sessioncontext.DefaultWindowTokens)
@@ -131,6 +140,7 @@ func chatserve(args []string) error {
 		Snapshots:           snapshotStore,
 		Skills:              skillGate,
 		Hooks:               hookGate,
+		MCP:                 mcpManager,
 	})
 	if err != nil {
 		return err
@@ -161,7 +171,7 @@ func userSkillsDir() string {
 	return dir
 }
 
-func chatserveToolSchemas() []llm.ToolSchema {
+func chatserveToolSchemas(callers ...execution.MCPCaller) []llm.ToolSchema {
 	nameMap := map[string]string{
 		"read_file":      "read_file",
 		"write_file":     "write_file",
@@ -196,6 +206,19 @@ func chatserveToolSchemas() []llm.ToolSchema {
 		Description: tools.BashDescription,
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"command": map[string]any{"type": "string", "description": "Shell command to execute"}, "timeout": map[string]any{"type": "integer", "minimum": 1, "maximum": 600, "description": "Timeout in seconds"}}, "required": []string{"command"}},
 	})
+	if len(callers) > 0 && callers[0] != nil {
+		if manager, ok := callers[0].(interface{ Configured() bool }); ok && manager.Configured() {
+			for _, schema := range execution.MCPToolSchemas() {
+				name, _ := schema["name"].(string)
+				description, _ := schema["description"].(string)
+				input, _ := schema["input_schema"].(map[string]any)
+				schemas = append(schemas, llm.ToolSchema{Name: name, Description: description, InputSchema: input})
+			}
+			for _, schema := range callers[0].EagerSchemas() {
+				schemas = append(schemas, llm.ToolSchema{Name: schema.Name, Description: schema.Description, InputSchema: schema.InputSchema})
+			}
+		}
+	}
 	sort.Slice(schemas, func(i, j int) bool { return schemas[i].Name < schemas[j].Name })
 	return schemas
 }

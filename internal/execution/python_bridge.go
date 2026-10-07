@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"stable/internal/core"
+	"stable/internal/permission"
 	"stable/internal/platform/sandbox"
 )
 
@@ -28,8 +29,13 @@ type PythonBridge struct {
 	GuestScript string
 	Timeout     time.Duration
 	Env         []string
-	sessionMu   sync.Mutex
-	sessions    map[string]sandbox.SandboxSession
+	// NetworkGrants are trusted grants supplied by the caller that owns this
+	// bridge. They are pinned for each one-shot call; persistent computer
+	// sessions reject them before session creation.
+	NetworkGrants   []permission.NetworkGrant
+	NetworkResolver sandbox.GrantResolver
+	sessionMu       sync.Mutex
+	sessions        map[string]sandbox.SandboxSession
 }
 
 func (b *PythonBridge) Call(ctx context.Context, req core.CapabilityRequest) (core.CapabilityResult, error) {
@@ -57,6 +63,18 @@ func (b *PythonBridge) Call(ctx context.Context, req core.CapabilityRequest) (co
 		profile, err = b.ProfileFor(req)
 		if err != nil {
 			return out, err
+		}
+	}
+	if len(b.NetworkGrants) > 0 {
+		pinned, pinErr := PinNetworkGrants(ctx, b.NetworkGrants, b.NetworkResolver)
+		if pinErr != nil {
+			return out, pinErr
+		}
+		profile.NetworkGrants = pinned
+	}
+	if strings.HasPrefix(req.Kind, "computer.") && len(profile.NetworkGrants) > 0 {
+		if sessionErr := RejectPersistentNetwork(permission.Authority{Network: profile.NetworkGrants}); sessionErr != nil {
+			return out, sessionErr
 		}
 	}
 	if b.Script != "" {

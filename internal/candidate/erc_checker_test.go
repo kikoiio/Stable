@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"stable/internal/platform/kicad"
 	"stable/internal/platform/sandbox"
 )
 
@@ -89,6 +90,16 @@ func checkerFixture(t *testing.T) (Candidate, string) {
 	return candidate, filepath.Join(root, "private-run")
 }
 
+func checkerCapabilities() *kicad.Capabilities {
+	return &kicad.Capabilities{
+		Python:       kicad.ToolStatus{Name: "python3", Available: true},
+		CLI:          kicad.ToolStatus{Name: "kicad-cli", Available: true, Version: "KiCad 9.0.1"},
+		Template:     kicad.ToolStatus{Name: "template", Available: true},
+		TemplateRoot: "/usr/share/kicad/template",
+		Sandbox:      kicad.SandboxCapability{Name: "bubblewrap", Available: true},
+	}
+}
+
 func TestKicadERCCheckerRecordsPassAndFail(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -101,14 +112,14 @@ func TestKicadERCCheckerRecordsPassAndFail(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			candidate, runRoot := checkerFixture(t)
 			fake := &checkerSandbox{violations: test.violations}
-			finding, err := (KicadERCChecker{Sandbox: fake, RunRoot: runRoot}).Check(context.Background(), candidate)
+			finding, err := (KicadERCChecker{Sandbox: fake, RunRoot: runRoot, Capabilities: checkerCapabilities()}).Check(context.Background(), candidate)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if finding.Checker != "kicad-cli-erc" || finding.Version != "KiCad 9.0.1" || finding.Result != test.want || len(finding.Files) != 1 || finding.Files[0] != "board.kicad_sch" {
 				t.Fatalf("unexpected ERC finding: %+v", finding)
 			}
-			if len(fake.calls) != 2 || fake.calls[0][1] != "version" || fake.calls[1][1] != "sch" {
+			if len(fake.calls) != 1 || fake.calls[0][1] != "sch" {
 				t.Fatalf("unexpected isolated checker calls: %v", fake.calls)
 			}
 		})
@@ -118,7 +129,28 @@ func TestKicadERCCheckerRecordsPassAndFail(t *testing.T) {
 func TestCandidateReviewRejectsWritesDuringChecker(t *testing.T) {
 	candidate, runRoot := checkerFixture(t)
 	fake := &checkerSandbox{mutate: "late.txt"}
-	if _, err := BuildReview(context.Background(), candidate, []Checker{KicadERCChecker{Sandbox: fake, RunRoot: runRoot}}); err == nil {
+	if _, err := BuildReview(context.Background(), candidate, []Checker{KicadERCChecker{Sandbox: fake, RunRoot: runRoot, Capabilities: checkerCapabilities()}}); err == nil {
 		t.Fatal("candidate write during checks did not invalidate the review")
+	}
+}
+
+func TestKicadERCCheckerUsesCapabilityResolver(t *testing.T) {
+	candidate, runRoot := checkerFixture(t)
+	fake := &checkerSandbox{}
+	original := discoverKicadCapabilities
+	defer func() { discoverKicadCapabilities = original }()
+	called := false
+	discoverKicadCapabilities = func(_ context.Context, manager sandbox.SandboxManager, profile sandbox.SandboxProfile) (kicad.Capabilities, error) {
+		called = true
+		if manager != fake || profile.ProjectRoot != candidate.FormalRoot || profile.CandidateRoot != candidate.CandidateRoot || profile.RunRoot == "" {
+			t.Fatalf("resolver received wrong profile: %+v", profile)
+		}
+		return *checkerCapabilities(), nil
+	}
+	if _, err := (KicadERCChecker{Sandbox: fake, RunRoot: runRoot}).Check(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("KiCad capability resolver was not called")
 	}
 }

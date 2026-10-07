@@ -69,7 +69,8 @@ start_chat() {
   "$dev_root/bin/stable" chatserve --db "$run_root/state.db" --socket "$run_root/chat.sock" \
     --temporal "$address" --project-root "$project_root" --run-root "$run_root/goals" >"$run_root/chatserve.log" 2>&1 &
   chat_pid=$!
-  for _ in $(seq 1 40); do [[ -S "$run_root/chat.sock" ]] && return 0; sleep 0.25; done
+  # 40×0.25s(10s)在慢 CI runner 上不够 chatserve 完成绑定;统一用 lib.sh 的 120s 等待。
+  if e2e_wait_for_chat_socket "$run_root/chat.sock"; then return 0; fi
   cat "$run_root/chatserve.log" >&2
   return 1
 }
@@ -145,13 +146,30 @@ PY
 # --- phase 3: restart; the pending wake replays and auto reverification passes ---
 start_runner
 start_chat
-wait_status 'import json,sys; x=json.load(open(sys.argv[1])); sys.exit(0 if x["verified"] and x["snapshot"]["goal"]["criteria_revision"]==1 else 1)'
-for _ in $(seq 1 120); do
-  rm -rf "$run_root/delivery-p3"
-  export_delivery delivery-p3
-  if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["verified"] else 1)' "$run_root/delivery-p3/delivery.json" 2>/dev/null; then break; fi
-  sleep 0.5
-done
+# Freeze the goal before exporting: after verification the goal re-evaluates
+# on its 30s interval, and one evaluation can occupy the goal for minutes
+# under load (CI observed a single EvaluateGoal holding it waiting/"computer
+# session opened" for 7 minutes), so polling export until it catches a
+# verified snapshot is unreliable — delivery.verified also requires the goal
+# to be quiescent. Stop the worker the moment the goal reads verified, export
+# the frozen state, and if an evaluation slipped in first, restart and retry.
+freeze_verified() { # revision; leaves the worker stopped on a verified goal
+  local rev=$1 attempt
+  for attempt in $(seq 1 5); do
+    wait_status 'import json,sys; x=json.load(open(sys.argv[1])); g=x["snapshot"]["goal"]; sys.exit(0 if x["verified"] and g["status"]=="verified" and g["criteria_revision"]=='"$rev"' else 1)'
+    stop_runner
+    read_status
+    if python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); g=x["snapshot"]["goal"]; sys.exit(0 if x["verified"] and g["status"]=="verified" else 1)' "$status_file"; then
+      return 0
+    fi
+    start_runner
+    start_chat
+  done
+  echo 'goal did not stay verified across worker stop' >&2
+  exit 1
+}
+freeze_verified 1
+export_delivery delivery-p3
 python3 - "$run_root" <<'PY'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
@@ -166,6 +184,12 @@ print('phase3 PASS: replayed wake re-verified under revision 1')
 PY
 
 # --- phase 4: confirm tightened criteria mid-run, controlled pause, converge ---
+# freeze_verified left the worker stopped; bring it back so the v2 confirm
+# lands mid-run instead of taking the deferred path covered by phase 2.
+# stable up rebinds the chat socket with its own root, so chatserve must be
+# restarted too before any e2e_chat call.
+start_runner
+start_chat
 e2e_chat create_goal --session "$session_id" --goal "$goal_id" --text "修复传感器连接，ERC 必须全过，J1 连接要恢复" >"$run_root/create-v2.jsonl"
 proposal_v2=$(proposal_from "$run_root/create-v2.jsonl")
 [[ -n "$proposal_v2" ]] || { echo 'no v2 proposal' >&2; exit 1; }
@@ -177,17 +201,8 @@ read_status
 python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); g=x["snapshot"]["goal"]; assert g["status"]=="pending_reverification" and g["criteria_revision"]==2, g' "$status_file"
 start_runner
 start_chat
-wait_status 'import json,sys; x=json.load(open(sys.argv[1])); sys.exit(0 if x["verified"] and x["snapshot"]["goal"]["criteria_revision"]==2 else 1)'
-# The goal keeps re-evaluating on its 30s interval after verification, and
-# each M04 tool-loop evaluation flips the status to active while it runs; a
-# transient ask_human parks the goal until the long backoff re-evaluates it.
-# Re-export until the delivery catches a verified snapshot instead of racing it.
-for _ in $(seq 1 600); do
-  rm -rf "$run_root/delivery-p4"
-  export_delivery delivery-p4
-  if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["verified"] else 1)' "$run_root/delivery-p4/delivery.json" 2>/dev/null; then break; fi
-  sleep 0.5
-done
+freeze_verified 2
+export_delivery delivery-p4
 python3 - "$run_root" <<'PY'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])

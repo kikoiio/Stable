@@ -61,17 +61,30 @@ expect_fail stable config 2>/dev/null
 echo 'AC5 commands PASS'
 
 # --- AC1/F1 dependency diagnostics: doctor names each missing item ---
+# doctor 只查 PATH 存在性(exec.LookPath),不执行工具;主机缺某个工具时
+# (如无 kicad 的 CI runner)用可执行 stub 代替符号链接,语义等价。
 tools=(python3 kicad-cli kicad eeschema Xvfb xvfb-run xprop xwininfo import)
 fakebin="$test_root/fakebin"
 mkdir -p "$fakebin"
-for t in "${tools[@]}"; do ln -s "$(command -v "$t")" "$fakebin/$t"; done
+fakebin_add() {
+  local target
+  if target=$(command -v "$1"); then
+    ln -s "$target" "$fakebin/$1"
+  else
+    printf '#!/bin/sh\nexit 0\n' > "$fakebin/$1"
+    chmod +x "$fakebin/$1"
+  fi
+}
+for t in "${tools[@]}"; do fakebin_add "$t"; done
 for missing in python3 kicad-cli kicad Xvfb xvfb-run xprop import; do
   rm "$fakebin/$missing"
   out=$(PATH="$fakebin:$HOME/.local/bin" stable doctor 2>&1) && fail "doctor passed without $missing"
   [[ "$out" == *"MISSING $missing"* ]] || fail "doctor did not name $missing: $out"
-  ln -s "$(command -v "$missing")" "$fakebin/$missing"
+  fakebin_add "$missing"
 done
-PATH="$fakebin:$HOME/.local/bin" stable doctor >/dev/null || fail 'doctor failed with complete PATH'
+# doctor 的 isolated 检查在 bwrap 内探测(bwrap 与工具必须解析到 /usr 等真实系统目录),
+# fakebin 遮蔽 + 裁剪 PATH 会让 probe 全灭;"全量通过"断言必须用真实 PATH。
+PATH="$HOME/.local/bin:/usr/bin:/bin" stable doctor >/dev/null || fail 'doctor failed with complete PATH'
 # missing package file
 cp -a "$HOME/.local/opt/stable/$version" "$test_root/broken"
 rm "$test_root/broken/share/schemas/next_action.schema.json"

@@ -6,17 +6,39 @@ pkg_name="stable-$version-linux-amd64"
 archive="$project_root/dist/$pkg_name.tar.gz"
 test_root=$(mktemp -d /tmp/stable-package-e2e-XXXXXXXX)
 mock_pid=
+dump_diagnostics() {
+  rc=$?
+  [[ $rc -eq 0 ]] && return 0
+  echo '--- status.err ---' >&2
+  cat "$test_root/status.err" 2>/dev/null >&2 || true
+  echo '--- stable goal status (retry, stderr shown) ---' >&2
+  stable goal status --goal package-test >&2 2>&1 || true
+  echo '--- status.json ---' >&2
+  cat "$test_root/status.json" 2>/dev/null >&2 || true
+  echo '--- create.txt (tail) ---' >&2
+  tail -30 "$test_root/create.txt" 2>/dev/null >&2 || true
+  echo '--- mock model log (tail) ---' >&2
+  tail -30 "$test_root/mock.log" 2>/dev/null >&2 || true
+  echo '--- state logs (tail) ---' >&2
+  for f in "$HOME/.local/state/stable"/*.log; do
+    [[ -f $f ]] || continue
+    echo "== $f" >&2
+    tail -50 "$f" >&2
+  done
+  return 0
+}
 cleanup() {
   if [[ -x "$HOME/.local/bin/stable" ]]; then stable down >/dev/null 2>&1 || true; fi
   if [[ -n "$mock_pid" ]]; then kill "$mock_pid" 2>/dev/null || true; wait "$mock_pid" 2>/dev/null || true; fi
   python3 "$project_root/tests/e2e/stop_sessions.py" "$HOME/.local/state/stable" 2>/dev/null || true
 }
-trap cleanup EXIT
+trap 'dump_diagnostics; cleanup' EXIT
 tar -xzf "$archive" -C "$test_root"
 export HOME="$test_root/home"
 mkdir -p "$HOME"
 bash "$test_root/$pkg_name/install.sh"
 export PATH="$HOME/.local/bin:/usr/bin:/bin"
+export STABLE_MOCK_LOG="$test_root/mock.log"
 python3 "$project_root/tests/package/mock_model.py" > "$test_root/mock.port" &
 mock_pid=$!
 for _ in $(seq 1 50); do [[ -s "$test_root/mock.port" ]] && break; sleep 0.1; done
@@ -54,7 +76,7 @@ stable goal notify --goal package-test --event check-1 --kind external_check_fai
 accepted=0
 for _ in $(seq 1 120); do
   e2e_allow_pending_approvals "$session_id" || true
-  if stable goal status --goal package-test > "$status_file" 2>/dev/null; then
+  if stable goal status --goal package-test > "$status_file" 2>"$test_root/status.err"; then
     if python3 -c 'import json,sys; s=json.load(open(sys.argv[1]))["snapshot"]; sys.exit(0 if any(a["status"] in ("candidate_ready","awaiting_accept") for a in (s.get("actions") or [])) else 1)' "$status_file"; then
       e2e_accept_ready_candidate "$session_id" "accept-package-test" || true
       accepted=$((accepted+1))

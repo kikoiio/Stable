@@ -90,7 +90,15 @@ func (a *AskAdapter) Ask(ctx context.Context, req execution.AskRequest) (executi
 	// Register the waiter before the question exists so a reply racing with
 	// the append is never mistaken for a queued message.
 	svc.enterAskWait(req.SessionID)
-	defer svc.exitAskWait(req.SessionID)
+	// waiting tracks whether the waiter is still registered: the consume path
+	// deregisters under eventMu (below) and must not let the defer deregister
+	// a second time.
+	waiting := true
+	defer func() {
+		if waiting {
+			svc.exitAskWait(req.SessionID)
+		}
+	}()
 	id := goalrun.RandomID("q")
 	question := sessionlog.PendingQuestion{
 		QuestionID: id,
@@ -129,6 +137,15 @@ func (a *AskAdapter) Ask(ctx context.Context, req execution.AskRequest) (executi
 			if decodeSessionData(event.Data, &reply) != nil || reply.QuestionID != id {
 				continue
 			}
+			// Deregister under eventMu before returning: replyQuestion holds
+			// eventMu across appending the reply and checking the waiter
+			// count, so once the reply exists the count cannot drop to zero
+			// before that check runs — a consumed reply is never queued as a
+			// user message as well.
+			svc.eventMu.Lock()
+			svc.exitAskWait(req.SessionID)
+			waiting = false
+			svc.eventMu.Unlock()
 			return execution.AskResponse{FreeText: true, Answers: [][]string{{reply.ReplyText}}}, nil
 		}
 	}

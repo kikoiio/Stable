@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,7 +12,7 @@ import unittest
 from unittest import mock
 
 import bridge
-from erc import CHECKER_ID, run_erc
+from erc import CHECKER_ID, kicad_environment, run_erc
 from schematic import CONNECTION_CHECKER_ID, CONNECTION_CHECKER_VERSION
 
 
@@ -52,6 +53,24 @@ class ErcTest(unittest.TestCase):
     def call_erc(self, violations=0, max_violations=0, **kwargs):
         with mock.patch('erc.subprocess.run', fake_kicad_cli(violations=violations, **kwargs)):
             return run_erc(self.design, self.root, self.report, max_violations)
+
+    def test_profile_xdg_directories_stay_private(self):
+        private = self.root / 'profile-config'
+        with mock.patch.dict(os.environ, {
+            'XDG_CONFIG_HOME': str(private),
+            'XDG_CACHE_HOME': str(self.root / 'profile-cache'),
+            'XDG_DATA_HOME': str(self.root / 'profile-data'),
+            'STABLE_KICAD_TEMPLATE_ROOT': str(self.root / 'templates'),
+        }, clear=False):
+            env = kicad_environment(self.root)
+        self.assertEqual(Path(env['XDG_CONFIG_HOME']), private)
+        self.assertTrue(Path(env['XDG_CONFIG_HOME']).is_relative_to(self.root))
+        self.assertEqual(Path(env['STABLE_KICAD_TEMPLATE_ROOT']), self.root / 'templates')
+
+    def test_profile_xdg_directory_outside_run_root_is_rejected(self):
+        with mock.patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.root.parent / 'outside')}, clear=False):
+            with self.assertRaises(ValueError):
+                kicad_environment(self.root)
 
     def test_checker_identity_and_version_from_real_cli(self):
         status, artifact, facts, paths = self.call_erc(violations=0)

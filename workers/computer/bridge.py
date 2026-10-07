@@ -119,9 +119,12 @@ def observation(root: Path, path: Path, handle: dict, capture: bool = True) -> d
     )
     identity = window(root, display, path.stem) if alive else ''
     screenshot = ''
+    reason = ''
     if alive and identity and capture:
         tool = import_tool()
-        if tool:
+        if not tool:
+            reason = 'screenshot_tool_unavailable'
+        else:
             screen_dir = root / 'screenshots'
             screen_dir.mkdir(parents=True, exist_ok=True)
             safe_id = re.sub(r'[^A-Za-z0-9_.-]', '_', session_id)
@@ -129,8 +132,10 @@ def observation(root: Path, path: Path, handle: dict, capture: bool = True) -> d
             result = subprocess.run([tool, '-window', 'root', str(target)], env=x_env(root, display), capture_output=True, timeout=10)
             if result.returncode == 0 and target.is_file() and target.stat().st_size > 0:
                 screenshot = str(target)
+            else:
+                reason = 'screenshot_failed'
     state = 'open' if alive and identity and (not capture or screenshot) else 'stale'
-    return {
+    result = {
         'session_id': session_id,
         'generation': generation,
         'status': state,
@@ -140,24 +145,62 @@ def observation(root: Path, path: Path, handle: dict, capture: bool = True) -> d
         'runtime_handle': json.dumps(handle, separators=(',', ':')),
         'observed_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
     }
+    if reason:
+        result['reason'] = reason
+    return result
 
 
-def stop(handle: dict) -> None:
+def _wait_dead(pid: int, name: str, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not pid_alive(pid, name):
+            return True
+        time.sleep(0.05)
+    return not pid_alive(pid, name)
+
+
+def stop(handle: dict) -> list[str]:
+    failures = []
     for key, name in (('eeschema_pid', 'eeschema'), ('xvfb_pid', 'Xvfb')):
-        pid = int(handle.get(key, 0))
-        if pid_alive(pid, name):
+        try:
+            pid = int(handle.get(key, 0))
+        except (TypeError, ValueError):
+            failures.append(f'{name}:invalid_pid')
+            continue
+        if not pid_alive(pid, name):
+            continue
+        try:
             os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except OSError as exc:
+            failures.append(f'{name}:{pid}:{exc.strerror or exc.__class__.__name__}')
+            continue
+        if _wait_dead(pid, name):
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
+        except OSError as exc:
+            failures.append(f'{name}:{pid}:{exc.strerror or exc.__class__.__name__}')
+            continue
+        if not _wait_dead(pid, name):
+            failures.append(f'{name}:{pid}:did_not_stop')
+    return failures
 
 
-def clear_owned_lock(handle: dict, path: Path) -> None:
+def clear_owned_lock(handle: dict, path: Path) -> bool:
     if handle.get('path') != str(path.resolve()):
-        return
+        return False
     for _ in range(20):
         if not pid_alive(int(handle.get('eeschema_pid', 0)), 'eeschema'):
             break
         time.sleep(0.1)
     if not pid_alive(int(handle.get('eeschema_pid', 0)), 'eeschema'):
         path.with_name('~' + path.name + '.lck').unlink(missing_ok=True)
+        return True
+    return False
 
 
 def start(root: Path, path: Path, session_id: str, generation: int) -> dict:
@@ -202,7 +245,9 @@ def start(root: Path, path: Path, session_id: str, generation: int) -> dict:
         'path': str(path.resolve()),
     }
     accepted = set()
-    for _ in range(80):
+    # 80×0.15s(12s)在共享 CI runner 上不够 eeschema 冷启动(实测 13.6s 才出窗口),
+    # 放宽到 30s;窗口出现后仍立即返回,不影响正常路径耗时。
+    for _ in range(200):
         if window(root, display, path.stem):
             return handle
         seen = subprocess.run(['xwininfo', '-root', '-tree'], env=env, text=True, capture_output=True, timeout=5)
@@ -227,7 +272,9 @@ def start(root: Path, path: Path, session_id: str, generation: int) -> dict:
     if tool:
         subprocess.run([tool, '-window', 'root', str(logs / f'failed-{generation}.png')],
                        env=env, capture_output=True, timeout=10)
-    stop(handle)
+    cleanup_failures = stop(handle)
+    if cleanup_failures:
+        raise RuntimeError('KiCad schematic window did not open; cleanup failed: ' + ', '.join(cleanup_failures))
     raise RuntimeError('KiCad schematic window did not open')
 
 
@@ -268,14 +315,20 @@ def handle(request: dict) -> dict:
         if kind == 'computer.ensure_open' and prior_handle:
             observed = observation(root, path, prior_handle)
             if observed['status'] != 'open':
-                stop(prior_handle)
-                clear_owned_lock(prior_handle, path)
+                cleanup_failures = stop(prior_handle)
+                if cleanup_failures or not clear_owned_lock(prior_handle, path):
+                    result['error_code'] = 'cleanup_failed'
+                    result['postcondition'] = {'reason': ', '.join(cleanup_failures) or 'owned KiCad lock remains'}
+                    return result
                 new_handle = start(root, path, session_id, int(prior.get('generation', 0)) + 1)
                 observed = observation(root, path, new_handle)
         else:
             if prior_handle:
-                stop(prior_handle)
-                clear_owned_lock(prior_handle, path)
+                cleanup_failures = stop(prior_handle)
+                if cleanup_failures or not clear_owned_lock(prior_handle, path):
+                    result['error_code'] = 'cleanup_failed'
+                    result['postcondition'] = {'reason': ', '.join(cleanup_failures) or 'owned KiCad lock remains'}
+                    return result
             generation = int(prior.get('generation', 0)) + 1
             new_handle = start(root, path, session_id, generation)
             observed = observation(root, path, new_handle)

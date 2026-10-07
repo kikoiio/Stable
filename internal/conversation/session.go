@@ -113,6 +113,10 @@ func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) 
 		return s.listHooks()
 	case "hooks_reload":
 		return s.reloadHooks(c)
+	case "mcp_list":
+		return s.listMCP(c)
+	case "mcp_reload":
+		return s.reloadMCP(c)
 	case "history":
 		history, err := s.deps.Store.ListMessages(ctx)
 		if err != nil {

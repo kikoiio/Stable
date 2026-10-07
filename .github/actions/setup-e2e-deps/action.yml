@@ -1,0 +1,58 @@
+name: setup-e2e-deps
+description: 安装重型 e2e 套件所需的系统依赖(Temporal CLI、bwrap+userns 必装;KiCad 9、Xvfb 可选)
+
+inputs:
+  kicad:
+    description: 是否安装 KiCad 9 与 X 工具链(kicad-cli、eeschema、Xvfb 等)
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Install KiCad 9 and display tooling
+      if: inputs.kicad == 'true'
+      shell: bash
+      run: |
+        # 官方 9.0 系列 PPA(支持 Ubuntu 24.04 noble);kicad-cli 与 eeschema 随 kicad 主包附带。
+        # kicad-libraries 必须装:缺省时 kicad 配置里没有 Device/Connector 符号库,
+        # ERC 会多出 lib_symbol_issues 告警,修复后的夹具也无法归零(首轮 CI 实证)。
+        # 注意 PPA 里 kicad-libraries 对 kicad-symbols 等只是 Recommends,--no-install-recommends
+        # 会跳过,符号库与 sym-lib-table 模板实际在 kicad-symbols 里,必须显式点名(m07c run
+        # 37505687914 实证:metapackage 装了但符号文件没落盘,ERC 仍报 table missing)。
+        sudo add-apt-repository -y ppa:kicad/kicad-9.0-releases
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          kicad kicad-libraries kicad-symbols xvfb x11-utils imagemagick
+        kicad-cli version
+
+    - name: Clear runner-injected XDG directories
+      shell: bash
+      run: |
+        # runner 镜像把 XDG_CONFIG_HOME 等注入为 /home/runner 下的路径;workers 的
+        # 私有根校验(erc.py _private_dir)拒绝 run root 之外的值。清空后 Python
+        # 契约测试与 e2e 走 root 内默认值。经 GITHUB_ENV 对后续步骤生效。
+        echo 'XDG_CONFIG_HOME=' >> "$GITHUB_ENV"
+        echo 'XDG_CACHE_HOME=' >> "$GITHUB_ENV"
+        echo 'XDG_DATA_HOME=' >> "$GITHUB_ENV"
+
+    - name: Enable unprivileged user namespaces
+      shell: bash
+      run: |
+        # ubuntu-latest 镜像默认由 AppArmor 限制非特权 userns:只装 bwrap 跑不起来
+        # (m07c run 37499409109 实证),必须放开 knob。不写 || true:knob 消失说明
+        # 镜像策略变了,宁可红也不要静默跳过。
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bubblewrap
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        bwrap --version
+        bwrap --die-with-parent --unshare-net --ro-bind / / true
+
+    - name: Install Temporal CLI
+      shell: bash
+      run: |
+        # 与 scripts/package_linux.sh 打包所用的版本保持一致。
+        curl -fL --retry 2 -o /tmp/temporal_cli.tar.gz \
+          https://github.com/temporalio/cli/releases/download/v1.9.1/temporal_cli_1.9.1_linux_amd64.tar.gz
+        sudo tar -xzf /tmp/temporal_cli.tar.gz -C /usr/local/bin temporal
+        temporal --version

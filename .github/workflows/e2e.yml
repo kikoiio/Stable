@@ -1,0 +1,195 @@
+name: E2E
+
+# 重型测试(真实 Temporal 运行时 + bwrap 沙箱 + KiCad/Xvfb GUI)统一在云端跑,
+# 避免占用开发机内存。单元测试与打包验收仍由 go.yml 负责(此处 unit job
+# 只是让非 master 分支的 push 也有轻量覆盖,与 go.yml 不冲突)。
+
+on:
+  push:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      # go test ./... 含 m06 沙箱测试(TestM06* 需要 bwrap + userns,见 m07c 实证),
+      # 因此 unit job 也要走依赖 action 的 bwrap/userns 步骤(不装 KiCad)。
+      - uses: ./.github/actions/setup-e2e-deps
+        with:
+          kicad: 'false'
+      - name: Build CLI and workers
+        run: go build ./cmd/...
+      - name: Run unit tests
+        run: go test ./...
+      - name: Platform boundary gate
+        run: bash scripts/check-platform.sh
+      - name: Python worker contract tests
+        run: |
+          python3 -m unittest discover -s workers/kicad
+          python3 -m unittest discover -s workers/computer
+
+  # 源码级端到端(run / waiting_restart / unsupported / criteria_change /
+  # dependency_change)。每个脚本占用独立 loopback 端口,同一 runner 内串行。
+  e2e-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: ./.github/actions/setup-e2e-deps
+      - run: make e2e
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          cp -aL run ci-logs/run 2>/dev/null || true
+          for d in /tmp/stable-e2e-* /tmp/stable-m04-helper-*; do
+            [[ -d $d ]] && cp -aL "$d" ci-logs/ || true
+          done
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-core-logs
+          path: ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # M03 权限/沙箱/候选接收套件(bwrap 隔离 + KiCad 候选修复,串行低并发)。
+  e2e-m03:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: ./.github/actions/setup-e2e-deps
+      - run: make m03-e2e
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          cp -aL run ci-logs/run 2>/dev/null || true
+          for d in /tmp/stable-e2e-* /tmp/stable-m04-helper-*; do
+            [[ -d $d ]] && cp -aL "$d" ci-logs/ || true
+          done
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-m03-logs
+          path: ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # M04 工具执行、bwrap 正例与 S01 目标全链流程(kicad-cli + eeschema + xvfb-run)。
+  e2e-m04:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: ./.github/actions/setup-e2e-deps
+      - run: make m04-e2e
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          cp -aL run ci-logs/run 2>/dev/null || true
+          for d in /tmp/stable-e2e-* /tmp/stable-m04-helper-*; do
+            [[ -d $d ]] && cp -aL "$d" ci-logs/ || true
+          done
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-m04-logs
+          path: ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # M05 会话与 M07-B hooks(无需沙箱/KiCad,只装 Temporal)。
+  e2e-sessions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: ./.github/actions/setup-e2e-deps
+        with:
+          kicad: 'false'
+      - run: |
+          make m05-e2e
+          make m07b-e2e
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          cp -aL run ci-logs/run 2>/dev/null || true
+          for d in /tmp/stable-e2e-* /tmp/stable-m04-helper-*; do
+            [[ -d $d ]] && cp -aL "$d" ci-logs/ || true
+          done
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-sessions-logs
+          path: ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # 夹具派生场景用例。make cases 会遍历所有用例目录,而 S01 以外的 legacy
+  # 用例在 agentctl start 移除后固定 exit 2,因此 CI 只跑 S01 修复正例。
+  cases:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: ./.github/actions/setup-e2e-deps
+      - run: bash tests/cases/run_case.sh S01_missing_wire
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          cp -aL run ci-logs/run 2>/dev/null || true
+          for d in /tmp/stable-e2e-* /tmp/stable-m04-helper-*; do
+            [[ -d $d ]] && cp -aL "$d" ci-logs/ || true
+          done
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cases-logs
+          path: ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7

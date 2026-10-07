@@ -50,6 +50,7 @@ type m06Agent struct {
 	mu      sync.Mutex
 	calls   int
 	seen    [][]llm.Message
+	tools   [][]llm.ToolSchema
 	respond func(call int, req llm.Request) []llm.Event
 }
 
@@ -58,6 +59,7 @@ func (p *m06Agent) Stream(_ context.Context, request llm.Request) (<-chan llm.Ev
 	p.calls++
 	call := p.calls
 	p.seen = append(p.seen, append([]llm.Message(nil), request.Messages...))
+	p.tools = append(p.tools, append([]llm.ToolSchema(nil), request.Tools...))
 	respond := p.respond
 	p.mu.Unlock()
 	events := []llm.Event{
@@ -88,6 +90,7 @@ func (p *m06Agent) reset() {
 	defer p.mu.Unlock()
 	p.calls = 0
 	p.seen = nil
+	p.tools = nil
 }
 
 func (p *m06Agent) roundCount() int {
@@ -104,6 +107,15 @@ func (p *m06Agent) roundMessages(call int) []llm.Message {
 		return nil
 	}
 	return p.seen[call-1]
+}
+
+func (p *m06Agent) roundTools(call int) []llm.ToolSchema {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if call < 1 || call > len(p.tools) {
+		return nil
+	}
+	return append([]llm.ToolSchema(nil), p.tools[call-1]...)
 }
 
 func m06TextRound(text string) []llm.Event {
@@ -773,9 +785,11 @@ func TestM06PlanApprovalAutoAndAcceptEdits(t *testing.T) {
 		}
 		return false
 	})
-	if !stream.hasType("plan_approval_pending") {
-		t.Fatal("run stream did not receive the plan_approval_pending push")
-	}
+	// 日志可见不等于推送已扇出:push 由异步 poll 循环驱动,瞬时断言在慢
+	// runner 上是竞态,轮询等待推送到达。
+	m06Poll(t, 30*time.Second, "plan_approval_pending push", func() bool {
+		return stream.hasType("plan_approval_pending")
+	})
 	resolve := m06Op(t, ctx, env.socket, conversation.ClientMsg{Op: "plan_resolve", SessionID: sessionID, ApprovalChoice: conversation.PlanResolveAuto})
 	var resolvedState *conversation.PlanState
 	for _, m := range resolve {
@@ -1035,9 +1049,10 @@ func TestM06AskUserReplyRoundTrip(t *testing.T) {
 		}
 		return false
 	})
-	if !stream.hasType("questions") {
-		t.Fatal("run stream did not receive the questions push")
-	}
+	// 与 plan_approval_pending 同理:questions 推送是异步扇出,轮询而非瞬时断言。
+	m06Poll(t, 30*time.Second, "questions push", func() bool {
+		return stream.hasType("questions")
+	})
 	if questions := m06Questions(t, ctx, env, sessionID); len(questions) != 1 || questions[0].Prompt == "" {
 		t.Fatalf("questions = %+v", questions)
 	}

@@ -80,7 +80,9 @@ func (p Policy) Decide(a Authority, o Operation) PermissionDecision {
 				}
 			}
 		}
-	} else if o.Kind != OpCommand {
+	} else if o.Kind != OpCommand && o.Kind != OpMCPTool {
+		// MCP tool operations carry no filesystem boundary: they are gated
+		// by exact rules below and default to ask.
 		return deny("unknown operation kind")
 	}
 	for _, r := range p.Rules {
@@ -107,7 +109,9 @@ func (p Policy) Decide(a Authority, o Operation) PermissionDecision {
 	if o.Kind == OpNetwork {
 		return PermissionDecision{Kind: DecisionAllow, Reason: "explicit network grant", ScopeDigest: scope, OperationDigest: operation}
 	}
-	if a.Mode == ModeBypass {
+	// MCP tool calls are never auto-allowed by bypass mode: absent an exact
+	// rule they always require user approval.
+	if a.Mode == ModeBypass && o.Kind != OpMCPTool {
 		return PermissionDecision{Kind: DecisionAllow, Reason: "bypass mode within hard boundaries", ScopeDigest: scope, OperationDigest: operation}
 	}
 	switch o.Kind {
@@ -120,6 +124,8 @@ func (p Policy) Decide(a Authority, o Operation) PermissionDecision {
 		if planWrite {
 			return PermissionDecision{Kind: DecisionAllow, Reason: "plan file write allowed in plan mode", ScopeDigest: scope, OperationDigest: operation}
 		}
+	case OpMCPTool:
+		return PermissionDecision{Kind: DecisionAsk, Reason: "mcp tool operation requires user approval", ScopeDigest: scope, OperationDigest: operation}
 	}
 	return PermissionDecision{Kind: DecisionAsk, Reason: fmt.Sprintf("%s operation requires user approval", o.Kind), ScopeDigest: scope, OperationDigest: operation}
 }
@@ -143,6 +149,12 @@ func matchesExact(r ExactRule, a Authority, o Operation, scope string) (bool, bo
 }
 
 func ruleTarget(a Authority, o Operation) (string, error) {
+	// MCP tool targets are already normalized "server__tool" match strings,
+	// not filesystem paths; they are compared verbatim and never resolved
+	// against the project roots.
+	if o.Kind == OpMCPTool {
+		return o.Target, nil
+	}
 	if o.Target == "" {
 		return "", nil
 	}

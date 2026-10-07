@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,55 @@ func TestProfileValidation(t *testing.T) {
 	p.Environment = []string{"STABLE_API_KEY=secret"}
 	if err := ValidateProfile(p); err == nil {
 		t.Fatal("secret environment accepted")
+	}
+	p = sandboxFixture(t)
+	p.Environment = []string{"home=/tmp"}
+	if err := ValidateProfile(p); !errors.Is(err, ErrProfileInvalid) {
+		t.Fatalf("lowercase sensitive environment was not classified: %v", err)
+	}
+	p = sandboxFixture(t)
+	p.Environment = []string{"XDG_CACHE_HOME=/tmp/cache", "xdg_cache_home=/tmp/other"}
+	if err := ValidateProfile(p); !errors.Is(err, ErrProfileInvalid) {
+		t.Fatalf("duplicate environment was not classified: %v", err)
+	}
+	p = sandboxFixture(t)
+	p.ProjectRoot = "relative-project"
+	if err := ValidateProfile(p); !errors.Is(err, ErrProfileInvalid) || !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("relative root was not rejected as unavailable: %v", err)
+	}
+	p = sandboxFixture(t)
+	if err := os.Chmod(p.RunRoot, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateProfile(p); !errors.Is(err, ErrProfileInvalid) {
+		t.Fatalf("non-private run root was accepted: %v", err)
+	}
+}
+
+func TestProfileRejectsDuplicateMountAndUnpinnedGrant(t *testing.T) {
+	p := sandboxFixture(t)
+	mount := filepath.Join(filepath.Dir(p.RunRoot), "runtime")
+	if err := os.Mkdir(mount, 0700); err != nil {
+		t.Fatal(err)
+	}
+	p.ReadOnlyMounts = []ReadOnlyMount{
+		{HostPath: mount, GuestPath: "/workspace/runtime"},
+		{HostPath: mount, GuestPath: "/workspace/runtime"},
+	}
+	if err := ValidateProfile(p); !errors.Is(err, ErrProfileInvalid) {
+		t.Fatalf("duplicate mount was accepted: %v", err)
+	}
+
+	p = sandboxFixture(t)
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.NetworkGrants = []permission.NetworkGrant{{Protocol: "tcp", Host: "target.test", Port: 443}}
+	p.ProxyHelperPath = helper
+	p.ReadOnlyFiles = []ReadOnlyFileMount{{HostPath: helper, GuestPath: "/workspace/runtime/agentworker"}}
+	if err := ValidateProfile(p); !errors.Is(err, ErrNetworkGrantInvalid) {
+		t.Fatalf("unpinned grant was accepted: %v", err)
 	}
 }
 

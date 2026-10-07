@@ -36,9 +36,16 @@ start_runner() {
     bash "$project_root/scripts/run_local.sh" "$run_root" >"$run_root/runner.log" 2>&1 &
   runner_pid=$!
   for _ in $(seq 1 480); do
-    if grep -q 'agent worker ready' "$run_root/worker.log" 2>/dev/null; then return 0; fi
+    if grep -q 'agent worker ready' "$run_root/worker.log" 2>/dev/null; then break; fi
     sleep 0.5
   done
+  grep -q 'agent worker ready' "$run_root/worker.log" 2>/dev/null || return 1
+  # 'agent worker ready' does not imply the chat socket exists: the chat
+  # service binds after the worker comes up, and slow CI runners expose the
+  # gap as chat_client FileNotFoundError. Wait for the socket on every start,
+  # not only after the crash-injection restart.
+  for _ in $(seq 1 240); do [[ -S "$run_root/chat.sock" ]] && return 0; sleep 0.5; done
+  echo 'chat.sock missing after runner start' >&2
   return 1
 }
 

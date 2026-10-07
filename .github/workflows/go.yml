@@ -2,7 +2,6 @@ name: Go
 
 on:
   push:
-    branches: [master]
   pull_request:
     branches: [master]
   workflow_dispatch:
@@ -19,6 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-e2e-deps
+        with:
+          kicad: 'false'
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -29,3 +31,18 @@ jobs:
         run: go build ./cmd/...
       - name: Run unit tests
         run: go test ./...
+
+  # 安装后验收（install / cli / e2e / restart）。四个脚本占用固定端口
+  # 17387-17389，必须串行，放在同一 job 内由 make 顺序执行。
+  test-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-e2e-deps
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Build release package and run package acceptance
+        run: make test-package
