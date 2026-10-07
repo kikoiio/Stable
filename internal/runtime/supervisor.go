@@ -381,13 +381,18 @@ func runChatService(ctx context.Context, c appconfig.AppConfig, p paths.Paths, a
 	if err != nil {
 		return err
 	}
+	var memoryGate *conversation.MemoryGate
 	memoryManager, err := memory.NewManager(memory.Options{
 		ProjectRoot:   p.Share,
 		UserConfigDir: filepath.Dir(filepath.Dir(userMemoryDir)),
 		StateDir:      p.State,
 		Model:         chatProvider,
 		OnEvent: func(root string, event memory.BackgroundEvent) {
-			conversation.AppendMemoryBackgroundEvent(root, event)
+			if memoryGate != nil {
+				memoryGate.RecordBackground(root, event)
+			} else {
+				conversation.AppendMemoryBackgroundEvent(root, event)
+			}
 		},
 	})
 	if err != nil {
@@ -400,7 +405,7 @@ func runChatService(ctx context.Context, c appconfig.AppConfig, p paths.Paths, a
 			log.Printf("memory manager shutdown: %v", closeErr)
 		}
 	}()
-	memoryGate := conversation.NewMemoryGate(memoryManager, p.Share)
+	memoryGate = conversation.NewMemoryGate(memoryManager, p.Share)
 	var runner agent.Runner
 	var runnerError string
 	var executorFactory agent.ExecutorFactory

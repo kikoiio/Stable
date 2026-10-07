@@ -83,3 +83,20 @@ func TestMemoryResponsesRenderHeadersAndErrors(t *testing.T) {
 		t.Fatalf("memory error status = %q", got.Status)
 	}
 }
+
+func TestMemoryBackgroundStatusAppearsInTranscript(t *testing.T) {
+	text := projectTranscript([]sessionlog.Event{
+		{Type: sessionlog.EventMemoryBackground, Data: sessionlog.MemoryBackgroundRecord{Action: "extract", State: "failed", Reason: "provider unavailable"}},
+		{Type: sessionlog.EventMemoryAction, Data: sessionlog.MemoryActionRecord{Scope: "user", Entry: "tone.md", Operation: "save", State: "success"}},
+	}, 80, false)
+	for _, want := range []string{"记忆后台", "extract failed", "provider unavailable", "记忆操作", "user/save tone.md"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("transcript missing %q:\n%s", want, text)
+		}
+	}
+	m := New("sock", t.TempDir())
+	m.applyRunMessage(conversation.ServerMsg{Type: "memory_background", MemoryBackground: &sessionlog.MemoryBackgroundRecord{Action: "extract", State: "failed", Reason: "provider unavailable"}})
+	if !strings.Contains(m.Status, "provider unavailable") || !strings.Contains(m.Status, "failed") {
+		t.Fatalf("live memory status = %q", m.Status)
+	}
+}

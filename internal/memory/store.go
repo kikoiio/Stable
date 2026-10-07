@@ -318,7 +318,11 @@ func (s *Store) Index(scope MemoryScope) (string, bool, []LoadIssue, error) {
 		lines = lines[:MaxMemoryIndexLine]
 		truncated = true
 	}
-	return strings.Join(lines, "\n"), truncated, nil, nil
+	index := strings.Join(lines, "\n")
+	if strings.Contains(index, "_Index truncated") {
+		truncated = true
+	}
+	return index, truncated, nil, nil
 }
 
 func (s *Store) rebuildIndex(scope MemoryScope) error {

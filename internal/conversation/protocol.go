@@ -87,14 +87,15 @@ type ServerMsg struct {
 	SkillReport *SkillReport `json:"skill_report,omitempty"`
 	// Skills and SkillActivated carry the skill_list response: the current
 	// catalog infos and the session's activated skill names.
-	Skills         []sessionlog.SkillInfo `json:"skills,omitempty"`
-	SkillActivated []string               `json:"skill_activated,omitempty"`
-	HookList       *HookListMsg           `json:"hook_list,omitempty"`
-	HookReport     *HookReportMsg         `json:"hook_report,omitempty"`
-	MCPList        *MCPListMsg            `json:"mcp_list,omitempty"`
-	MCPReport      *MCPReportMsg          `json:"mcp_report,omitempty"`
-	MemoryEntries  []memory.MemoryHeader  `json:"memory_entries,omitempty"`
-	MemoryReport   *MemoryReportMsg       `json:"memory_report,omitempty"`
+	Skills           []sessionlog.SkillInfo             `json:"skills,omitempty"`
+	SkillActivated   []string                           `json:"skill_activated,omitempty"`
+	HookList         *HookListMsg                       `json:"hook_list,omitempty"`
+	HookReport       *HookReportMsg                     `json:"hook_report,omitempty"`
+	MCPList          *MCPListMsg                        `json:"mcp_list,omitempty"`
+	MCPReport        *MCPReportMsg                      `json:"mcp_report,omitempty"`
+	MemoryEntries    []memory.MemoryHeader              `json:"memory_entries,omitempty"`
+	MemoryReport     *MemoryReportMsg                   `json:"memory_report,omitempty"`
+	MemoryBackground *sessionlog.MemoryBackgroundRecord `json:"memory_background,omitempty"`
 }
 
 // HookSummary is one loaded hook in the merged view.

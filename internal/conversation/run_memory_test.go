@@ -43,9 +43,9 @@ func TestRenderMemoryContextIsBoundedAndContainsSelectedText(t *testing.T) {
 	got := renderMemoryContext(memory.RunMemoryContext{
 		InstructionText: "Follow local guidance.",
 		UserIndex:       "Prefer concise replies.",
-		Selected:        []memory.MemoryEntry{{MemoryHeader: memory.MemoryHeader{Scope: memory.ScopeProject, Name: "Build"}, Body: "Uses Go."}},
+		Selected:        []memory.MemoryEntry{{MemoryHeader: memory.MemoryHeader{Scope: memory.ScopeProject, Name: "Build", UpdatedAt: time.Now().Add(-25 * time.Hour)}, Body: "Uses Go."}},
 	})
-	for _, want := range []string{"Follow local guidance.", "Prefer concise replies.", "Uses Go."} {
+	for _, want := range []string{"Follow local guidance.", "Prefer concise replies.", "Uses Go.", "project memory", "updated ", "older than 24 hours"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("memory context missing %q: %s", want, got)
 		}

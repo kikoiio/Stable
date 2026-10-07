@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -79,6 +80,36 @@ func TestManagerPrepareRunLoadsIndexAndSelectedMemory(t *testing.T) {
 	}
 	if !strings.Contains(got.UserIndex, "Style") || len(got.Selected) != 1 || got.Selected[0].Body != "Use short direct answers." || got.ExtractedThrough != 19 {
 		t.Fatalf("PrepareRun() = %+v", got)
+	}
+}
+
+func TestManagerPrepareRunKeepsSelectorFailureNonFatal(t *testing.T) {
+	manager, project, _ := newTestManager(t, &fixedProcessor{}, fixedSelector{err: errors.New("selector unavailable")}, nil, nil)
+	got, err := manager.PrepareRun(context.Background(), project, project, "session-selector", "current request")
+	if err != nil || len(got.Issues) == 0 || len(got.Selected) != 0 {
+		t.Fatalf("selector failure result = %+v, %v", got, err)
+	}
+}
+
+func TestManagerDeleteRebuildsScopeIndex(t *testing.T) {
+	manager, project, _ := newTestManager(t, &fixedProcessor{}, nil, nil, nil)
+	if err := manager.Save(context.Background(), project, MemoryChange{Action: ActionUpsert, Scope: ScopeProject, Type: TypeProject, Name: "Delete me", Body: "project note"}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := manager.List(context.Background(), project)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("pre-delete entries = %+v, %v", entries, err)
+	}
+	if err = manager.Delete(context.Background(), project, ScopeProject, entries[0].Filename); err != nil {
+		t.Fatal(err)
+	}
+	store, err := manager.newStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, truncated, issues, err := store.Index(ScopeProject)
+	if err != nil || truncated || strings.Contains(text, "Delete me") || len(issues) != 0 {
+		t.Fatalf("post-delete index = %q, truncated=%v issues=%v err=%v", text, truncated, issues, err)
 	}
 }
 
@@ -166,6 +197,38 @@ func TestManagerConsolidatesOnlyAfterTimeAndSessionGates(t *testing.T) {
 	manager.processCompletion(context.Background(), RunCompletion{ProjectRoot: project, SessionID: "later-f", RunID: "run", ThroughSeq: 1})
 	if processor.consolidations != 2 {
 		t.Fatalf("consolidation did not start after both gates: %d calls", processor.consolidations)
+	}
+}
+
+func TestManagerConcurrentConsolidationRunsOnce(t *testing.T) {
+	processor := &fixedProcessor{}
+	manager, project, _ := newTestManager(t, processor, nil, nil, nil)
+	state, err := manager.loadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.SessionsSinceConsolidation = map[string]bool{"a": true, "b": true, "c": true, "d": true, "e": true}
+	if err = manager.saveState(state); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := 0; i < cap(errs); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- manager.MaybeConsolidate(context.Background(), project)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if processor.consolidations != 1 {
+		t.Fatalf("concurrent consolidation calls = %d, want 1", processor.consolidations)
 	}
 }
 

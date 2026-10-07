@@ -140,6 +140,10 @@ func TestM08MemoryLayersRecallExtractionAndManagement(t *testing.T) {
 	if err = waitExtracted(ctx, manager, project); err != nil {
 		t.Fatal(err)
 	}
+	nextRun, err := manager.PrepareRun(ctx, project, work, "session-next", "explain this project")
+	if err != nil || !strings.Contains(nextRun.UserIndex, "Language") {
+		t.Fatalf("extracted memory was not available on the next run: %+v, %v", nextRun, err)
+	}
 	if got, readErr := os.ReadFile(goalFacts); readErr != nil || string(got) != `{"criterion":"unchanged"}` {
 		t.Fatalf("goal facts changed: %q, %v", got, readErr)
 	}

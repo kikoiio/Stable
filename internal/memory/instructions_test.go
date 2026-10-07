@@ -148,3 +148,15 @@ func TestDiscoverInstructionsRejectsSymlinkEscape(t *testing.T) {
 		t.Fatal("symlink target content was loaded")
 	}
 }
+
+func TestDiscoverInstructionsReportsOversizedFile(t *testing.T) {
+	project := t.TempDir()
+	content := strings.Repeat("x", MaxInstructionFileBytes+1)
+	if err := os.WriteFile(filepath.Join(project, "STABLE.md"), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sources, issues := DiscoverInstructions(project, project, "")
+	if len(sources) != 0 || len(issues) == 0 || !strings.Contains(issues[0].Reason, "exceeds 1 MiB") {
+		t.Fatalf("oversized instruction result = sources:%d issues:%v", len(sources), issues)
+	}
+}

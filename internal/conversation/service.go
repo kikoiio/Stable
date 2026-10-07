@@ -326,6 +326,20 @@ func (s *Service) broadcast(msg ServerMsg) {
 	}
 }
 
+func (s *Service) broadcastSession(sessionID string, msg ServerMsg) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for ch, sub := range s.clients {
+		if sub.sessionID != sessionID {
+			continue
+		}
+		select {
+		case ch <- msg:
+		default: // the event remains in the session log for replay
+		}
+	}
+}
+
 // pollGoals pushes goal status changes to connected clients so terminals see
 // progress without running goal status themselves.
 func (s *Service) pollGoals(ctx context.Context) {

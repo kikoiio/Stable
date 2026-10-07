@@ -150,7 +150,22 @@ func AppendMemoryBackgroundEvent(projectRoot string, event memory.BackgroundEven
 	if len([]rune(reason)) > sessionlog.MaxMemoryEventText {
 		reason = string([]rune(reason)[:sessionlog.MaxMemoryEventText])
 	}
-	_, _ = sessionlog.Append(projectRoot, event.SessionID, sessionlog.EventMemoryBackground, sessionlog.MemoryBackgroundRecord{
+	record := sessionlog.MemoryBackgroundRecord{
 		Action: event.Action, State: event.State, Count: event.Count, Reason: reason, At: event.At,
-	})
+	}
+	_, _ = sessionlog.Append(projectRoot, event.SessionID, sessionlog.EventMemoryBackground, record)
+}
+
+func (g *MemoryGate) RecordBackground(projectRoot string, event memory.BackgroundEvent) {
+	AppendMemoryBackgroundEvent(projectRoot, event)
+	if g == nil || g.service == nil || event.SessionID == "" {
+		return
+	}
+	reason := strings.ToValidUTF8(event.Reason, "�")
+	if len([]rune(reason)) > sessionlog.MaxMemoryEventText {
+		reason = string([]rune(reason)[:sessionlog.MaxMemoryEventText])
+	}
+	g.service.broadcastSession(event.SessionID, ServerMsg{Type: "memory_background", MemoryBackground: &sessionlog.MemoryBackgroundRecord{
+		Action: event.Action, State: event.State, Count: event.Count, Reason: reason, At: event.At,
+	}})
 }

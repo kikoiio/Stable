@@ -32,7 +32,14 @@ func renderMemoryContext(memoryContext memory.RunMemoryContext) string {
 	appendBoundedSection(&b, "User memory index", memoryContext.UserIndex)
 	appendBoundedSection(&b, "Project memory index", memoryContext.ProjectIndex)
 	for _, entry := range memoryContext.Selected {
-		appendBoundedSection(&b, "Selected "+string(entry.Scope)+" memory: "+entry.Name, entry.Body)
+		title := "Selected " + string(entry.Scope) + " memory: " + entry.Name
+		if !entry.UpdatedAt.IsZero() {
+			title += " (updated " + entry.UpdatedAt.UTC().Format(time.RFC3339) + ")"
+			if time.Since(entry.UpdatedAt) > 24*time.Hour {
+				title += " [older than 24 hours]"
+			}
+		}
+		appendBoundedSection(&b, title, entry.Body)
 	}
 	if len(memoryContext.Issues) > 0 {
 		var issues []string

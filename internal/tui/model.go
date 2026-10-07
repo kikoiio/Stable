@@ -1751,6 +1751,14 @@ func (m *Model) applyRunMessage(message conversation.ServerMsg) {
 		if message.HookReport != nil {
 			m.Status = fmt.Sprintf("Hooks 重载: %d → %d", message.HookReport.Before, message.HookReport.After)
 		}
+	case "memory_background":
+		if message.MemoryBackground != nil {
+			event := message.MemoryBackground
+			m.Status = fmt.Sprintf("记忆后台 %s：%s（%d 项）", event.Action, event.State, event.Count)
+			if event.Reason != "" {
+				m.Status += "；" + event.Reason
+			}
+		}
 	case "plan_state":
 		if message.PlanState != nil {
 			m.Plan = message.PlanState
