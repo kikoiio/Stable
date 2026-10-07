@@ -498,6 +498,55 @@ func registerBuiltins(host *commandHost, registry *commands.Registry) {
 		m.Status = "正在列出 MCP 服务器…"
 		host.send(requestCmd(m.Socket, conversation.ClientMsg{Op: "mcp_list", SessionID: m.ActiveSession}))
 	})
+	set("memory", "列出、删除或清理记忆", "list | delete <user|project> <entry> | clear [user|all]", func(args string) {
+		m := host.model
+		parts := strings.Fields(strings.TrimSpace(args))
+		if len(parts) == 0 {
+			m.Events = append(m.Events, sessionlog.Event{Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "系统", Kind: "text", Text: "用法：/memory list | /memory delete <user|project> <entry> | /memory clear [user|all]"}})
+			m.Transcript.SetEvents(m.Events)
+			m.Composer.SetValue("")
+			return
+		}
+		var request conversation.ClientMsg
+		switch parts[0] {
+		case "list":
+			if len(parts) != 1 {
+				m.Status = "用法：/memory list"
+				return
+			}
+			request = conversation.ClientMsg{Op: "memory_list", SessionID: m.ActiveSession}
+			m.Status = "正在读取记忆列表…"
+		case "delete":
+			if len(parts) != 3 || (parts[1] != "user" && parts[1] != "project") {
+				m.Status = "用法：/memory delete <user|project> <entry>"
+				return
+			}
+			request = conversation.ClientMsg{Op: "memory_delete", SessionID: m.ActiveSession, MemoryScope: parts[1], MemoryEntry: parts[2]}
+			m.Status = "正在删除记忆…"
+		case "clear":
+			if len(parts) > 2 || len(parts) == 2 && parts[1] != "user" && parts[1] != "all" {
+				m.Status = "用法：/memory clear [user|all]"
+				return
+			}
+			scope := ""
+			if len(parts) == 2 {
+				scope = parts[1]
+			}
+			request = conversation.ClientMsg{Op: "memory_clear", SessionID: m.ActiveSession, MemoryScope: scope}
+			m.Status = "正在清理记忆…"
+		default:
+			m.Status = "用法：/memory list | /memory delete <user|project> <entry> | /memory clear [user|all]"
+			return
+		}
+		if m.ActiveSession == "" {
+			m.Status = "请先打开一个会话，再使用 /memory。"
+			return
+		}
+		m.Pending = true
+		m.Composer.SetValue("")
+		m.recordHistory(host.raw)
+		host.send(requestCmd(m.Socket, request))
+	})
 }
 
 // renderHelp formats the merged command list for the /help transcript note;
@@ -813,6 +862,28 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 				m.Status = fmt.Sprintf("MCP 重载: %d → %d", x.MCPReport.Before, x.MCPReport.After)
 				if x.MCPReport.Error != "" {
 					m.Status += "；" + x.MCPReport.Error
+				}
+			}
+		case "memory_list":
+			var b strings.Builder
+			if len(x.MemoryEntries) == 0 {
+				b.WriteString("没有记忆条目。")
+			}
+			for _, entry := range x.MemoryEntries {
+				fmt.Fprintf(&b, "%s  %s  %s — %s\n", entry.Scope, entry.Type, entry.Name, entry.Description)
+				fmt.Fprintf(&b, "  文件：%s\n", entry.Filename)
+			}
+			m.Events = append(m.Events, sessionlog.Event{Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "系统", Text: strings.TrimRight(b.String(), "\n"), Kind: "text"}})
+			m.Transcript.SetEvents(m.Events)
+		case "memory_report":
+			if x.MemoryReport != nil {
+				report := x.MemoryReport
+				if report.Error != "" {
+					m.Status = "记忆操作失败：" + report.Error
+				} else if report.Operation == "delete" {
+					m.Status = fmt.Sprintf("已删除 %d 条 %s 记忆。", report.Deleted, report.Scope)
+				} else {
+					m.Status = fmt.Sprintf("已清理 %d 条 %s 记忆。", report.Deleted, report.Scope)
 				}
 			}
 		case "plan_state":
