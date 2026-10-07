@@ -54,3 +54,35 @@ func TestWindowsExchangeReportsJournaledMoveCapability(t *testing.T) {
 		t.Fatalf("windowsDirectoryMoveMode() = %q, want %q", got, windowsJournaledMove)
 	}
 }
+
+func TestWindowsRootWriteAndRemove(t *testing.T) {
+	rootPath := t.TempDir()
+	root, err := OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.MkdirAll(`stable\memory`, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.WriteFileAtomic(`stable\memory\item.md`, []byte("one"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.WriteFileAtomic(`stable\memory\item.md`, []byte("two"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(rootPath, "stable", "memory", "item.md"))
+	if err != nil || string(got) != "two" {
+		t.Fatalf("atomic replacement = %q, %v", got, err)
+	}
+	if err := root.RemoveFile(`stable\memory\item.md`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(rootPath, "stable", "memory", "item.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("file remains after remove: %v", err)
+	}
+	for _, rel := range []string{`..\outside`, `C:\outside`} {
+		if err := root.WriteFileAtomic(rel, []byte("no"), 0600); !errors.Is(err, ErrUnsafePath) {
+			t.Errorf("WriteFileAtomic(%q) = %v, want ErrUnsafePath", rel, err)
+		}
+	}
+}

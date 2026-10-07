@@ -27,4 +27,10 @@ func moveDirectory(string, string, bool) error {
 	return ErrUnsupported
 }
 
+func rootMkdirAll(string, string, os.FileMode) error { return ErrUnsupported }
+
+func rootWriteFileAtomic(string, string, []byte, os.FileMode) error { return ErrUnsupported }
+
+func rootRemoveFile(string, string) error { return ErrUnsupported }
+
 func transactionMode() string { return "unsupported" }

@@ -69,3 +69,34 @@ func TestDarwinMoveDirectoryChecksVolumeAndMoves(t *testing.T) {
 		t.Fatalf("source after move error = %v, want not exist", err)
 	}
 }
+
+func TestDarwinRootAtomicWriteAndRejectsSymlinkTraversal(t *testing.T) {
+	rootPath := t.TempDir()
+	outside := t.TempDir()
+	root, err := OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.MkdirAll("stable/memory", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.WriteFileAtomic("stable/memory/item.md", []byte("one"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.WriteFileAtomic("stable/memory/item.md", []byte("two"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(rootPath, "stable", "memory", "item.md"))
+	if err != nil || string(got) != "two" {
+		t.Fatalf("atomic replacement = %q, %v", got, err)
+	}
+	if err := os.Symlink(outside, filepath.Join(rootPath, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.WriteFileAtomic("escape/item.md", []byte("no"), 0600); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("symlink traversal error = %v, want ErrUnsafePath", err)
+	}
+	if err := root.RemoveFile("stable/memory/item.md"); err != nil {
+		t.Fatal(err)
+	}
+}
