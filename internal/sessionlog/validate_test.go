@@ -483,6 +483,9 @@ func TestSkillEventValidation(t *testing.T) {
 		{"invoked missing name", EventSkillInvoked, SkillInvoked{Entry: SkillEntrySlash}},
 		{"invoked missing entry", EventSkillInvoked, SkillInvoked{Name: "code-review"}},
 		{"invoked invalid entry", EventSkillInvoked, SkillInvoked{Name: "code-review", Entry: "auto"}},
+		{"invoked invalid mode", EventSkillInvoked, SkillInvoked{Name: "code-review", Entry: SkillEntrySlash, Mode: "background"}},
+		{"fork invocation missing run id", EventSkillInvoked, SkillInvoked{Name: "code-review", Entry: SkillEntrySlash, Mode: SkillModeFork}},
+		{"run id without fork mode", EventSkillInvoked, SkillInvoked{Name: "code-review", Entry: SkillEntrySlash, RunID: "fork-1"}},
 	}
 	for _, tc := range bad {
 		if _, err = Append(root, s.ID, tc.typ, tc.data); err == nil {
@@ -512,6 +515,18 @@ func TestSkillEventValidation(t *testing.T) {
 	if _, err = Append(root, s.ID, EventSkillInvoked, SkillInvoked{Name: "code-review", Source: "user", Entry: SkillEntryTool}); err != nil {
 		t.Fatalf("repeated skill invocation rejected: %v", err)
 	}
+	if _, err = Append(root, s.ID, EventRunStarted, RunStarted{
+		RunID: "fork-1", WorkKind: "session", Intent: "run skill",
+		ForkSkill: "code-review", ForkEntry: SkillEntrySlash,
+	}); err != nil {
+		t.Fatalf("fork run start rejected: %v", err)
+	}
+	if _, err = Append(root, s.ID, EventSkillInvoked, SkillInvoked{
+		Name: "code-review", Source: "user", Entry: SkillEntrySlash,
+		Mode: SkillModeFork, RunID: "fork-1",
+	}); err != nil {
+		t.Fatalf("valid fork skill_invoked rejected: %v", err)
+	}
 
 	replayed, err := Replay(root, s.ID)
 	if err != nil {
@@ -537,6 +552,20 @@ func TestSkillEventValidation(t *testing.T) {
 	}
 	if invoked.Name != "code-review" || invoked.Entry != SkillEntrySlash || invoked.Args != "focus on memory" {
 		t.Fatalf("invoked round-trip = %+v", invoked)
+	}
+	var forkInvoked SkillInvoked
+	if err = decodeData(replayed.Events[len(replayed.Events)-1].Data, &forkInvoked); err != nil {
+		t.Fatal(err)
+	}
+	if forkInvoked.Mode != SkillModeFork || forkInvoked.RunID != "fork-1" {
+		t.Fatalf("fork invocation metadata round-trip = %+v", forkInvoked)
+	}
+	var forkRun RunStarted
+	if err = decodeData(replayed.Events[len(replayed.Events)-2].Data, &forkRun); err != nil {
+		t.Fatal(err)
+	}
+	if forkRun.ForkSkill != "code-review" || forkRun.ForkEntry != SkillEntrySlash {
+		t.Fatalf("fork run metadata round-trip = %+v", forkRun)
 	}
 }
 

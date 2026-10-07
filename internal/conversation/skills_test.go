@@ -106,9 +106,9 @@ func TestSkillGateActivateSlashJournalsAndRenders(t *testing.T) {
 	}
 }
 
-// Unknown skills list the available names; fork-mode skills are refused
-// until M09; neither produces an activation record.
-func TestSkillGateUnknownAndForkRefused(t *testing.T) {
+// Unknown skills list the available names. Fork skills must use the fork
+// execution entry and cannot fall back to inline activation.
+func TestSkillGateUnknownAndForkRequiresForkContext(t *testing.T) {
 	_, gate, root, sessionID, _, _ := newSkillFixture(t, nil, map[string]map[string]string{
 		"code-review": {"SKILL.md": inlineSkillMD},
 		"deep-dive":   {"SKILL.md": "---\nname: deep-dive\nmode: fork\n---\n\n隔离步骤\n"},
@@ -116,10 +116,10 @@ func TestSkillGateUnknownAndForkRefused(t *testing.T) {
 	if _, err := gate.activate(sessionID, "nope", "", sessionlog.SkillEntrySlash); err == nil || !strings.Contains(err.Error(), "unknown skill: nope") || !strings.Contains(err.Error(), "code-review") {
 		t.Fatalf("unknown skill error = %v", err)
 	}
-	if _, err := gate.activate(sessionID, "deep-dive", "", sessionlog.SkillEntrySlash); err == nil || !strings.Contains(err.Error(), "子 agent 能力未启用") {
+	if _, err := gate.activate(sessionID, "deep-dive", "", sessionlog.SkillEntrySlash); err == nil || !strings.Contains(err.Error(), "fork execution path") {
 		t.Fatalf("fork error = %v", err)
 	}
-	if _, err := gate.LoadSkill(context.Background(), sessionID, "deep-dive", ""); err == nil || !strings.Contains(err.Error(), "fork 模式留待 M09") {
+	if _, err := gate.LoadSkill(context.Background(), sessionID, "deep-dive", ""); err == nil || !strings.Contains(err.Error(), "fork skill parent run context is unavailable") {
 		t.Fatalf("tool-entry fork error = %v", err)
 	}
 	if events := skillEvents(t, root, sessionID); len(events) != 0 {
@@ -272,7 +272,7 @@ func TestSkillInvokeOpStartsRunWithBody(t *testing.T) {
 	svc.clients[updates] = &clientSubscription{ch: updates}
 	svc.mu.Unlock()
 
-	if err := svc.invokeSkill(context.Background(), ClientMsg{Op: "skill_invoke", SessionID: sessionID, SkillName: "deep-dive"}, updates); err == nil || !strings.Contains(err.Error(), "子 agent 能力未启用") {
+	if err := svc.invokeSkill(context.Background(), ClientMsg{Op: "skill_invoke", SessionID: sessionID, SkillName: "deep-dive"}, updates); err == nil || !strings.Contains(err.Error(), "fork skill execution is unavailable") {
 		t.Fatalf("fork invoke error = %v", err)
 	}
 

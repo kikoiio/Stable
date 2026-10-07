@@ -28,15 +28,14 @@ type SkillMeta struct {
 	WhenToUse   string   `yaml:"when_to_use"`
 	Tags        []string `yaml:"tags"`
 	// Mode selects the execution mode. "inline" (default) injects the skill
-	// body into the current conversation; "fork" would run it in a sub-agent
-	// with isolated context, which is reserved for M09: fork skills parse,
-	// list and register, but every activation path rejects them.
+	// body into the current conversation; "fork" runs it in an isolated
+	// read-only child agent.
 	Mode string `yaml:"mode"`
 	// Context is kept for backward compatibility with old skills that used
 	// `context: fork` to mean Mode=fork. Treated as fork mode if "fork".
 	Context string `yaml:"context"`
-	// ForkContext controls how much of the parent conversation a forked
-	// sub-agent would carry. Parsed and preserved; no behavior before M09.
+	// ForkContext controls how much visible parent conversation a forked
+	// sub-agent receives: none, recent, or full.
 	ForkContext string `yaml:"fork_context"`
 }
 

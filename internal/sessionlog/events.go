@@ -219,6 +219,10 @@ const (
 	SkillEntryTool  = "tool"
 )
 
+// SkillModeFork marks an invocation that starts an independent fork run.
+// Empty mode remains the legacy inline-skill representation.
+const SkillModeFork = "fork"
+
 // SkillInfo is the lightweight skill metadata recorded in skill events.
 // Skill bodies never enter the log; they travel through the message or
 // tool-result events that carry the activation.
@@ -246,6 +250,8 @@ type SkillInvoked struct {
 	Source string `json:"source"`
 	Entry  string `json:"entry"`
 	Args   string `json:"args,omitempty"`
+	Mode   string `json:"mode,omitempty"`
+	RunID  string `json:"run_id,omitempty"`
 }
 
 const MaxHookOutput = 8 * 1024
@@ -300,6 +306,8 @@ type RunStarted struct {
 	GoalID     string `json:"goal_id,omitempty"`
 	WorkItemID string `json:"work_item_id,omitempty"`
 	Intent     string `json:"intent"`
+	ForkSkill  string `json:"fork_skill,omitempty"`
+	ForkEntry  string `json:"fork_entry,omitempty"`
 }
 
 type RunEvent struct {

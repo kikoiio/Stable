@@ -542,7 +542,15 @@ func (s *Service) subscribeRun(ctx context.Context, msg ClientMsg, updates chan 
 func (s *Service) cancelRun(msg ClientMsg, updates chan ServerMsg) error {
 	s.mu.Lock()
 	sessionID, active := s.activeRuns[msg.RunID]
+	forkRun := s.activeForkRuns[msg.RunID]
 	s.mu.Unlock()
+	if forkRun != nil {
+		if forkRun.sessionID != msg.SessionID {
+			return errors.New("run does not belong to requested session")
+		}
+		forkRun.cancel()
+		return nil
+	}
 	if !active {
 		return nil
 	}

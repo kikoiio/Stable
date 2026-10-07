@@ -57,14 +57,91 @@ func (g *SkillGate) Bind(service *Service) {
 }
 
 // LoadSkill implements execution.SkillProvider for the load_skill tool.
-func (g *SkillGate) LoadSkill(_ context.Context, sessionID, name, args string) (string, error) {
+
+func (g *SkillGate) LoadSkill(ctx context.Context, sessionID, name, args string) (string, error) {
+	if g.isFork(name) {
+		prepared, err := g.prepareFork(sessionID, name, args, sessionlog.SkillEntryTool)
+		if err != nil {
+			return "", err
+		}
+		parent, ok := agent.ForkSkillParentRunFromContext(ctx)
+		if !ok {
+			return "", errors.New("fork skill parent run context is unavailable")
+		}
+		g.mu.Lock()
+		service := g.service
+		g.mu.Unlock()
+		if service == nil {
+			return "", errors.New("fork skill service is unavailable")
+		}
+		return service.executeForkSkill(ctx, parent, prepared)
+	}
 	return g.activate(sessionID, name, args, sessionlog.SkillEntryTool)
 }
 
-// activate is the single activation path for both entries. It refuses
-// unknown skills (listing the available names) and fork-mode skills, reads
-// the freshest body, renders it with the M06 argument semantics, journals
-// skill_invoked, and records the activation for the session inventory.
+type preparedForkSkill struct {
+	Name        string
+	Source      string
+	Entry       string
+	Args        string
+	Instruction string
+	ContextMode ForkContextMode
+}
+
+func (g *SkillGate) isFork(name string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	skill, ok := g.catalog.Get(name)
+	return ok && skill.Meta.IsFork()
+}
+
+func (g *SkillGate) prepareFork(sessionID, name, args, entry string) (preparedForkSkill, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.stateLocked(sessionID)
+	skill, ok := g.catalog.Get(name)
+	if !ok {
+		return preparedForkSkill{}, fmt.Errorf("unknown skill: %s (available: %s)", name, g.availableNamesLocked())
+	}
+	if !skill.Meta.IsFork() {
+		return preparedForkSkill{}, fmt.Errorf("skill %s is not a fork skill", name)
+	}
+	full, err := g.catalog.GetFull(name)
+	if err != nil {
+		return preparedForkSkill{}, fmt.Errorf("技能 %s 正文读取失败: %w", name, err)
+	}
+	if len([]byte(full.PromptBody))+len([]byte(args)) > 64<<10 {
+		return preparedForkSkill{}, fmt.Errorf("技能 %s 的正文与参数超过 64 KiB", name)
+	}
+	mode := ForkContextMode(full.Meta.ForkContext)
+	switch mode {
+	case ForkContextNone, ForkContextRecent, ForkContextFull:
+	default:
+		return preparedForkSkill{}, fmt.Errorf("技能 %s 的 fork_context 无效: %q", name, full.Meta.ForkContext)
+	}
+	instruction := commands.ExpandPrompt(full.PromptBody, args)
+	if len([]byte(instruction)) > 64<<10 {
+		return preparedForkSkill{}, fmt.Errorf("技能 %s 的正文与参数超过 64 KiB", name)
+	}
+	return preparedForkSkill{Name: name, Source: full.Source, Entry: entry, Args: args, Instruction: instruction, ContextMode: mode}, nil
+}
+
+func (g *SkillGate) recordForkInvocation(sessionID string, prepared preparedForkSkill, runID string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	state := g.stateLocked(sessionID)
+	args := redactRunCredential(prepared.Args, g.service.deps.ProviderCredential)
+	invoked := sessionlog.SkillInvoked{Name: prepared.Name, Source: prepared.Source, Entry: prepared.Entry, Args: args, Mode: sessionlog.SkillModeFork, RunID: runID}
+	if err := g.appendEventLocked(sessionID, sessionlog.EventSkillInvoked, invoked); err != nil {
+		return fmt.Errorf("record skill invocation: %w", err)
+	}
+	state.activated = appendUniqueName(state.activated, prepared.Name)
+	return nil
+}
+
+// activate handles inline skills, refuses fork skills that bypass the fork
+// runner, reads the freshest body, renders it with the M06 argument semantics,
+// journals skill_invoked, and records the activation for the session inventory.
 func (g *SkillGate) activate(sessionID, name, args, entry string) (string, error) {
 	g.mu.Lock()
 	state := g.stateLocked(sessionID)
@@ -76,7 +153,7 @@ func (g *SkillGate) activate(sessionID, name, args, entry string) (string, error
 	}
 	if skill.Meta.IsFork() {
 		g.mu.Unlock()
-		return "", fmt.Errorf("子 agent 能力未启用(fork 模式留待 M09): %s", name)
+		return "", fmt.Errorf("fork skill %s must use the fork execution path", name)
 	}
 	full, err := g.catalog.GetFull(name)
 	if err != nil {
@@ -371,6 +448,13 @@ func appendUniqueName(names []string, name string) []string {
 func (s *Service) invokeSkill(ctx context.Context, c ClientMsg, updates chan ServerMsg) error {
 	if s.skills == nil {
 		return errors.New("技能通道不可用")
+	}
+	if s.skills.isFork(c.SkillName) {
+		prepared, err := s.skills.prepareFork(c.SessionID, c.SkillName, c.SkillArgs, sessionlog.SkillEntrySlash)
+		if err != nil {
+			return err
+		}
+		return s.startForkSkillRun(ctx, c.SessionID, prepared, updates)
 	}
 	body, err := s.skills.activate(c.SessionID, c.SkillName, c.SkillArgs, sessionlog.SkillEntrySlash)
 	if err != nil {

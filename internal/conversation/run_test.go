@@ -247,14 +247,18 @@ func TestSubscribeRunRestoresToolEventsByCursor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events := make(chan agent.ExecutionEvent, 4)
+	events := make(chan agent.ExecutionEvent, 5)
 	done := make(chan agent.RunOutcome, 1)
 	started := time.Now().UTC()
-	payloads := []agent.EventKind{agent.EventToolExecStart, agent.EventAwaitingApproval, agent.EventToolExecResult}
+	payloads := []agent.EventKind{agent.EventToolExecStart, agent.EventAwaitingApproval, agent.EventToolExecResult, agent.EventDelegation}
 	for i, kind := range payloads {
-		events <- agent.ExecutionEvent{ID: "evt-" + string(rune('a'+i)), RunID: "run-1", SessionID: session.ID, RunSeq: uint64(i + 1), At: started.Add(time.Duration(i) * time.Millisecond), Kind: kind, Payload: json.RawMessage(`{"tool":"read_file"}`)}
+		payload := json.RawMessage(`{"tool":"read_file"}`)
+		if kind == agent.EventDelegation {
+			payload, _ = json.Marshal(agent.DelegationEvent{BatchID: "batch", TaskID: "task", TaskName: "inspect", Status: agent.DelegationRunning})
+		}
+		events <- agent.ExecutionEvent{ID: "evt-" + string(rune('a'+i)), RunID: "run-1", SessionID: session.ID, RunSeq: uint64(i + 1), At: started.Add(time.Duration(i) * time.Millisecond), Kind: kind, Payload: payload}
 	}
-	events <- agent.ExecutionEvent{ID: "evt-end", RunID: "run-1", SessionID: session.ID, RunSeq: 4, At: started.Add(4 * time.Millisecond), Kind: agent.EventTerminal, Payload: json.RawMessage(`{"status":"completed"}`)}
+	events <- agent.ExecutionEvent{ID: "evt-end", RunID: "run-1", SessionID: session.ID, RunSeq: 5, At: started.Add(4 * time.Millisecond), Kind: agent.EventTerminal, Payload: json.RawMessage(`{"status":"completed"}`)}
 	close(events)
 	done <- agent.RunOutcome{RunID: "run-1", Status: agent.RunCompleted}
 	close(done)
@@ -277,8 +281,8 @@ func TestSubscribeRunRestoresToolEventsByCursor(t *testing.T) {
 			t.Fatal("timed out waiting for run outcome")
 		}
 	}
-	// Reconnect from just after the first tool event (seq 4): the approval wait,
-	// tool result and terminal events must replay in order.
+	// Reconnect just after the first tool event: the approval wait, tool result,
+	// collaboration event and terminal event must replay in order.
 	resume := make(chan ServerMsg, 16)
 	svc.mu.Lock()
 	svc.clients[resume] = &clientSubscription{ch: resume}
@@ -289,7 +293,7 @@ func TestSubscribeRunRestoresToolEventsByCursor(t *testing.T) {
 	var kinds []string
 	var cursors []uint64
 	sawOutcome := false
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 5; i++ {
 		msg := <-resume
 		if msg.Type == "run_event" && msg.RunEvent != nil {
 			kinds = append(kinds, msg.RunEvent.Kind)
@@ -299,7 +303,7 @@ func TestSubscribeRunRestoresToolEventsByCursor(t *testing.T) {
 			sawOutcome = true
 		}
 	}
-	if len(kinds) != 3 || kinds[0] != string(agent.EventAwaitingApproval) || kinds[1] != string(agent.EventToolExecResult) || kinds[2] != string(agent.EventTerminal) {
+	if len(kinds) != 4 || kinds[0] != string(agent.EventAwaitingApproval) || kinds[1] != string(agent.EventToolExecResult) || kinds[2] != string(agent.EventDelegation) || kinds[3] != string(agent.EventTerminal) {
 		t.Fatalf("replayed kinds=%v", kinds)
 	}
 	if cursors[0] >= cursors[1] || cursors[1] >= cursors[2] {

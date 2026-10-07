@@ -302,6 +302,18 @@ func checkSkillInvoked(i SkillInvoked) error {
 	default:
 		return fmt.Errorf("skill invocation has invalid entry %q", i.Entry)
 	}
+	switch i.Mode {
+	case "": // legacy inline skill invocation
+	case SkillModeFork:
+		if i.RunID == "" {
+			return errors.New("fork skill invocation requires run_id")
+		}
+	default:
+		return fmt.Errorf("skill invocation has invalid mode %q", i.Mode)
+	}
+	if i.Mode == "" && i.RunID != "" {
+		return errors.New("run_id requires fork mode")
+	}
 	return nil
 }
 

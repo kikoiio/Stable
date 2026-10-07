@@ -16,6 +16,71 @@ func (f providerFunc) Stream(ctx context.Context, request llm.Request) (<-chan l
 	return f(ctx, request)
 }
 
+type gatedExecutor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (e gatedExecutor) Execute(context.Context, llm.ToolUse) (ToolOutcome, error) {
+	e.started <- struct{}{}
+	<-e.release
+	return ToolOutcome{Status: ToolSucceeded, Content: "ok"}, nil
+}
+
+func TestRunnerPublishesDelegationEventsInRunSequence(t *testing.T) {
+	var calls atomic.Int32
+	provider := providerFunc(func(context.Context, llm.Request) (<-chan llm.Event, <-chan error) {
+		events := make(chan llm.Event, 2)
+		if calls.Add(1) == 1 {
+			events <- llm.Event{Kind: llm.ToolCallComplete, Tool: &llm.ToolCall{ID: "read-1", Name: "read_file", Arguments: json.RawMessage(`{"file_path":"a"}`), Complete: true}}
+		} else {
+			events <- llm.Event{Kind: llm.TextDelta, Text: "done"}
+		}
+		events <- llm.Event{Kind: llm.StreamEnd, StopReason: "completed"}
+		close(events)
+		errs := make(chan error)
+		close(errs)
+		return events, errs
+	})
+	executor := gatedExecutor{started: make(chan struct{}, 1), release: make(chan struct{})}
+	runner := NewRunner(provider, RunnerOptions{MaxRetries: -1, ExecutorFactory: FakeExecutorFactory{Executor: &FakeExecutor{Script: []ToolOutcome{{Status: ToolSucceeded}}}}})
+	// Swap in the blocking executor through a small factory so the parent run
+	// remains in the tool execution phase while collaboration is injected.
+	runner.SetTooling(singleExecutorFactory{executor: executor}, nil)
+	handle, err := runner.Start(context.Background(), sessionRequest("delegation-seq"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-executor.started
+	if err = runner.PublishDelegation("delegation-seq", DelegationEvent{BatchID: "batch", TaskID: "task", TaskName: "inspect", Status: DelegationRunning}); err != nil {
+		t.Fatal(err)
+	}
+	close(executor.release)
+	var seqs []uint64
+	found := false
+	for event := range handle.Events {
+		seqs = append(seqs, event.RunSeq)
+		if event.Kind == EventDelegation {
+			found = true
+		}
+	}
+	if outcome := <-handle.Done; outcome.Status != RunCompleted {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	if !found || len(seqs) == 0 {
+		t.Fatalf("delegation event missing: seqs=%v", seqs)
+	}
+	for i, seq := range seqs {
+		if seq != uint64(i+1) {
+			t.Fatalf("run sequence=%v", seqs)
+		}
+	}
+}
+
+type singleExecutorFactory struct{ executor RunExecutor }
+
+func (f singleExecutorFactory) ForRun(ExecutionRequest) (RunExecutor, error) { return f.executor, nil }
+
 func TestRunnerAssignsOrderedEventsAndCompletes(t *testing.T) {
 	provider := providerFunc(func(context.Context, llm.Request) (<-chan llm.Event, <-chan error) {
 		events := make(chan llm.Event, 2)

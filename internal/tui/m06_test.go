@@ -109,11 +109,37 @@ func TestHelpListsMergedCommandsWithArgHints(t *testing.T) {
 		"可用命令",
 		"/sessions", "/goals", "/search", "/review", "/say", "/reply",
 		"/confirm", "/reject", "/plan", "/help",
+		"/delegate", "任务",
 		"/deploy", "部署服务", "参数：目标环境",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("help text missing %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestDelegateCommandUsesOrdinaryChatRunAndRequiresTask(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := New("sock", t.TempDir())
+	m.ActiveSession = "0123456789abcdef0123456789abcdef"
+	m.Composer.SetValue("/delegate")
+	updated, cmd := m.submitComposer()
+	got := updated.(Model)
+	if cmd != nil || got.Pending || got.Status != "用法：/delegate <任务>" {
+		t.Fatalf("empty delegate command started work: cmd=%v pending=%v status=%q", cmd, got.Pending, got.Status)
+	}
+	m.Composer.SetValue("/delegate inspect config loading")
+	updated, cmd = m.submitComposer()
+	got = updated.(Model)
+	if cmd == nil || !got.Pending {
+		t.Fatalf("delegate command did not start ordinary run: cmd=%v pending=%v", cmd, got.Pending)
+	}
+	if got.ActiveRunID == "" || len(got.Events) == 0 {
+		t.Fatalf("delegate did not create ordinary run state: run=%q events=%+v", got.ActiveRunID, got.Events)
+	}
+	var message sessionlog.Message
+	if decodeEventData(got.Events[len(got.Events)-1].Data, &message) != nil || !strings.Contains(message.Text, "inspect config loading") || strings.Contains(message.Text, "/delegate") {
+		t.Fatalf("unexpected parent task message: %+v", message)
 	}
 }
 

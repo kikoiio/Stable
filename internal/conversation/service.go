@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -19,22 +20,26 @@ import (
 )
 
 type Deps struct {
-	Store              *store.Store
-	Provider           decision.StructuredProvider
-	ChatProvider       decision.ChatProvider
-	Runner             agent.Runner
-	ExecutorFactory    agent.ExecutorFactory
-	ToolSchemas        []llm.ToolSchema
-	ProviderName       string
-	Model              string
-	RunnerError        string
-	CandidateCheckers  []candidate.Checker
-	PermissionService  *permission.PermissionService
-	ProviderCredential string
-	Temporal           string
-	ProjectRoot        string
-	RunRoot            string
-	SocketPath         string
+	Store               *store.Store
+	Provider            decision.StructuredProvider
+	ChatProvider        decision.ChatProvider
+	Runner              agent.Runner
+	Delegator           agent.Delegator
+	ForkProvider        llm.Provider
+	ForkExecutorFactory agent.ExecutorFactory
+	ForkToolSchemas     []llm.ToolSchema
+	ExecutorFactory     agent.ExecutorFactory
+	ToolSchemas         []llm.ToolSchema
+	ProviderName        string
+	Model               string
+	RunnerError         string
+	CandidateCheckers   []candidate.Checker
+	PermissionService   *permission.PermissionService
+	ProviderCredential  string
+	Temporal            string
+	ProjectRoot         string
+	RunRoot             string
+	SocketPath          string
 	// ContextWindowTokens overrides the model context window used for
 	// compaction; zero resolves to the sessioncontext default.
 	ContextWindowTokens int
@@ -57,11 +62,14 @@ type Deps struct {
 // the store.
 type Service struct {
 	deps              Deps
+	lifeCtx           context.Context
 	ln                net.Listener
 	mu                sync.Mutex
 	clients           map[chan ServerMsg]*clientSubscription
 	statuses          map[string]core.GoalStatus
 	activeRuns        map[string]string
+	activeForkRuns    map[string]*forkRunState
+	closing           bool
 	notifiedApprovals map[string]bool
 	eventMu           sync.Mutex
 	// askMu guards the per-session count of runs blocked inside the question
@@ -105,11 +113,14 @@ func Serve(ctx context.Context, deps Deps) (*Service, error) {
 	if deps.PollEvery <= 0 {
 		deps.PollEvery = 2 * time.Second
 	}
+	if err := recoverDelegationRuns(deps.ProjectRoot); err != nil {
+		return nil, fmt.Errorf("recover interrupted delegations: %w", err)
+	}
 	ln, err := ipc.ListenPrivate(deps.SocketPath, true)
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{deps: deps, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks, mcp: deps.MCP, mcpInstructions: map[string]bool{}}
+	s := &Service{deps: deps, lifeCtx: ctx, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, activeForkRuns: map[string]*forkRunState{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks, mcp: deps.MCP, mcpInstructions: map[string]bool{}}
 	if deps.Skills != nil {
 		deps.Skills.Bind(s)
 	}
@@ -138,7 +149,15 @@ func (s *Service) acceptLoop(ctx context.Context) {
 	}
 }
 
-func (s *Service) Close() error { return s.ln.Close() }
+func (s *Service) Close() error {
+	s.mu.Lock()
+	s.closing = true
+	for _, run := range s.activeForkRuns {
+		run.cancel()
+	}
+	s.mu.Unlock()
+	return s.ln.Close()
+}
 
 func (s *Service) serveConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()

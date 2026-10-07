@@ -57,3 +57,9 @@ make clean         # 删除 run/ 与 dist/
 运行数据默认在 `~/.local/state/stable`；`stable down` 会停止运行时并清理遗留的
 KiCad GUI 会话进程。
 `make run` 使用 `run/dev-state` 保存开发数据；退出对话后需用相同的 `STABLE_STATE_DIR` 运行开发版 `stable down` 才会停止后台运行时。
+
+在 TUI 中输入 `/delegate <任务>` 可启动普通会话 run，并允许父 agent 按需把独立调查批量委派给只读子 agent。子 agent 只能读取、搜索和列举授权项目内容；不能写文件、运行命令或调用外部网络工具。执行模型所需的 provider 请求沿用父 run 配置。
+
+委派工具同步等待本批任务完成。服务级资源池默认最多同时运行 3 项，并最多排队 32 项；每项最多运行 8 轮工具调用或 3 分钟（以先到者为准），结果摘要上限为 8 KiB。取消父 run 会取消活动任务并取消排队项；服务重启会把未完成任务及父 run 记为 `interrupted`，不会自动重跑。
+
+标记为 `mode: fork`（或旧式 `context: fork`）的技能通过 `/技能名 <参数>` 启动当前 session 下的独立 fork run，也可由父 agent 通过 `load_skill` 工具调用。`fork_context` 支持 `none`（默认）、`recent`（最近 5 轮可见对话）和预算内的 `full`。fork skill 只开放读、搜、列工具，沿用 M09-A 的共享资源池和单项预算；运行状态与脱敏摘要写入 session run 事件，可按游标续读。服务重启中断未完成的 fork skill，不自动重跑。

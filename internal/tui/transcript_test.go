@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	tea "github.com/charmbracelet/bubbletea"
 	"stable/internal/sessionlog"
 	"strings"
@@ -17,6 +18,24 @@ func TestRenderMarkdownStructureAndNoColor(t *testing.T) {
 	}
 	if strings.Contains(out, "\x1b[") {
 		t.Fatalf("no-color output contains ANSI: %q", out)
+	}
+}
+
+func TestDelegationEventsAggregateWithoutReasoningStream(t *testing.T) {
+	events := []sessionlog.Event{}
+	for i, status := range []string{"queued", "running", "succeeded"} {
+		payload, _ := json.Marshal(map[string]any{
+			"batch_id": "batch", "task_id": "task", "task_name": "inspect config",
+			"status": status, "stage": "read_file", "summary": "loaded config",
+			"thinking": "private child reasoning",
+		})
+		events = append(events, sessionlog.Event{Seq: uint64(i + 1), Type: sessionlog.EventRunEvent, Data: sessionlog.RunEvent{
+			RunID: "parent", Kind: "delegation_event", Payload: json.RawMessage(payload),
+		}})
+	}
+	out := projectTranscript(events, 80, false)
+	if strings.Count(out, "协作任务") != 1 || !strings.Contains(out, "succeeded") || !strings.Contains(out, "loaded config") || strings.Contains(out, "private child reasoning") {
+		t.Fatalf("delegation projection=%s", out)
 	}
 }
 

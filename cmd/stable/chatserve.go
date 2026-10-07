@@ -83,6 +83,8 @@ func chatserve(args []string) error {
 	var toolSchemas []llm.ToolSchema
 	var runnerError string
 	var snapshotStore *candidate.SnapshotStore
+	delegationReporter := conversation.NewDelegationEventReporter()
+	var delegator *agent.PoolDelegator
 	// The interaction sinks need the conversation service, which only exists
 	// once Serve returns, so they are built unbound here and bound right
 	// after Serve — no run can reach a tool call before that.
@@ -102,6 +104,11 @@ func chatserve(args []string) error {
 	}
 	defer mcpManager.Shutdown()
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
+		delegator, err = agent.NewPoolDelegator(agent.DefaultDelegationLimits(), agent.StreamingChildRunner{}, delegationReporter)
+		if err != nil {
+			return fmt.Errorf("delegation coordinator: %w", err)
+		}
+		defer delegator.Close()
 		var credentials []string
 		if c.Model.APIKey != "" {
 			credentials = []string{c.Model.APIKey}
@@ -121,8 +128,9 @@ func chatserve(args []string) error {
 			Snapshots:          snapshotStore,
 			QuestionSink:       askSink,
 			TodoProvider:       todoProvider,
-		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate), execution.WithMCPCaller(mcpManager))
-		toolSchemas = chatserveToolSchemas(mcpManager)
+			Provider:           streamingProvider,
+		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate), execution.WithMCPCaller(mcpManager), execution.WithDelegator(delegator, streamingProvider))
+		toolSchemas = chatserveToolSchemasWithDelegation(delegator, mcpManager)
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, model.(decision.ChatProvider))
 		if fellBack {
 			log.Printf("invalid context_window_tokens %d; using default %d", c.Model.ContextWindowTokens, sessioncontext.DefaultWindowTokens)
@@ -148,6 +156,7 @@ func chatserve(args []string) error {
 	askSink.Bind(svc)
 	todoProvider.Bind(svc)
 	planSink.Bind(svc)
+	delegationReporter.Bind(svc)
 	defer svc.Close()
 	<-ctx.Done()
 	return nil
@@ -172,6 +181,10 @@ func userSkillsDir() string {
 }
 
 func chatserveToolSchemas(callers ...execution.MCPCaller) []llm.ToolSchema {
+	return chatserveToolSchemasWithDelegation(nil, callers...)
+}
+
+func chatserveToolSchemasWithDelegation(delegator agent.Delegator, callers ...execution.MCPCaller) []llm.ToolSchema {
 	nameMap := map[string]string{
 		"read_file":      "read_file",
 		"write_file":     "write_file",
@@ -190,7 +203,7 @@ func chatserveToolSchemas(callers ...execution.MCPCaller) []llm.ToolSchema {
 	// M06/M07 tools live outside the default registry; the copy keeps append
 	// from aliasing the registry slice.
 	sources := append(append(append([]map[string]any{}, registry.GetAllSchemas()...), execution.M06ToolSchemas()...), execution.SkillToolSchemas()...)
-	schemas := make([]llm.ToolSchema, 0, len(nameMap)+1)
+	schemas := make([]llm.ToolSchema, 0, len(nameMap)+2)
 	for _, schema := range sources {
 		internalName, _ := schema["name"].(string)
 		name, ok := nameMap[internalName]
@@ -206,6 +219,9 @@ func chatserveToolSchemas(callers ...execution.MCPCaller) []llm.ToolSchema {
 		Description: tools.BashDescription,
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"command": map[string]any{"type": "string", "description": "Shell command to execute"}, "timeout": map[string]any{"type": "integer", "minimum": 1, "maximum": 600, "description": "Timeout in seconds"}}, "required": []string{"command"}},
 	})
+	if delegator != nil {
+		schemas = append(schemas, execution.DelegationToolSchemas()...)
+	}
 	if len(callers) > 0 && callers[0] != nil {
 		if manager, ok := callers[0].(interface{ Configured() bool }); ok && manager.Configured() {
 			for _, schema := range execution.MCPToolSchemas() {

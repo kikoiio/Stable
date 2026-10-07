@@ -84,6 +84,10 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		}
 	}()
 	outcome = agent.ToolOutcome{CallID: call.ID, ToolName: call.Name, Status: agent.ToolFailed, IsError: true}
+	if e.deps.ReadOnly && call.Name != "read_file" && call.Name != "glob" && call.Name != "grep" {
+		outcome.Content = "Error: child run only permits read_file, glob, and grep"
+		return e.finish(outcome, started), nil
+	}
 	if len(call.Arguments) != 0 {
 		if err = json.Unmarshal(call.Arguments, &args); err != nil {
 			outcome.Content = "Error: invalid tool arguments"
@@ -674,6 +678,10 @@ func (e *toolRunExecutor) executeHostTool(ctx context.Context, call llm.ToolUse,
 		if e.deps.MCP != nil {
 			return e.executeToolSearch(args, outcome), true
 		}
+	case "delegate_tasks":
+		if e.deps.Delegator != nil {
+			return e.executeDelegation(ctx, args, outcome), true
+		}
 	case "write_file", "edit_file":
 		if target, ok := e.planFileTarget(args); ok {
 			return e.executePlanFileWrite(ctx, call, args, target, outcome), true
@@ -684,6 +692,72 @@ func (e *toolRunExecutor) executeHostTool(ctx context.Context, call llm.ToolUse,
 		}
 	}
 	return outcome, false
+}
+
+func (e *toolRunExecutor) executeDelegation(ctx context.Context, args map[string]any, outcome agent.ToolOutcome) agent.ToolOutcome {
+	if e.request.Work.Kind != agent.WorkSession {
+		outcome.Content = "Error: delegate_tasks is available only to session runs"
+		return outcome
+	}
+	if e.deps.Provider == nil || e.deps.Delegator == nil {
+		outcome.Content = "Error: delegation service is unavailable"
+		return outcome
+	}
+	rawTasks, ok := args["tasks"].([]any)
+	if !ok {
+		outcome.Content = "Error: tasks must be an array"
+		return outcome
+	}
+	tasks := make([]agent.DelegationTask, 0, len(rawTasks))
+	for i, raw := range rawTasks {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			outcome.Content = fmt.Sprintf("Error: task %d must be an object", i+1)
+			return outcome
+		}
+		task := agent.DelegationTask{}
+		task.ID, _ = item["id"].(string)
+		task.Name, _ = item["name"].(string)
+		task.Instruction, _ = item["instruction"].(string)
+		tasks = append(tasks, task)
+	}
+	childDeps := e.deps
+	childDeps.SessionRoot = "" // child tool calls are intentionally not transcript events
+	childFactory := NewToolExecutorFactory(childDeps, WithReadOnlyTools())
+	permissionBounds, err := json.Marshal(e.authority)
+	if err != nil {
+		outcome.Content = "Error: could not derive delegation permissions"
+		return outcome
+	}
+	parent := agent.ParentRun{
+		RunID: e.request.RunID, Deadline: e.request.RunDeadline, Work: e.request.Work,
+		ProjectRoot: e.authority.AllowedRoot, PermissionBounds: permissionBounds,
+		Provider: e.deps.Provider, ProviderName: e.request.ProviderName, Model: e.request.Model,
+		ToolSchemas: ReadOnlyToolSchemas(), ExecutorFactory: childFactory,
+	}
+	results, err := e.deps.Delegator.RunBatch(ctx, parent, tasks)
+	if err != nil {
+		outcome.Content = "Error: " + err.Error()
+		return outcome
+	}
+	encoded, err := json.Marshal(results)
+	if err != nil {
+		outcome.Content = "Error: could not encode delegation results"
+		return outcome
+	}
+	outcome.Content = string(encoded)
+	outcome.Status = agent.ToolSucceeded
+	outcome.IsError = true
+	for _, result := range results {
+		if result.Status == agent.DelegationSucceeded {
+			outcome.IsError = false
+			break
+		}
+	}
+	if outcome.IsError {
+		outcome.Status = agent.ToolFailed
+	}
+	return outcome
 }
 
 // executePlanFileWrite writes the session plan file on the host. The
@@ -1054,6 +1128,14 @@ func (e *toolRunExecutor) executeLoadSkill(ctx context.Context, call llm.ToolUse
 		return outcome
 	}
 	skillArgs, _ := args["args"].(string)
+	parent, err := e.forkSkillParentRun()
+	if err != nil {
+		outcome.Content = "Error: could not derive fork skill context"
+		return outcome
+	}
+	// SkillProvider decides whether the named skill is fork-mode. Inline skills
+	// ignore this optional context and retain their existing activation path.
+	ctx = agent.WithForkSkillParentRun(ctx, parent)
 	body, err := e.deps.SkillProvider.LoadSkill(ctx, e.request.Work.SessionID, name, skillArgs)
 	if err != nil {
 		outcome.Content = "Error: " + err.Error()
@@ -1061,6 +1143,25 @@ func (e *toolRunExecutor) executeLoadSkill(ctx context.Context, call llm.ToolUse
 	}
 	outcome.Status, outcome.IsError, outcome.Content = agent.ToolSucceeded, false, "# Skill: "+name+"\n\n"+body
 	return outcome
+}
+
+// forkSkillParentRun derives the fork child's authority and runtime inputs
+// from the currently active parent run. The child factory enforces the same
+// read-only tool allowlist used by delegate_tasks.
+func (e *toolRunExecutor) forkSkillParentRun() (agent.ParentRun, error) {
+	permissionBounds, err := json.Marshal(e.authority)
+	if err != nil {
+		return agent.ParentRun{}, err
+	}
+	childDeps := e.deps
+	childDeps.SessionRoot = "" // child tool calls are not parent transcript events
+	childFactory := NewToolExecutorFactory(childDeps, WithReadOnlyTools())
+	return agent.ParentRun{
+		RunID: e.request.RunID, Deadline: e.request.RunDeadline, Work: e.request.Work,
+		ProjectRoot: e.authority.AllowedRoot, PermissionBounds: permissionBounds,
+		Provider: e.deps.Provider, ProviderName: e.request.ProviderName, Model: e.request.Model,
+		ToolSchemas: ReadOnlyToolSchemas(), ExecutorFactory: childFactory,
+	}, nil
 }
 
 func (e *toolRunExecutor) executeTaskCreate(list *todo.TaskList, args map[string]any, outcome agent.ToolOutcome) agent.ToolOutcome {

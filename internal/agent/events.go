@@ -33,6 +33,7 @@ type ExecutionRequest struct {
 	AllowedScope     []string        `json:"allowed_scope,omitempty"`
 	ResourceBounds   json.RawMessage `json:"resource_bounds,omitempty"`
 	PermissionBounds json.RawMessage `json:"permission_bounds,omitempty"`
+	RunDeadline      time.Time       `json:"-"`
 }
 
 type EventKind string
@@ -56,6 +57,7 @@ const (
 	// summary replaces the covered run sequence range. The conversation
 	// consumer turns it into a run-scope session log boundary.
 	EventCompactionBoundary EventKind = "compaction_boundary"
+	EventDelegation         EventKind = "delegation_event"
 )
 
 // ContextBoundary is the agent-stream form of a compaction boundary.
@@ -101,6 +103,7 @@ type RunStatus string
 const (
 	RunCompleted       RunStatus = "completed"
 	RunCancelled       RunStatus = "cancelled"
+	RunInterrupted     RunStatus = "interrupted"
 	RunFailed          RunStatus = "failed"
 	RunAwaitingTools   RunStatus = "awaiting_tools"
 	RunBudgetExhausted RunStatus = "budget_exhausted"
@@ -125,3 +128,23 @@ type Runner interface {
 	Start(context.Context, ExecutionRequest) (*RunHandle, error)
 	Cancel(runID string) error
 }
+
+// DelegationEvent is a user-visible lifecycle update. Summary is intended for
+// concise stage text only; model reasoning and raw child transcripts are not
+// represented by this type.
+type DelegationEvent struct {
+	BatchID   string           `json:"batch_id"`
+	TaskID    string           `json:"task_id"`
+	TaskName  string           `json:"task_name"`
+	Status    DelegationStatus `json:"status"`
+	Stage     string           `json:"stage,omitempty"`
+	Summary   string           `json:"summary,omitempty"`
+	Error     string           `json:"error,omitempty"`
+	UpdatedAt time.Time        `json:"updated_at"`
+}
+
+type ProgressReporter interface {
+	Publish(parentRunID string, event DelegationEvent) error
+}
+
+type DelegationProgress func(stage, summary string)

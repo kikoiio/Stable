@@ -312,6 +312,11 @@ func registerBuiltins(host *commandHost, registry *commands.Registry) {
 	set := func(name, description, argPrompt string, local func(args string)) {
 		registry.Register(&commands.Command{Name: name, Description: description, ArgPrompt: argPrompt, Kind: commands.KindLocal, Local: local})
 	}
+	registry.Register(&commands.Command{
+		Name: "delegate", Description: "启动父 agent 并行委派只读调查", ArgPrompt: "任务",
+		Kind: commands.KindPrompt,
+		Body: "请处理下面的任务。你可以在独立、可并行的只读调查有帮助时调用 delegate_tasks，并在收到结果后自行综合。\n\n## 用户任务\n\n$ARGUMENTS",
+	})
 	set("sessions", "浏览会话", "", func(string) {
 		m := host.model
 		m.Composer.SetValue("")
@@ -1392,6 +1397,10 @@ func (m Model) dispatchCommand(text string) (tea.Model, tea.Cmd, bool) {
 		return m, nil, false
 	}
 	if cmd.Kind == commands.KindPrompt {
+		if cmd.Name == "delegate" && strings.TrimSpace(args) == "" {
+			m.Status = "用法：/delegate <任务>"
+			return m, nil, true
+		}
 		m.Candidates = nil
 		model, submit := m.submitChatPath(commands.ExpandPrompt(cmd.Body, args), text)
 		return model, submit, true

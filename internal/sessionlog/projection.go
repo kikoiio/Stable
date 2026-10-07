@@ -178,6 +178,8 @@ func Project(t Transcript) Projection {
 			var invoked SkillInvoked
 			if decodeData(e.Data, &invoked) == nil {
 				i := invoked
+				// Preserve fork mode and run identity in the structured audit
+				// item so recovery can find a slash fork before child events exist.
 				out.Items = append(out.Items, Item{Seq: e.Seq, Kind: ItemSkillInvoked, SkillInvoked: &i, Matched: true})
 			}
 		case EventHookFired:

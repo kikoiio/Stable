@@ -7,33 +7,78 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"time"
 
+	"stable/internal/agent"
 	"stable/internal/permission"
 )
 
 // fakeSkillProvider stands in for the conversation-side SkillGate in
 // executor dispatch tests.
 type fakeSkillProvider struct {
-	body      string
-	err       error
-	sessionID string
-	name      string
-	args      string
-	calls     int
-	snapshot  string
-	delta     string
-	invErr    error
-	invCalls  int
-	invSid    string
+	body          string
+	err           error
+	sessionID     string
+	name          string
+	args          string
+	calls         int
+	snapshot      string
+	delta         string
+	invErr        error
+	invCalls      int
+	invSid        string
+	forkParent    agent.ParentRun
+	hasForkParent bool
 }
 
-func (p *fakeSkillProvider) LoadSkill(_ context.Context, sessionID, name, args string) (string, error) {
+func (p *fakeSkillProvider) LoadSkill(ctx context.Context, sessionID, name, args string) (string, error) {
 	p.calls++
 	p.sessionID, p.name, p.args = sessionID, name, args
+	p.forkParent, p.hasForkParent = agent.ForkSkillParentRunFromContext(ctx)
 	if p.err != nil {
 		return "", p.err
 	}
 	return p.body, nil
+}
+
+func TestLoadSkillPassesForkParentRunContext(t *testing.T) {
+	formal := t.TempDir()
+	authority := m06Authority(t, formal, permission.ModeDefault, "")
+	provider := testDelegationProvider{}
+	skills := &fakeSkillProvider{body: "fork result"}
+	deps := ToolExecutorDeps{SkillProvider: skills, Provider: provider}
+	factory := NewToolExecutorFactory(deps)
+	request := m06Request(t, authority)
+	request.ProviderName = "provider-test"
+	request.Model = "model-test"
+	request.RunDeadline = time.Now().Add(time.Minute)
+	runner, err := factory.ForRun(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := runner.Execute(context.Background(), m06Call("load_skill", `{"name":"review","args":"focus"}`))
+	requireOutcome(t, outcome, err, false, "# Skill: review", "fork result")
+	if !skills.hasForkParent {
+		t.Fatal("LoadSkill provider did not receive fork parent context")
+	}
+	parent := skills.forkParent
+	if parent.RunID != request.RunID || parent.Deadline != request.RunDeadline || parent.Work != request.Work {
+		t.Fatalf("parent identity/deadline = %+v, request = %+v", parent, request)
+	}
+	if parent.ProjectRoot != authority.AllowedRoot || parent.ProviderName != request.ProviderName || parent.Model != request.Model || parent.Provider != provider {
+		t.Fatalf("parent runtime bounds were not propagated: %+v", parent)
+	}
+	var bounds permission.Authority
+	if err := json.Unmarshal(parent.PermissionBounds, &bounds); err != nil || bounds.RunID != request.RunID || bounds.AllowedRoot != authority.AllowedRoot {
+		t.Fatalf("parent permission bounds = %+v, err = %v", bounds, err)
+	}
+	if len(parent.ToolSchemas) != 3 || parent.ExecutorFactory == nil {
+		t.Fatalf("read-only child configuration missing: schemas=%d factory=%T", len(parent.ToolSchemas), parent.ExecutorFactory)
+	}
+	childFactory, ok := parent.ExecutorFactory.(ToolExecutorFactory)
+	if !ok || !childFactory.deps.ReadOnly || childFactory.deps.SkillProvider != nil {
+		t.Fatalf("child factory is not read-only: %#v", parent.ExecutorFactory)
+	}
 }
 
 func (p *fakeSkillProvider) SkillInventory(_ context.Context, sessionID string) (string, string, error) {

@@ -11,6 +11,7 @@ import (
 
 	"stable/internal/agent"
 	"stable/internal/candidate"
+	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/platform/sandbox"
 	"stable/internal/store"
@@ -69,7 +70,12 @@ type ToolExecutorDeps struct {
 	// mcp__<server>__<tool> calls, the mcp_call bridge and the tool_search
 	// index. Nil keeps all three entries on the plain unknown-tool path, so
 	// deployments without MCP stay unchanged.
-	MCP MCPCaller
+	MCP       MCPCaller
+	Delegator agent.Delegator
+	Provider  llm.Provider
+	// ReadOnly restricts dispatch to project read/search/list tools. It is
+	// applied by the executor as a hard allowlist, independently of schemas.
+	ReadOnly bool
 	// HookRunner runs optional pre/post tool-use hooks. A nil runner leaves
 	// existing tool execution behavior unchanged.
 	HookRunner HookRunner
@@ -145,11 +151,10 @@ type TodoProvider interface {
 }
 
 // SkillProvider resolves skill activations and the per-session skill
-// inventory on the host. LoadSkill activates a skill and returns its rendered
-// body; unknown skills, fork-mode skills and unreadable bodies come back as
-// errors. SkillInventory returns the stable inventory text for run-context
-// injection plus, when new skills appeared since the last run, a one-shot
-// delta reminder.
+// inventory on the host. LoadSkill returns a rendered body for inline skills
+// or a fork result for fork-mode skills. SkillInventory returns the stable
+// inventory text for run-context injection plus, when new skills appeared
+// since the last run, a one-shot delta reminder.
 type SkillProvider interface {
 	LoadSkill(ctx context.Context, sessionID, name, args string) (string, error)
 	SkillInventory(ctx context.Context, sessionID string) (snapshotText, deltaReminder string, err error)
@@ -187,12 +192,46 @@ func WithMCPCaller(caller MCPCaller) ToolExecutorOption {
 	return func(deps *ToolExecutorDeps) { deps.MCP = caller }
 }
 
+func WithReadOnlyTools() ToolExecutorOption {
+	return func(deps *ToolExecutorDeps) {
+		deps.ReadOnly = true
+		deps.MCP = nil
+		deps.Candidates = nil
+		deps.Snapshots = nil
+		deps.QuestionSink = nil
+		deps.PlanSink = nil
+		deps.TodoProvider = nil
+		deps.SkillProvider = nil
+		deps.HookRunner = nil
+	}
+}
+
+func WithDelegator(delegator agent.Delegator, provider llm.Provider) ToolExecutorOption {
+	return func(deps *ToolExecutorDeps) {
+		deps.Delegator = delegator
+		deps.Provider = provider
+	}
+}
+
 // WithHookRunner injects the lifecycle hook runner for tool calls.
 func WithHookRunner(runner HookRunner) ToolExecutorOption {
 	return func(deps *ToolExecutorDeps) { deps.HookRunner = runner }
 }
 
 type ToolExecutorFactory struct{ deps ToolExecutorDeps }
+
+// ReadOnlyExecutorFactory derives the child executor factory used by fork
+// skills and delegation. It preserves the existing permission gate and
+// sandbox wiring while applying the executor's hard read-only allowlist.
+func ReadOnlyExecutorFactory(factory agent.ExecutorFactory) agent.ExecutorFactory {
+	base, ok := factory.(ToolExecutorFactory)
+	if !ok {
+		return nil
+	}
+	deps := base.deps
+	deps.SessionRoot = ""
+	return NewToolExecutorFactory(deps, WithReadOnlyTools())
+}
 
 func NewToolExecutorFactory(deps ToolExecutorDeps, options ...ToolExecutorOption) agent.ExecutorFactory {
 	if deps.Now == nil {
