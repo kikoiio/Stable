@@ -47,6 +47,7 @@ type Deps struct {
 	Skills    *SkillGate
 	Hooks     *HookGate
 	MCP       *mcp.Manager
+	Memory    *MemoryGate
 	Refresher core.DependencyRefresher
 	PollEvery time.Duration // goal status poll interval; 0 defaults to 2s
 }
@@ -90,6 +91,7 @@ type Service struct {
 	skills          *SkillGate
 	hooks           *HookGate
 	mcp             *mcp.Manager
+	memory          *MemoryGate
 	mcpMu           sync.Mutex
 	mcpInstructions map[string]bool
 }
@@ -109,12 +111,15 @@ func Serve(ctx context.Context, deps Deps) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{deps: deps, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks, mcp: deps.MCP, mcpInstructions: map[string]bool{}}
+	s := &Service{deps: deps, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks, mcp: deps.MCP, memory: deps.Memory, mcpInstructions: map[string]bool{}}
 	if deps.Skills != nil {
 		deps.Skills.Bind(s)
 	}
 	if deps.Hooks != nil {
 		deps.Hooks.Bind(s)
+	}
+	if deps.Memory != nil {
+		deps.Memory.Bind(s)
 	}
 	go s.pollGoals(ctx)
 	go func() {

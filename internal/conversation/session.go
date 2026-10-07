@@ -117,6 +117,12 @@ func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) 
 		return s.listMCP(c)
 	case "mcp_reload":
 		return s.reloadMCP(c)
+	case "memory_list":
+		return s.listMemory(ctx, c.SessionID)
+	case "memory_delete":
+		return s.deleteMemory(ctx, c.SessionID, c.MemoryScope, c.MemoryEntry)
+	case "memory_clear":
+		return s.clearMemory(ctx, c.SessionID, c.MemoryScope)
 	case "history":
 		history, err := s.deps.Store.ListMessages(ctx)
 		if err != nil {
