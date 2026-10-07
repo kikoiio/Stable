@@ -1,8 +1,8 @@
 # M08 记忆与指令发现 Tasks
 
-> 状态：已批准（2026-10-07）。依据已批准的 [spec.md](spec.md) 与 [plan.md](plan.md)；进入按依赖 DAG 实施阶段。
+> 状态：全部任务完成（2026-10-07）。任务验证、全仓测试与静态检查通过；逐项验收记录见 [checklist.md](checklist.md)。
 > 执行约定：每个任务独立验证后再标记完成；共享文件按下方依赖串行修改。启动重型构建/全量测试前检查 `free -h`、`vmstat 1 5`、`cat /proc/pressure/memory`，由主 agent 协调并发；不终止其他任务进程。云端运行需先说明服务、用途和权限并取得许可。
-> 实施偏差：存储需要安全枚举记忆目录；plan 漏列了该能力，因此在 `secfile.Root` 增加 no-follow `ReadDir`，并复用同一根身份校验。实现还把 session ID 加入 `PrepareRun` 参数，以读取该 session 的提取游标，并在 worker state 中记录上次整理后的活动 session 集合供 F8 门槛使用。这些扩展只补足已批准行为所需数据，不扩大 M08 功能范围。
+> 实施偏差：存储需要安全枚举记忆目录；plan 漏列了该能力，因此在 `secfile.Root` 增加 no-follow `ReadDir`，并复用同一根身份校验。实现还把 session ID 加入 `PrepareRun` 参数，以读取该 session 的提取游标，并在 worker state 中记录上次整理后的活动 session 集合供 F8 门槛使用；`MemoryActionRecord` 增加可选 `run_id`，用于判断本 run 是否已主动保存；后台事件带 session 归属以便安全写入对应 session log 并实时推送；运行上下文设置 128 KiB 总上限。以上均为已批准安全、审计和资源要求所需数据，不扩大功能范围。
 
 ## 文件清单
 

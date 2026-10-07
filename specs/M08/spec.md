@@ -1,6 +1,6 @@
 # M08 记忆与指令发现 Spec
 
-> 状态：已批准（2026-10-07）。spec、plan、task 与 checklist 均已获用户批准；进入按 task 实施与 checklist 验收阶段。
+> 状态：实施完成并验收通过（2026-10-07）。逐项结果与验证证据见 [checklist.md](checklist.md)。
 
 ## 背景
 
