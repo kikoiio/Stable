@@ -145,7 +145,7 @@ func chatserve(args []string) error {
 	}
 	permissionService := &permission.PermissionService{Repository: s, NewID: func() string { id, _ := sessionlog.NewID(); return id }}
 	svc, err := conversation.Serve(ctx, conversation.Deps{
-		Store: s, Provider: provider, ChatProvider: model.(decision.ChatProvider), Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket,
+		Store: s, Provider: provider, ChatProvider: model.(decision.ChatProvider), Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket, WorkspaceStateRoot: filepath.Join(p.State, "workspaces"),
 		Delegator: delegator, ForkProvider: forkProvider, ForkExecutorFactory: forkExecutorFactory, ForkToolSchemas: execution.ReadOnlyToolSchemas(),
 		Refresher:           refresher,
 		CandidateCheckers:   chatCandidateCheckers(*runRoot, sbx),

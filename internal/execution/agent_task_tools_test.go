@@ -106,6 +106,16 @@ func TestNamedAgentTaskDispatchPreservesTrustedGoalScope(t *testing.T) {
 	}
 }
 
+func TestNamedAgentTaskIsolationParsingIsBounded(t *testing.T) {
+	request, err := parseAgentTaskRequest(map[string]any{"agent_name": "builder", "instruction": "edit one file", "isolation": "worktree"})
+	if err != nil || request.Isolation != "worktree" {
+		t.Fatalf("worktree request: %+v %v", request, err)
+	}
+	if _, err := parseAgentTaskRequest(map[string]any{"agent_name": "builder", "instruction": "edit one file", "isolation": "command"}); err == nil {
+		t.Fatal("unsupported isolation mode accepted")
+	}
+}
+
 func TestNamedTaskOutputAndStopStatuses(t *testing.T) {
 	service := &agentTaskServiceStub{result: agent.AgentTaskSnapshot{ID: "task-1", Status: agent.DelegationSucceeded, Summary: "found"}}
 	executor := namedTaskExecutor(t, service, policyGate{policy: permission.Policy{}}, agent.WorkSession)

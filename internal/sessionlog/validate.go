@@ -1,8 +1,12 @@
 package sessionlog
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"time"
 )
 
 // scanState summarizes validated history so a newly observed event can be
@@ -320,9 +324,23 @@ func checkSkillInvoked(i SkillInvoked) error {
 // validateOwnedAppend checks boundary, snapshot, rewind, question, reply,
 // plan mode, plan approval, todo, and skill events before they are appended.
 // selfSeq is the sequence number the new event will occupy.
-func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSeq uint64) error {
+func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSeq uint64, appendTimes ...time.Time) error {
 	st := scanEvents(events)
 	switch typ {
+	case EventTeam:
+		teams, err := scanTeams(sessionID, events)
+		if err != nil {
+			return err
+		}
+		var fact TeamEvent
+		if err := decodeTeamData(data, &fact); err != nil {
+			return err
+		}
+		at := time.Now().UTC()
+		if len(appendTimes) > 0 {
+			at = appendTimes[0]
+		}
+		return teams.checkEvent(sessionID, fact, at)
 	case EventAgentTaskNotification:
 		tasks, err := scanAgentTasks(sessionID, events)
 		if err != nil {
@@ -423,6 +441,21 @@ func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSe
 			return errors.New("mcp server event has invalid shape")
 		}
 		return checkMCPServer(s)
+	case EventCoordinatorMode:
+		var mode CoordinatorMode
+		raw, err := json.Marshal(data)
+		if err != nil {
+			return errors.New("coordinator mode event has invalid shape")
+		}
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&mode); err != nil {
+			return errors.New("coordinator mode event has invalid shape")
+		}
+		if err := decoder.Decode(new(any)); err != io.EOF {
+			return errors.New("coordinator mode event has trailing data")
+		}
+		return nil
 	}
 	return nil
 }

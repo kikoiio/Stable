@@ -25,6 +25,7 @@ import (
 	"stable/internal/sessionlog"
 	"stable/internal/store"
 	"stable/internal/todo"
+	"stable/internal/workspace"
 )
 
 const (
@@ -78,6 +79,13 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 	started := e.deps.Now()
 	args := map[string]any{}
 	postHook := false
+	var writeReservation workspace.WriteReservation
+	reservationSettled := false
+	defer func() {
+		if writeReservation != nil && !reservationSettled {
+			writeReservation.Release()
+		}
+	}()
 	defer func() {
 		if postHook && ctx.Err() == nil && e.deps.HookRunner != nil {
 			e.deps.HookRunner.PostToolUseRun(ctx, e.hookParentRun(), e.request.Work.SessionID, call.Name, args, outcome.Content)
@@ -86,6 +94,10 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 	outcome = agent.ToolOutcome{CallID: call.ID, ToolName: call.Name, Status: agent.ToolFailed, IsError: true}
 	if e.deps.ReadOnly && call.Name != "read_file" && call.Name != "glob" && call.Name != "grep" {
 		outcome.Content = "Error: child run only permits read_file, glob, and grep"
+		return e.finish(outcome, started), nil
+	}
+	if e.deps.WorkspaceLease != nil && call.Name != "read_file" && call.Name != "glob" && call.Name != "grep" && call.Name != "write_file" && call.Name != "edit_file" {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace child only permits bounded file tools"
 		return e.finish(outcome, started), nil
 	}
 	if len(call.Arguments) != 0 {
@@ -98,6 +110,10 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		if _, logErr := sessionlog.Append(e.deps.SessionRoot, e.request.Work.SessionID, sessionlog.EventToolCall, sessionlog.ToolCall{CallID: call.ID, RunID: e.request.RunID, Name: call.Name, Input: redactJSON(args, e.deps.ProviderCredential)}); logErr != nil {
 			return outcome, fmt.Errorf("record tool call: %w", logErr)
 		}
+	}
+	if e.request.TeamCoordinator && !TeamCoordinatorToolAllowed(call.Name) {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: coordinator mode only permits team coordination tools"
+		return e.finish(outcome, started), nil
 	}
 	if e.deps.HookRunner != nil {
 		rejected, hookID, message := e.deps.HookRunner.PreToolUseRun(ctx, e.hookParentRun(), e.request.Work.SessionID, call.Name, args)
@@ -189,6 +205,18 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 				return e.finish(outcome, started), nil
 			}
 		}
+		if e.deps.WorkspaceLease != nil {
+			growth, estimateErr := estimateWorkspaceWrite(args, call.Name)
+			if estimateErr != nil {
+				outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace write exceeds file limits"
+				return e.finish(outcome, started), nil
+			}
+			writeReservation, err = e.deps.WorkspaceAccounting.ReserveWriterWrite(ctx, *e.deps.WorkspaceLease, growth)
+			if err != nil {
+				outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace quota or writer lease rejected the change"
+				return e.finish(outcome, started), nil
+			}
+		}
 	}
 	// Checkpoint the candidate before any file-changing call. A blocked
 	// candidate refuses further mutations, and a failed pre-state snapshot
@@ -244,6 +272,14 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 				outcome.Content += "\nError: post-change snapshot failed; candidate is blocked from further writes and acceptance"
 			}
 		}
+		if kind == permission.OpWrite && !outcome.IsError && writeReservation != nil {
+			if commitErr := writeReservation.Commit(ctx); commitErr != nil {
+				outcome.Status, outcome.IsError = agent.ToolFailed, true
+				outcome.Content += "\nError: workspace usage could not be committed; writer is blocked"
+			} else {
+				reservationSettled = true
+			}
+		}
 	}
 	return e.finish(outcome, started), nil
 }
@@ -253,7 +289,7 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 // instead of writing a duplicate, so only real state transitions consume the
 // per-candidate manifest quota.
 func (e *toolRunExecutor) preSnapshot(ctx context.Context, tool string, outcome *agent.ToolOutcome) (string, error) {
-	_, digest, err := candidate.BuildManifest(e.candidate.CandidateRoot)
+	_, digest, err := candidate.BuildManifestForPolicy(e.candidate.CandidateRoot, e.candidate.ManifestPolicy)
 	if err != nil {
 		e.blockCandidate(ctx, "pre-change snapshot failed")
 		return "", err
@@ -261,7 +297,7 @@ func (e *toolRunExecutor) preSnapshot(ctx context.Context, tool string, outcome 
 	if digest == e.snapshotDigest {
 		return digest, nil
 	}
-	snap, err := e.deps.Snapshots.Create(e.request.Work.SessionID, e.candidate.ID, e.request.RunID, "pre:"+tool, e.candidate.CandidateRoot)
+	snap, err := e.deps.Snapshots.CreateForPolicy(e.request.Work.SessionID, e.candidate.ID, e.request.RunID, "pre:"+tool, e.candidate.CandidateRoot, e.candidate.ManifestPolicy)
 	if err != nil {
 		e.blockCandidate(ctx, "pre-change snapshot failed")
 		return "", err
@@ -274,7 +310,7 @@ func (e *toolRunExecutor) preSnapshot(ctx context.Context, tool string, outcome 
 // postSnapshot checkpoints the candidate after a successful file-changing
 // call when its digest moved away from the pre-call state.
 func (e *toolRunExecutor) postSnapshot(ctx context.Context, tool, preDigest string, outcome *agent.ToolOutcome) error {
-	_, digest, err := candidate.BuildManifest(e.candidate.CandidateRoot)
+	_, digest, err := candidate.BuildManifestForPolicy(e.candidate.CandidateRoot, e.candidate.ManifestPolicy)
 	if err != nil {
 		e.blockCandidate(ctx, "post-change snapshot failed")
 		return err
@@ -282,7 +318,7 @@ func (e *toolRunExecutor) postSnapshot(ctx context.Context, tool, preDigest stri
 	if digest == preDigest {
 		return nil
 	}
-	snap, err := e.deps.Snapshots.Create(e.request.Work.SessionID, e.candidate.ID, e.request.RunID, "post:"+tool, e.candidate.CandidateRoot)
+	snap, err := e.deps.Snapshots.CreateForPolicy(e.request.Work.SessionID, e.candidate.ID, e.request.RunID, "post:"+tool, e.candidate.CandidateRoot, e.candidate.ManifestPolicy)
 	if err != nil {
 		e.blockCandidate(ctx, "post-change snapshot failed")
 		return err
@@ -333,6 +369,14 @@ func (e *toolRunExecutor) mapTool(name string, args map[string]any) (helperName 
 	}
 	if err != nil {
 		return "", "", "", "", err
+	}
+	if e.deps.WorkspaceLease != nil {
+		if name == "command" {
+			return "", "", "", "", errors.New("command requires an enforced workspace disk quota")
+		}
+		if relative != "" && workspace.ProtectedRoot(relative) {
+			return "", "", "", "", workspace.ErrUnsafePath
+		}
 	}
 	if relative == "." {
 		relative = ""
@@ -387,6 +431,19 @@ func (e *toolRunExecutor) checkMappedPath(kind permission.OperationKind, rel str
 }
 
 func (e *toolRunExecutor) ensureCandidate(ctx context.Context) error {
+	if e.deps.WorkspaceLease != nil {
+		lease := e.deps.WorkspaceLease
+		if lease.RunID != e.request.RunID || lease.Generation == 0 || filepath.Clean(lease.Paths.Checkout) != filepath.Clean(e.authority.CandidateRoot) {
+			return workspace.ErrOwnership
+		}
+		for _, root := range []string{lease.Paths.Baseline, lease.Paths.Checkout, lease.Paths.Run} {
+			info, err := os.Lstat(root)
+			if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return workspace.ErrOwnership
+			}
+		}
+		return nil
+	}
 	if e.candidate != nil {
 		return nil
 	}
@@ -417,6 +474,31 @@ func (e *toolRunExecutor) ensureCandidate(ctx context.Context) error {
 	e.candidate = &created
 	e.authority.CandidateRoot = created.CandidateRoot
 	return nil
+}
+
+func estimateWorkspaceWrite(args map[string]any, name string) (int64, error) {
+	var size int
+	switch name {
+	case "write_file":
+		content, ok := args["content"].(string)
+		if !ok {
+			return 0, workspace.ErrOwnership
+		}
+		size = len(content)
+	case "edit_file":
+		content, ok := args["new_string"].(string)
+		if !ok {
+			return 0, workspace.ErrOwnership
+		}
+		size = len(content)
+	default:
+		return 0, workspace.ErrOwnership
+	}
+	limits := workspace.DefaultLimits()
+	if int64(size) > limits.MaxFileBytes || int64(size) > limits.MaxWorkspaceBytes-(64<<10) {
+		return 0, workspace.ErrQuota
+	}
+	return int64(size) + (64 << 10), nil
 }
 
 func (e *toolRunExecutor) executeHelper(ctx context.Context, modelName, helper string, args map[string]any, rel string) (string, *agent.DiffSummary, error) {
@@ -672,6 +754,15 @@ func (e *toolRunExecutor) executeHostTool(ctx context.Context, call llm.ToolUse,
 		return e.executeLoadSkill(ctx, call, args, outcome), true
 	case "run_agent", "task_output", "task_stop":
 		return e.executeAgentTaskTool(ctx, call, args, outcome), true
+	case "team_create", "team_member_spawn", "team_member_resume", "team_list", "team_get", "team_close", "team_member_get", "team_member_list", "team_send", "team_messages", "team_plan_submit", "team_request_list", "team_request_respond", "team_shutdown_request", "team_task_create", "team_task_get", "team_task_list", "team_task_update":
+		if e.deps.TeamTools != nil {
+			teamOutcome, err := e.deps.TeamTools.Execute(ctx, e.request, call)
+			if err != nil {
+				outcome.Status, outcome.Content = agent.ToolFailed, "Error: team operation failed"
+				return outcome, true
+			}
+			return teamOutcome, true
+		}
 	case "mcp_call":
 		if e.deps.MCP != nil {
 			return e.executeMCPCall(ctx, call, args, outcome), true

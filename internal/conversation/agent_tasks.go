@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -13,9 +14,11 @@ import (
 	"unicode/utf8"
 
 	"stable/internal/agent"
+	"stable/internal/execution"
 	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/sessionlog"
+	"stable/internal/workspace"
 )
 
 // AgentTaskCoordinator is bound once, after the service and shared pool exist.
@@ -33,6 +36,8 @@ type agentTaskState struct {
 	done            chan struct{}
 	roleInstruction string
 	persistErr      error
+	workspace       *workspace.LifecycleService
+	writerLease     *workspace.WriterLease
 }
 
 func NewAgentTaskCoordinator() *AgentTaskCoordinator {
@@ -91,16 +96,71 @@ func (c *AgentTaskCoordinator) run(ctx context.Context, parent agent.ParentRun, 
 	if len(encoded) > 64<<10 {
 		return agent.AgentTaskSnapshot{}, errors.New("agent task input exceeds 64 KiB")
 	}
+	isolation := req.Isolation
+	if isolation == "" {
+		isolation = def.Isolation
+	}
+	if isolation != "" && isolation != "none" && isolation != "worktree" {
+		return agent.AgentTaskSnapshot{}, errors.New("unsupported agent task isolation")
+	}
 	origin := parent.RunID
 	// Direct slash invocations carry a trusted synthetic authority but no origin run.
 	if direct {
 		origin = ""
 	}
+	if isolation == "worktree" && (def.Name == "explore" || def.Name == "plan" || direct || origin == "") {
+		return agent.AgentTaskSnapshot{}, errors.New("worktree isolation requires a persisted lead run and a writable agent role")
+	}
+	var manager *workspace.LifecycleService
+	var writerLease *workspace.WriterLease
+	if isolation == "worktree" {
+		active, activeErr := s.activeRunRequest(parent.Work.SessionID, parent.RunID)
+		started, found, logErr := sessionlog.FindRunStart(currentProjectRoot(s.deps.ProjectRoot), parent.Work.SessionID, parent.RunID)
+		if activeErr != nil || active.Work != parent.Work || active.TeamTurn != nil || active.TeamUser || logErr != nil || !found || started.TeamID != "" || started.AgentTaskID != "" || started.OriginRunID != "" {
+			return agent.AgentTaskSnapshot{}, workspace.ErrOwnership
+		}
+		projectRoot, scope, scopeErr := s.workspaceScope(ctx, ClientMsg{SessionID: parent.Work.SessionID, WorkKind: string(parent.Work.Kind), GoalID: parent.Work.GoalID, WorkItemID: parent.Work.WorkItemID})
+		if scopeErr != nil || filepath.Clean(projectRoot) != filepath.Clean(parent.ProjectRoot) {
+			return agent.AgentTaskSnapshot{}, workspace.ErrOwnership
+		}
+		if scope.Authority = authority; scope.ValidateAuthority() != nil {
+			return agent.AgentTaskSnapshot{}, workspace.ErrOwnership
+		}
+		scope.OriginRunID = origin
+		scope.OriginTaskID = taskID
+		manager, err = s.workspaceService(projectRoot)
+		if err != nil {
+			return agent.AgentTaskSnapshot{}, err
+		}
+		created, createErr := manager.Create(ctx, scope, def.Name)
+		if createErr != nil {
+			return agent.AgentTaskSnapshot{}, createErr
+		}
+		lease, acquireErr := manager.AcquireWriter(ctx, scope, created.ID, runID)
+		if acquireErr != nil {
+			_, _ = manager.RemoveClean(context.Background(), scope, created.ID)
+			return agent.AgentTaskSnapshot{}, acquireErr
+		}
+		writerLease = &lease
+		parent.ExecutorFactory = execution.WorkspaceWriterExecutorFactory(parent.ExecutorFactory, lease, manager)
+		if parent.ExecutorFactory == nil {
+			_, _ = manager.ReleaseCompletedWriter(context.Background(), lease)
+			return agent.AgentTaskSnapshot{}, errors.New("workspace writer executor is unavailable")
+		}
+		parent.ProjectRoot = lease.Authority.AllowedRoot
+		parent.PermissionBounds, err = json.Marshal(lease.Authority)
+		if err != nil {
+			_, _ = manager.ReleaseCompletedWriter(context.Background(), lease)
+			return agent.AgentTaskSnapshot{}, err
+		}
+	}
 	parent.RunID = runID
-	authority.RunID = runID
-	parent.PermissionBounds, err = json.Marshal(authority)
-	if err != nil {
-		return agent.AgentTaskSnapshot{}, err
+	if writerLease == nil {
+		authority.RunID = runID
+		parent.PermissionBounds, err = json.Marshal(authority)
+		if err != nil {
+			return agent.AgentTaskSnapshot{}, err
+		}
 	}
 	if def.Model != "" && def.Model != "inherit" {
 		parent.Model = def.Model
@@ -115,7 +175,7 @@ func (c *AgentTaskCoordinator) run(ctx context.Context, parent agent.ParentRun, 
 		parent.Budget.MaxDuration = req.Timeout
 	}
 	allowed := map[string]bool{}
-	for _, name := range def.EffectiveTools() {
+	for _, name := range def.EffectiveToolsForIsolation(isolation) {
 		allowed[name] = true
 	}
 	schemas := []llm.ToolSchema{}
@@ -141,7 +201,11 @@ func (c *AgentTaskCoordinator) run(ctx context.Context, parent agent.ParentRun, 
 		duration = parent.Budget.MaxDuration
 	}
 	runCtx, cancel := context.WithTimeout(base, duration)
-	state := &agentTaskState{snapshot: agent.AgentTaskSnapshot{ID: taskID, RunID: runID, OriginRunID: origin, SessionID: parent.Work.SessionID, AgentName: def.Name, Name: def.Name, Status: agent.DelegationQueued}, work: parent.Work, cancel: cancel, done: make(chan struct{}), roleInstruction: def.Instruction}
+	state := &agentTaskState{snapshot: agent.AgentTaskSnapshot{ID: taskID, RunID: runID, OriginRunID: origin, SessionID: parent.Work.SessionID, AgentName: def.Name, Name: def.Name, Status: agent.DelegationQueued}, work: parent.Work, cancel: cancel, done: make(chan struct{}), roleInstruction: def.Instruction, workspace: manager, writerLease: writerLease}
+	if writerLease != nil {
+		state.snapshot.WorkspaceID = writerLease.WorkspaceID
+		state.snapshot.WorkspaceGeneration = writerLease.Generation
+	}
 	c.mu.Lock()
 	s.mu.Lock()
 	closing := s.closing
@@ -149,20 +213,29 @@ func (c *AgentTaskCoordinator) run(ctx context.Context, parent agent.ParentRun, 
 	if ctx.Err() != nil || closing || (origin != "" && c.canceledParents[parent.Work.SessionID+"/"+origin]) {
 		c.mu.Unlock()
 		cancel()
+		if writerLease != nil {
+			_, _ = manager.ReleaseCompletedWriter(context.Background(), *writerLease)
+		}
 		return agent.AgentTaskSnapshot{}, errors.New("agent parent was canceled or service is closing")
 	}
 	c.active[taskID] = state
 	c.mu.Unlock()
-	started := sessionlog.RunStarted{RunID: runID, WorkKind: string(parent.Work.Kind), GoalID: parent.Work.GoalID, WorkItemID: parent.Work.WorkItemID, Intent: "agent task " + def.Name, AgentTaskID: taskID, AgentName: def.Name, OriginRunID: origin, OriginCallID: parent.ToolCallID}
+	started := sessionlog.RunStarted{RunID: runID, WorkKind: string(parent.Work.Kind), GoalID: parent.Work.GoalID, WorkItemID: parent.Work.WorkItemID, Intent: "agent task " + def.Name, AgentTaskID: taskID, AgentName: def.Name, WorkspaceID: state.snapshot.WorkspaceID, WorkspaceGeneration: state.snapshot.WorkspaceGeneration, OriginRunID: origin, OriginCallID: parent.ToolCallID}
 	s.eventMu.Lock()
 	_, err = sessionlog.Append(s.deps.ProjectRoot, parent.Work.SessionID, sessionlog.EventRunStarted, started)
 	s.eventMu.Unlock()
 	if err != nil {
+		if writerLease != nil {
+			_, _ = manager.ReleaseCompletedWriter(context.Background(), *writerLease)
+		}
 		c.release(taskID, state)
 		return agent.AgentTaskSnapshot{}, err
 	}
 	handle, err := submitter.SubmitTask(runCtx, parent, task)
 	if err != nil {
+		if writerLease != nil {
+			_, _ = manager.ReleaseCompletedWriter(context.Background(), *writerLease)
+		}
 		persistErr := s.appendAgentTaskTerminal(state, agent.RunFailed, "", err.Error())
 		c.release(taskID, state)
 		if persistErr != nil {
@@ -180,6 +253,14 @@ func (c *AgentTaskCoordinator) run(ctx context.Context, parent agent.ParentRun, 
 			status = agent.RunCancelled
 		case agent.DelegationInterrupted:
 			status = agent.RunInterrupted
+		}
+		if state.writerLease != nil {
+			if _, releaseErr := state.workspace.ReleaseCompletedWriter(context.Background(), *state.writerLease); releaseErr != nil {
+				status = agent.RunFailed
+				if result.Error == "" {
+					result.Error = "workspace writer could not be safely released: " + releaseErr.Error()
+				}
+			}
 		}
 		if err := s.appendAgentTaskTerminal(state, status, result.Summary, result.Error); err != nil {
 			state.persistErr = err
@@ -232,7 +313,7 @@ func taskSnapshot(sessionID string, r sessionlog.AgentTaskRecord) agent.AgentTas
 	if reason == "" && r.RunStatus != "completed" {
 		reason = r.TerminalReason
 	}
-	return agent.AgentTaskSnapshot{ID: r.Started.AgentTaskID, RunID: r.Started.RunID, OriginRunID: r.Started.OriginRunID, SessionID: sessionID, AgentName: r.Started.AgentName, Name: r.Started.AgentName, Status: status, Stage: r.Delegation.Stage, Summary: r.Delegation.Summary, Error: reason, Cursor: r.LastSeq}
+	return agent.AgentTaskSnapshot{ID: r.Started.AgentTaskID, RunID: r.Started.RunID, OriginRunID: r.Started.OriginRunID, SessionID: sessionID, AgentName: r.Started.AgentName, Name: r.Started.AgentName, WorkspaceID: r.Started.WorkspaceID, WorkspaceGeneration: r.Started.WorkspaceGeneration, Status: status, Stage: r.Delegation.Stage, Summary: r.Delegation.Summary, Error: reason, Cursor: r.LastSeq}
 }
 func (c *AgentTaskCoordinator) Output(ctx context.Context, parent agent.ParentRun, id string, wait time.Duration) (agent.AgentTaskSnapshot, error) {
 	s, err := c.host()

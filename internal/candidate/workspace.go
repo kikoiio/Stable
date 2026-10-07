@@ -17,14 +17,32 @@ import (
 
 var ErrUnsafePath = errors.New("unsafe candidate path")
 
+const (
+	ManifestPolicyLegacy  = "legacy-v1"
+	ManifestPolicyProject = "project-v2"
+)
+
 type Candidate struct {
 	ID              string
+	ManifestPolicy  string
 	FormalRoot      string
 	CandidateRoot   string
 	BaselineDigest  string
 	CandidateDigest string
 	RootMode        uint32
 	Status          string
+}
+
+func normalizeManifestPolicy(policy string) (string, error) {
+	if policy == "" {
+		return ManifestPolicyLegacy, nil
+	}
+	switch policy {
+	case ManifestPolicyLegacy, ManifestPolicyProject:
+		return policy, nil
+	default:
+		return "", fmt.Errorf("unsupported manifest policy %q", policy)
+	}
 }
 
 type ManifestEntry struct {
@@ -46,6 +64,14 @@ func CleanRelative(path string) (string, error) {
 }
 
 func BuildManifest(root string) ([]ManifestEntry, string, error) {
+	return BuildManifestForPolicy(root, ManifestPolicyLegacy)
+}
+
+func BuildManifestForPolicy(root, policy string) ([]ManifestEntry, string, error) {
+	policy, err := normalizeManifestPolicy(policy)
+	if err != nil {
+		return nil, "", err
+	}
 	secureRoot, err := secfile.OpenRoot(root)
 	if err != nil {
 		return nil, "", err
@@ -67,16 +93,30 @@ func BuildManifest(root string) ([]ManifestEntry, string, error) {
 		// runtime state, not project content: it grows while a run is in
 		// flight, so counting it would make every session-scoped candidate look
 		// stale at review time, and exchanging it would revert the transcript.
-		if rel == ".stable" && d.IsDir() {
-			return filepath.SkipDir
-		}
 		rel, err = CleanRelative(rel)
 		if err != nil {
 			return err
 		}
+		if policy == ManifestPolicyLegacy && rel == ".stable" && d.IsDir() {
+			return filepath.SkipDir
+		}
+		if policy == ManifestPolicyProject {
+			if rel == ".git" || rel == ".stable" || rel == ".mewcode" {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if filepath.Base(rel) == ".git" {
+				return fmt.Errorf("%w: nested git metadata %s", ErrUnsafePath, rel)
+			}
+		}
 		info, err := d.Info()
 		if err != nil {
 			return err
+		}
+		if policy == ManifestPolicyProject && rel == ".gitmodules" && info.Size() > 0 {
+			return fmt.Errorf("%w: submodule declarations are unsupported", ErrUnsafePath)
 		}
 		if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
 			return fmt.Errorf("%w: symlink or special file %s", ErrUnsafePath, rel)
@@ -115,6 +155,14 @@ func BuildManifest(root string) ([]ManifestEntry, string, error) {
 }
 
 func CreateCandidate(id, formalRoot, candidatesParent string) (Candidate, error) {
+	return CreateCandidateForPolicy(id, formalRoot, candidatesParent, ManifestPolicyLegacy)
+}
+
+func CreateCandidateForPolicy(id, formalRoot, candidatesParent, policy string) (Candidate, error) {
+	policy, err := normalizeManifestPolicy(policy)
+	if err != nil {
+		return Candidate{}, err
+	}
 	if id == "" || id == "." || id == ".." || filepath.Base(id) != id || strings.ContainsAny(id, "/\\") {
 		return Candidate{}, errors.New("candidate ID is required")
 	}
@@ -139,7 +187,7 @@ func CreateCandidate(id, formalRoot, candidatesParent string) (Candidate, error)
 		}
 		return Candidate{}, err
 	}
-	base, digest, err := BuildManifest(formal.Path())
+	base, digest, err := BuildManifestForPolicy(formal.Path(), policy)
 	if err != nil {
 		return Candidate{}, err
 	}
@@ -176,7 +224,7 @@ func CreateCandidate(id, formalRoot, candidatesParent string) (Candidate, error)
 		}
 	}
 	rollback = false
-	return Candidate{ID: id, FormalRoot: formalRoot, CandidateRoot: target, BaselineDigest: digest, CandidateDigest: digest, RootMode: rootMode, Status: "prepared"}, nil
+	return Candidate{ID: id, ManifestPolicy: policy, FormalRoot: formalRoot, CandidateRoot: target, BaselineDigest: digest, CandidateDigest: digest, RootMode: rootMode, Status: "prepared"}, nil
 }
 
 func FreezeCandidate(c Candidate, stopWriter func(context.Context) error, ctx context.Context) (Candidate, error) {
@@ -188,7 +236,7 @@ func FreezeCandidate(c Candidate, stopWriter func(context.Context) error, ctx co
 			return c, err
 		}
 	}
-	_, digest, err := BuildManifest(c.CandidateRoot)
+	_, digest, err := BuildManifestForPolicy(c.CandidateRoot, c.ManifestPolicy)
 	if err != nil {
 		return c, err
 	}

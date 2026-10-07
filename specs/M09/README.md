@@ -1,6 +1,6 @@
 # M09 并行协作与工作树：范围与进度
 
-> 2026-10-07 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。M09-D 四份文档已获批准，正在实现；M09-E/F 尚未批准运行实现。
+> 2026-10-07 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。M09-D 实现已提交，最终 SHA 的云端验收进行中；M09-E/F 四份规格均已获用户批准，正在实施。
 
 ## 已完成
 
@@ -16,9 +16,9 @@
 
 | 建议子项 | 源端行为与文件 | 当前缺口 | 实施前置 |
 |---|---|---|---|
-| M09-D agent 定义与后台任务 | `internal/agents/definition.go`、`loader.go`、`agent_tool.go`、`subagent.go`；具名角色、定义覆盖、后台启动、状态/摘要、取消、完成通知 | Stable 尚无 agent 定义目录、通用具名 agent 入口、后台任务列表/查询/取消；hook async 和 slash fork 仅覆盖特定入口 | M09-A/C 资源池、M05 持久恢复；四份文档已获批准，正在实现并准备云端验收 |
-| M09-E 团队与协调器 | `internal/teams/teams.go`、`tools.go`、`sharedtask.go`、`tasktools.go`、`runner.go`、`protocol.go`、`coordinator.go`；团队成员多轮驻留、点对点/广播消息、依赖任务板、计划/关闭请求、纯协调工具集 | 尚无团队注册、持久消息、团队任务板、成员继续工作/空闲循环或 coordinator 模式 | M09-D 后台生命周期；写入成员依赖 M09-F。需独立规格审批 |
-| M09-F 受控工作树与并行写入 | `internal/worktree/`、`internal/tools/enter_worktree.go`、`exit_worktree.go`，以及 `Agent` 的 `isolation: worktree`；创建/进入/退出/保留、会话恢复、变更预览、agent 工作树清理 | 尚无工作树工具、工作树归属或隔离写入 child；所有现有 child 固定只读 | M03/M04 候选接收与权限门；需要单独设计私有 Git 管理区、候选导出与冲突处理，并审批 |
+| M09-D agent 定义与后台任务 | `internal/agents/definition.go`、`loader.go`、`agent_tool.go`、`subagent.go`；具名角色、定义覆盖、后台启动、状态/摘要、取消、完成通知 | 主实现已提交；AC checklist 尚待逐项核对 | 最终代码 SHA `ccc3fbc` 的 Go、package、E2E GitHub Actions jobs 全部成功；按 [checklist](../M09-D/checklist.md) 完成条目映射后再标验收通过 |
+| M09-E 团队与协调器 | `internal/teams` 的 scope/预算/任务图，sessionlog typed facts/projection；shared-pool member 首轮 spawn、显式 resume、child run 持久化/中断恢复、消息批次 handoff、plan/shutdown 请求、强停/延迟关闭、团队/task 工具与 TUI 命令；coordinator 下一 run 开关持久化、team-only schema 和 executor 硬 allowlist；显式续跑在 pool 满时进入有界 FIFO `waiting_capacity` 队列，容量信号唤醒，重启恢复为需显式续跑的 interrupted 状态；pool 在提交后发布失败会落 interrupted child/member 终态，恢复收敛 terminal-turn/member-state 间隙，service close 停止容量 watcher | 首轮 spawn 满额原子拒绝；等待续跑/恢复的更多故障组合与 compaction/重连/端到端验收仍需完成；本轮 team FIFO/恢复/补偿/watcher 定向测试通过，完整 Actions 尚未获授权 | M09-D 后台生命周期；E/F 规格已批准，实施中 |
+| M09-F 受控工作树与并行写入 | `internal/workspace` 的 ownership、manifest、配额、私有 Git、materializer、独立生命周期 service 与 B/F/W 路径级合并/冲突解析基础；候选 project-v2 metadata 保全/交换代码；service 启动会保守收敛 creating/writing/stopping/exporting/removing journal；runtime 注入专用 state root；conversation 提供按持久 run 授权创建及 session/Goal 归属的 list/get/keep/clean-remove 协议；TUI 提供 `/worktrees` 对应入口 | 独立写 child/lease、binding idle guard、candidate exporter、冲突/dirty discard 决策、进程身份恢复与协议事件投影仍缺；本轮接线尚未编译/运行验证，完整组合验收待办 | M03/M04 候选接收与权限门；四份规格已批准，实施中 |
 
 源文件位于本机 `/home/neo/Projects/mewcode-golang`。核对使用源码读取，未执行源项目、真实 provider 或重型构建。
 
@@ -26,8 +26,8 @@
 
 - [x] M09-A/B/C 已实现并通过对应 checklist。
 - [ ] M09-D 的四份规格文档获批，实现与验收通过。
-- [ ] M09-E 的四份规格文档获批，实现与验收通过。
-- [ ] M09-F 的四份规格文档获批，普通任务/长期目标的修改均通过既有候选检查与用户接收，agent 无法自行合并到正式工程。
+- [ ] M09-E 的四份规格文档已获批；实现与验收待完成。
+- [ ] M09-F 的四份规格文档已获批；受控工作树、候选检查与用户接收验收待完成。
 - [ ] 与源端 agent、团队、后台任务、工作树的行为逐项对照；每个差异写明已适配、源端仅解析、平台不适用或尚未完成，不能用目录迁移代替行为验收。
 - [ ] GitHub Actions 上完成组合回归：同步委派、fork skill、hook agent、后台任务、团队消息/取消/恢复、并行工作树候选与冲突接收。
 
@@ -35,4 +35,4 @@ Linux 为当前首发平台，源端 iTerm 专用后端不属于本轮 Linux 验
 
 ## 下一步
 
-审阅 [M09-D spec](../M09-D/spec.md)、[plan](../M09-D/plan.md)、[task](../M09-D/task.md)、[checklist](../M09-D/checklist.md)。四份文档已获批准，正在按任务 DAG 实施并准备 GitHub Actions 验收。M09-E/F 的范围仍列为待完成，不提前标记通过。
+继续按 [M09-E task](../M09-E/task.md) 与 [M09-F task](../M09-F/task.md) DAG 实施。D 的最终 SHA 云端验收结果记录在 [M09-D checklist](../M09-D/checklist.md)。E/F 仍有实现与运行验收缺口，只有 D/E/F 全部验收通过后才更新整体完成状态。

@@ -49,6 +49,7 @@ type FileChange struct {
 type Review struct {
 	ID              string       `json:"id"`
 	CandidateID     string       `json:"candidate_id"`
+	ManifestPolicy  string       `json:"manifest_policy,omitempty"`
 	FormalDigest    string       `json:"formal_digest"`
 	CandidateDigest string       `json:"candidate_digest"`
 	Changes         []FileChange `json:"changes"`
@@ -64,11 +65,20 @@ func BuildReview(ctx context.Context, c Candidate, checkers []Checker) (Review, 
 	if c.Status != "frozen" && c.Status != "reviewed" {
 		return Review{}, fmt.Errorf("candidate %s is not frozen", c.ID)
 	}
-	formal, formalDigest, err := BuildManifest(c.FormalRoot)
+	policy, err := normalizeManifestPolicy(c.ManifestPolicy)
 	if err != nil {
 		return Review{}, err
 	}
-	candidate, candidateDigest, err := BuildManifest(c.CandidateRoot)
+	if policy == ManifestPolicyProject {
+		if err = ValidateProtectedMetadata(c.FormalRoot, c.CandidateRoot); err != nil {
+			return Review{}, err
+		}
+	}
+	formal, formalDigest, err := BuildManifestForPolicy(c.FormalRoot, policy)
+	if err != nil {
+		return Review{}, err
+	}
+	candidate, candidateDigest, err := BuildManifestForPolicy(c.CandidateRoot, policy)
 	if err != nil {
 		return Review{}, err
 	}
@@ -76,7 +86,11 @@ func BuildReview(ctx context.Context, c Candidate, checkers []Checker) (Review, 
 	if err != nil {
 		return Review{}, err
 	}
-	review := Review{ID: "review-" + c.ID, CandidateID: c.ID, FormalDigest: formalDigest, CandidateDigest: candidateDigest, Changes: changes, Findings: []Finding{}}
+	reviewPolicy := ""
+	if policy != ManifestPolicyLegacy {
+		reviewPolicy = policy
+	}
+	review := Review{ID: "review-" + c.ID, CandidateID: c.ID, ManifestPolicy: reviewPolicy, FormalDigest: formalDigest, CandidateDigest: candidateDigest, Changes: changes, Findings: []Finding{}}
 	changePaths := make(map[string]struct{}, len(changes))
 	for _, change := range changes {
 		changePaths[change.Path] = struct{}{}
@@ -108,11 +122,11 @@ func BuildReview(ctx context.Context, c Candidate, checkers []Checker) (Review, 
 		}
 		review.Findings = append(review.Findings, finding)
 	}
-	_, formalAfter, err := BuildManifest(c.FormalRoot)
+	_, formalAfter, err := BuildManifestForPolicy(c.FormalRoot, policy)
 	if err != nil {
 		return Review{}, err
 	}
-	_, candidateAfter, err := BuildManifest(c.CandidateRoot)
+	_, candidateAfter, err := BuildManifestForPolicy(c.CandidateRoot, policy)
 	if err != nil {
 		return Review{}, err
 	}
@@ -127,6 +141,20 @@ func BuildReview(ctx context.Context, c Candidate, checkers []Checker) (Review, 
 }
 
 func ComputeReviewDigest(review Review) (string, error) {
+	if review.ManifestPolicy != "" {
+		encoded, err := json.Marshal(struct {
+			Candidate string
+			Formal    string
+			Policy    string
+			Changes   []FileChange
+			Findings  []Finding
+		}{review.CandidateDigest, review.FormalDigest, review.ManifestPolicy, review.Changes, review.Findings})
+		if err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256(encoded)
+		return hex.EncodeToString(sum[:]), nil
+	}
 	encoded, err := json.Marshal(struct {
 		Candidate string
 		Formal    string

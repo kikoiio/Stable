@@ -16,3 +16,19 @@ func TestSessionProtocolRequiresProjectAndSessionIdentity(t *testing.T) {
 		t.Fatalf("valid request: %+v %v", got, err)
 	}
 }
+
+func TestCoordinatorModeProtocolIsSessionScopedAndOneShot(t *testing.T) {
+	valid := ClientMsg{Op: "team_coordinator", SessionID: "0123456789abcdef0123456789abcdef", CoordinatorOn: true}
+	if err := validateClient(valid); err != nil {
+		t.Fatalf("valid coordinator mode request rejected: %v", err)
+	}
+	for _, invalid := range []ClientMsg{
+		{Op: "team_coordinator", SessionID: "bad"},
+		{Op: "team_coordinator", SessionID: valid.SessionID, RunID: "run"},
+		{Op: "team_coordinator", SessionID: valid.SessionID, ProjectRoot: "/tmp"},
+	} {
+		if err := validateClient(invalid); err == nil {
+			t.Fatalf("invalid coordinator mode request accepted: %+v", invalid)
+		}
+	}
+}

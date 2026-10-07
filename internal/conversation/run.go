@@ -13,6 +13,7 @@ import (
 
 	"stable/internal/agent"
 	"stable/internal/candidate"
+	"stable/internal/execution"
 	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/planfile"
@@ -107,6 +108,21 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		}
 	}
 	s.eventMu.Lock()
+	if request.Work.Kind == agent.WorkSession {
+		coordinatorMode, modeErr := teamCoordinatorModeEnabled(s.deps.ProjectRoot, msg.SessionID)
+		if modeErr != nil {
+			s.eventMu.Unlock()
+			return modeErr
+		}
+		if coordinatorMode {
+			request.TeamCoordinator = true
+			request.ToolSchemas = execution.TeamCoordinatorToolSchemas(s.deps.ToolSchemas)
+			if len(request.ToolSchemas) == 0 {
+				s.eventMu.Unlock()
+				return errors.New("team coordinator mode has no configured team tools")
+			}
+		}
+	}
 	taskPrefix, taskErr := s.agentTaskNotifications(request)
 	if taskErr != nil {
 		s.eventMu.Unlock()
@@ -117,7 +133,11 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	}
 	if request.Work.Kind == agent.WorkSession {
 		history := sessionConversationMessages(s.deps.ProjectRoot, msg.SessionID)
-		prefix := []llm.Message{{Role: "system", Content: "你是 Stable 的通用 agent。读、搜、列只能访问正式工程只读视图；写、编辑只能写入本次运行的候选区。工具路径使用工作区相对路径。工具结果代表真实受控执行结果。"}}
+		systemPrompt := "你是 Stable 的通用 agent。读、搜、列只能访问正式工程只读视图；写、编辑只能写入本次运行的候选区。工具路径使用工作区相对路径。工具结果代表真实受控执行结果。"
+		if request.TeamCoordinator {
+			systemPrompt += " 当前运行处于团队协调器模式：仅使用团队消息、请求和任务板工具协调成员；不得调用项目文件、命令、MCP、网络、委派、后台任务或 session todo 工具。"
+		}
+		prefix := []llm.Message{{Role: "system", Content: systemPrompt}}
 		// The skill inventory text is per-run context like the plan reminder:
 		// it rides after the system prefix (before the replayed history, so
 		// the stable snapshot sits at a fixed offset) and is deliberately not
@@ -192,7 +212,11 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if s.activeRuns == nil {
 		s.activeRuns = map[string]string{}
 	}
+	if s.activeRequests == nil {
+		s.activeRequests = map[string]agent.ExecutionRequest{}
+	}
 	s.activeRuns[request.RunID] = request.Work.SessionID
+	s.activeRequests[request.RunID] = request
 	s.mu.Unlock()
 	if s.hooks != nil {
 		// Start the runner first so run_start child progress can be published
@@ -381,9 +405,12 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 		s.broadcastRun(ServerMsg{Type: "error", RunID: request.RunID, Error: "could not finalize candidate: " + err.Error()}, request.Work.SessionID, request.RunID, 0)
 	}
 	s.broadcastRun(ServerMsg{Type: "run_outcome", RunID: request.RunID, Outcome: &outcome}, request.Work.SessionID, request.RunID, 0)
+	s.eventMu.Lock()
 	s.mu.Lock()
 	delete(s.activeRuns, request.RunID)
+	delete(s.activeRequests, request.RunID)
 	s.mu.Unlock()
+	s.eventMu.Unlock()
 	if s.deps.AgentTasks != nil {
 		s.deps.AgentTasks.ForgetParent(request.Work.SessionID, request.RunID)
 	}
@@ -433,7 +460,11 @@ func (s *Service) finalizeRunCandidate(ctx context.Context, request agent.Execut
 		// silently cleaned up.
 		return nil
 	}
-	_, candidateDigest, err := candidate.BuildManifest(candidateRoot)
+	policy := candidate.ManifestPolicyLegacy
+	if record != nil && record.Candidate.ManifestPolicy != "" {
+		policy = record.Candidate.ManifestPolicy
+	}
+	_, candidateDigest, err := candidate.BuildManifestForPolicy(candidateRoot, policy)
 	if err != nil {
 		return err
 	}
@@ -441,7 +472,7 @@ func (s *Service) finalizeRunCandidate(ctx context.Context, request agent.Execut
 	if record != nil {
 		baselineDigest = record.Candidate.BaselineDigest
 	} else {
-		_, baselineDigest, err = candidate.BuildManifest(formalRoot)
+		_, baselineDigest, err = candidate.BuildManifestForPolicy(formalRoot, policy)
 		if err != nil {
 			return err
 		}

@@ -38,7 +38,7 @@ func Append(root, id, typ string, data any) (Event, error) {
 		return Event{}, errors.New("event type is required")
 	}
 	switch typ {
-	case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload, EventMCPReload, EventMCPServer, EventAgentTaskNotification:
+	case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload, EventMCPReload, EventMCPServer, EventCoordinatorMode, EventAgentTaskNotification, EventTeam:
 	default:
 		return Event{}, fmt.Errorf("unknown event type %q", typ)
 	}
@@ -49,6 +49,7 @@ func Append(root, id, typ string, data any) (Event, error) {
 	mu.Lock()
 	defer mu.Unlock()
 	var seq uint64
+	appendAt := time.Now().UTC()
 	_, statErr := os.Stat(path)
 	if statErr != nil && !os.IsNotExist(statErr) {
 		return Event{}, statErr
@@ -70,6 +71,7 @@ func Append(root, id, typ string, data any) (Event, error) {
 		if e != nil {
 			return Event{}, e
 		}
+		appendAt = time.Now().UTC()
 		if len(replay.Events) > 0 {
 			seq = replay.Events[len(replay.Events)-1].Seq
 		}
@@ -79,8 +81,8 @@ func Append(root, id, typ string, data any) (Event, error) {
 			}
 		}
 		switch typ {
-		case EventBoundary, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload, EventMCPReload, EventMCPServer, EventAgentTaskNotification:
-			if err := validateOwnedAppend(id, typ, data, replay.Events, seq+1); err != nil {
+		case EventBoundary, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload, EventMCPReload, EventMCPServer, EventCoordinatorMode, EventAgentTaskNotification, EventTeam:
+			if err := validateOwnedAppend(id, typ, data, replay.Events, seq+1, appendAt); err != nil {
 				return Event{}, err
 			}
 		}
@@ -143,7 +145,7 @@ func Append(root, id, typ string, data any) (Event, error) {
 			}
 		}
 	}
-	e := Event{SchemaVersion: SchemaVersion, SessionID: id, Seq: seq + 1, At: time.Now().UTC(), Type: typ, Data: data}
+	e := Event{SchemaVersion: SchemaVersion, SessionID: id, Seq: seq + 1, At: appendAt, Type: typ, Data: data}
 	b, err := json.Marshal(e)
 	if err != nil {
 		return Event{}, err
@@ -205,6 +207,10 @@ func validateRunAppend(sessionID, typ string, data any, events []Event) error {
 	if err != nil {
 		return err
 	}
+	teamFacts, err := scanTeams(sessionID, events)
+	if err != nil {
+		return err
+	}
 	starts := map[string]RunStarted{}
 	lastSeq := map[string]uint64{}
 	terminal := map[string]bool{}
@@ -245,6 +251,9 @@ func validateRunAppend(sessionID, typ string, data any, events []Event) error {
 		default:
 			return errors.New("run has invalid work kind")
 		}
+		if err := teamFacts.checkStarted(started); err != nil {
+			return err
+		}
 		return agentTasks.checkStarted(started)
 	}
 	var runEvent RunEvent
@@ -256,6 +265,9 @@ func validateRunAppend(sessionID, typ string, data any, events []Event) error {
 	}
 	if starts[runEvent.RunID].RunID == "" {
 		return errors.New("run_event has no run_started event")
+	}
+	if err := teamFacts.checkRunEvent(sessionID, runEvent); err != nil {
+		return err
 	}
 	if err := agentTasks.checkRunEvent(sessionID, runEvent); err != nil {
 		return err
@@ -318,6 +330,7 @@ func replayFile(path, id string) (Transcript, error) {
 	runTerminal := map[string]bool{}
 	runEventIDs := map[string]bool{}
 	agentTasks := newAgentTaskState()
+	teams := newTeamScan()
 	for s.Scan() {
 		line := append([]byte(nil), s.Bytes()...)
 		var e Event
@@ -328,7 +341,7 @@ func replayFile(path, id string) (Transcript, error) {
 			return out, fmt.Errorf("session log invalid envelope at seq %d", expected)
 		}
 		switch e.Type {
-		case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload, EventMCPReload, EventMCPServer, EventAgentTaskNotification:
+		case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload, EventMCPReload, EventMCPServer, EventCoordinatorMode, EventAgentTaskNotification, EventTeam:
 		default:
 			return out, fmt.Errorf("session log has unknown event type %q at seq %d", e.Type, e.Seq)
 		}
@@ -516,6 +529,9 @@ func replayFile(path, id string) (Transcript, error) {
 		}
 		if err := agentTasks.observe(id, e); err != nil {
 			return out, fmt.Errorf("session log has invalid agent task at seq %d: %w", e.Seq, err)
+		}
+		if err := teams.observe(id, e); err != nil {
+			return out, fmt.Errorf("session log has invalid team fact at seq %d: %w", e.Seq, err)
 		}
 		out.Events = append(out.Events, e)
 		expected++

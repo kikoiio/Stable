@@ -130,11 +130,34 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	if _, err = db.Exec(`PRAGMA user_version = 12`); err != nil {
+	if version < 13 {
+		if err = migrateV13(db); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if _, err = db.Exec(`PRAGMA user_version = 13`); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+func migrateV13(db *sql.DB) error {
+	for _, item := range []struct{ table, column, ddl string }{
+		{"candidates", "manifest_policy", `ALTER TABLE candidates ADD COLUMN manifest_policy TEXT NOT NULL DEFAULT 'legacy-v1'`},
+		{"acceptance_apply_journal", "manifest_policy", `ALTER TABLE acceptance_apply_journal ADD COLUMN manifest_policy TEXT NOT NULL DEFAULT 'legacy-v1'`},
+		{"acceptance_apply_journal", "protected_metadata_json", `ALTER TABLE acceptance_apply_journal ADD COLUMN protected_metadata_json TEXT NOT NULL DEFAULT ''`},
+		{"rewind_journal", "manifest_policy", `ALTER TABLE rewind_journal ADD COLUMN manifest_policy TEXT NOT NULL DEFAULT 'legacy-v1'`},
+	} {
+		if !hasColumn(db, item.table, item.column) {
+			if _, err := db.Exec(item.ddl); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := db.Exec(`PRAGMA user_version=13`)
+	return err
 }
 
 // migrateV12 extends both transaction journals with the intermediate phases

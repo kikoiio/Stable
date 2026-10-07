@@ -19,16 +19,20 @@ func (StreamingChildRunner) Run(ctx context.Context, input ChildRunInput) ChildR
 	if input.Provider == nil || input.Model == "" || input.ExecutorFactory == nil || input.ChildRunID == "" || input.Task.Instruction == "" {
 		return ChildRunResult{Status: DelegationFailed, Error: "child run is missing required execution context"}
 	}
+	if input.TeamTurn != nil && input.TeamTurn.Validate() != nil {
+		return ChildRunResult{Status: DelegationFailed, Error: "child team turn identity is invalid"}
+	}
 	resourceBounds, _ := json.Marshal(ResourceBounds{
 		MaxToolRounds:    input.Budget.MaxToolRounds,
 		MaxTotalDuration: input.Budget.MaxDuration,
 	})
 	request := ExecutionRequest{
-		RunID:  input.ChildRunID,
-		Work:   input.Work,
-		Intent: input.Task.Instruction,
+		RunID:    input.ChildRunID,
+		Work:     input.Work,
+		TeamTurn: cloneTeamTurnIdentity(input.TeamTurn),
+		Intent:   input.Task.Instruction,
 		Messages: []llm.Message{
-			{Role: "system", Content: "You are a read-only research agent. Use only the available read, search, and directory listing tools. Do not attempt to modify files or use other capabilities. Return a concise factual summary with relevant paths."},
+			{Role: "system", Content: childSystemInstruction(input)},
 			{Role: "user", Content: input.Task.Instruction},
 		},
 		ProviderName:     input.ProviderName,

@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -18,6 +19,8 @@ import (
 	"stable/internal/platform/ipc"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
+	"stable/internal/teams"
+	"stable/internal/workspace"
 )
 
 type Deps struct {
@@ -42,7 +45,10 @@ type Deps struct {
 	Temporal            string
 	ProjectRoot         string
 	RunRoot             string
-	SocketPath          string
+	// WorkspaceStateRoot is a service-owned directory outside the project.
+	// Empty disables worktree lifecycle operations.
+	WorkspaceStateRoot string
+	SocketPath         string
 	// ContextWindowTokens overrides the model context window used for
 	// compaction; zero resolves to the sessioncontext default.
 	ContextWindowTokens int
@@ -71,6 +77,7 @@ type Service struct {
 	clients           map[chan ServerMsg]*clientSubscription
 	statuses          map[string]core.GoalStatus
 	activeRuns        map[string]string
+	activeRequests    map[string]agent.ExecutionRequest
 	activeForkRuns    map[string]*forkRunState
 	closing           bool
 	notifiedApprovals map[string]bool
@@ -103,6 +110,9 @@ type Service struct {
 	mcp             *mcp.Manager
 	mcpMu           sync.Mutex
 	mcpInstructions map[string]bool
+	teamScheduler   *teamScheduler
+	workspaceMu     sync.Mutex
+	workspaces      map[string]*workspace.LifecycleService
 }
 
 type clientSubscription struct {
@@ -122,11 +132,15 @@ func Serve(ctx context.Context, deps Deps) (*Service, error) {
 	if err := recoverDelegationRuns(deps.ProjectRoot); err != nil {
 		return nil, fmt.Errorf("recover interrupted delegations: %w", err)
 	}
+	if err := recoverTeamRuns(deps.ProjectRoot); err != nil {
+		return nil, fmt.Errorf("recover interrupted team turns: %w", err)
+	}
 	ln, err := ipc.ListenPrivate(deps.SocketPath, true)
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{deps: deps, lifeCtx: ctx, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, activeForkRuns: map[string]*forkRunState{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks, mcp: deps.MCP, mcpInstructions: map[string]bool{}}
+	s := &Service{deps: deps, lifeCtx: ctx, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, activeRequests: map[string]agent.ExecutionRequest{}, activeForkRuns: map[string]*forkRunState{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks, mcp: deps.MCP, mcpInstructions: map[string]bool{}, workspaces: map[string]*workspace.LifecycleService{}}
+	s.teamScheduler = newTeamScheduler(s)
 	if deps.AgentTasks != nil {
 		deps.AgentTasks.Bind(s)
 	}
@@ -171,10 +185,20 @@ func (s *Service) Close() error {
 	if s.deps.AgentTasks != nil {
 		s.deps.AgentTasks.Close()
 	}
+	if s.teamScheduler != nil {
+		s.teamScheduler.close()
+	}
 	if s.hooks != nil {
 		s.hooks.Close()
 	}
-	return s.ln.Close()
+	closeErr := s.ln.Close()
+	s.workspaceMu.Lock()
+	for key, manager := range s.workspaces {
+		closeErr = errors.Join(closeErr, manager.Close(context.Background()))
+		delete(s.workspaces, key)
+	}
+	s.workspaceMu.Unlock()
+	return closeErr
 }
 
 func (s *Service) serveConn(ctx context.Context, conn net.Conn) {
@@ -252,6 +276,27 @@ func (s *Service) readLoop(ctx context.Context, conn net.Conn, updates chan Serv
 			} else {
 				updates <- ServerMsg{Type: "done", RunID: c.RunID}
 			}
+			continue
+		case "team_create", "team_list", "team_get", "team_close", "team_coordinator", "team_member_spawn", "team_member_resume", "team_member_stop", "team_send", "team_messages", "team_request_list", "team_request_respond", "team_shutdown_request", "team_task_create", "team_task_get", "team_task_list", "team_task_update":
+			msg, err := s.handleTeamRequest(ctx, c)
+			if err != nil {
+				if errors.Is(err, teams.ErrRevisionConflict) && msg.TeamTask != nil {
+					updates <- msg
+				}
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			} else {
+				updates <- msg
+			}
+			updates <- ServerMsg{Type: "done"}
+			continue
+		case "worktree_create", "worktree_list", "worktree_get", "worktree_keep", "worktree_remove":
+			msg, err := s.handleWorkspaceRequest(ctx, c)
+			if err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			} else {
+				updates <- msg
+			}
+			updates <- ServerMsg{Type: "done"}
 			continue
 		case "review_get":
 			review, err := s.reviewCandidate(ctx, c.CandidateID, c.SessionID)

@@ -33,6 +33,7 @@ type Definition struct {
 	DisallowedTools []string `json:"disallowed_tools,omitempty"`
 	MaxTurns        int      `json:"max_turns"`
 	Background      bool     `json:"background"`
+	Isolation       string   `json:"isolation,omitempty"`
 }
 
 // Metadata contains only the public role inventory, including effective tools.
@@ -46,6 +47,7 @@ type Metadata struct {
 	MaxTurns        int      `json:"max_turns"`
 	Background      bool     `json:"background"`
 	ReadOnly        bool     `json:"read_only"`
+	Isolation       string   `json:"isolation,omitempty"`
 }
 
 var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
@@ -64,7 +66,14 @@ var knownTools = map[string]bool{
 // EffectiveTools intersects both definition rules with the host child allowlist.
 // A nil tools list inherits that list; an explicitly empty list allows no tools.
 func (d Definition) EffectiveTools() []string {
+	return d.EffectiveToolsForIsolation(d.Isolation)
+}
+
+func (d Definition) EffectiveToolsForIsolation(isolation string) []string {
 	allowed := map[string]bool{"read_file": true, "glob": true, "grep": true}
+	if isolation == "worktree" && d.Name != "explore" && d.Name != "plan" {
+		allowed["write_file"], allowed["edit_file"] = true, true
+	}
 	if d.Tools != nil {
 		requested := make(map[string]bool, len(d.Tools))
 		for _, name := range d.Tools {
@@ -88,9 +97,17 @@ func (d Definition) EffectiveTools() []string {
 }
 
 func (d Definition) Metadata() Metadata {
+	tools := d.EffectiveToolsForIsolation(d.Isolation)
+	readOnly := true
+	for _, name := range tools {
+		if name == "write_file" || name == "edit_file" || name == "command" {
+			readOnly = false
+			break
+		}
+	}
 	return Metadata{Name: d.Name, Description: d.Description, Model: d.Model, Source: d.Source,
-		Tools: d.EffectiveTools(), DisallowedTools: cloneStrings(d.DisallowedTools),
-		MaxTurns: d.MaxTurns, Background: d.Background, ReadOnly: true}
+		Tools: tools, DisallowedTools: cloneStrings(d.DisallowedTools),
+		MaxTurns: d.MaxTurns, Background: d.Background, ReadOnly: readOnly, Isolation: d.Isolation}
 }
 
 func cloneStrings(values []string) []string {
@@ -150,13 +167,13 @@ func ParseDefinition(data []byte) (Definition, error) {
 			return result, errors.New("frontmatter field name must be a string")
 		}
 		switch key.Value {
-		case "name", "description", "model", "tools", "disallowedTools", "maxTurns", "background":
-		case "isolation", "permissionMode":
-			return result, errors.New("isolation and permissionMode are unsupported in read-only M09-D; workspace and write capabilities require M09-F")
+		case "name", "description", "model", "tools", "disallowedTools", "maxTurns", "background", "isolation":
+		case "permissionMode":
+			return result, errors.New("permissionMode is unsupported; role definitions cannot widen run permissions")
 		case "team_name":
 			return result, errors.New("team_name is unsupported in M09-D; team coordination requires M09-E")
 		default:
-			return result, errors.New("unsupported frontmatter field (only name, description, model, tools, disallowedTools, maxTurns and background are supported)")
+			return result, errors.New("unsupported frontmatter field")
 		}
 		if _, ok := fields[key.Value]; ok {
 			return result, errors.New("duplicate frontmatter field")
@@ -192,6 +209,12 @@ func ParseDefinition(data []byte) (Definition, error) {
 	}
 	if result.Model == "" || strings.EqualFold(result.Model, "inherit") {
 		result.Model = "inherit"
+	}
+	if result.Isolation, err = stringField("isolation"); err != nil {
+		return Definition{}, err
+	}
+	if result.Isolation != "" && result.Isolation != "none" && result.Isolation != "worktree" {
+		return Definition{}, errors.New("isolation must be none or worktree")
 	}
 	if len(result.Model) > MaxDescriptionBytes || strings.IndexFunc(result.Model, unicode.IsSpace) >= 0 || hasControl(result.Model) {
 		return Definition{}, errors.New("model must be a name of at most 256 bytes without whitespace or controls")

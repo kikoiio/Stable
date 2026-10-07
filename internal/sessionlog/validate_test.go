@@ -16,6 +16,40 @@ func startRun(t *testing.T, root, sessionID, runID string) {
 	}
 }
 
+func TestCoordinatorModeEventPersistsSessionSetting(t *testing.T) {
+	root := t.TempDir()
+	session, err := Create(root, "coordinator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, enabled := range []bool{true, false} {
+		if _, err := Append(root, session.ID, EventCoordinatorMode, CoordinatorMode{Enabled: enabled}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	transcript, err := Replay(root, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var modes []bool
+	for _, event := range transcript.Events {
+		if event.Type != EventCoordinatorMode {
+			continue
+		}
+		var mode CoordinatorMode
+		if err := decodeData(event.Data, &mode); err != nil {
+			t.Fatal(err)
+		}
+		modes = append(modes, mode.Enabled)
+	}
+	if len(modes) != 2 || !modes[0] || modes[1] {
+		t.Fatalf("coordinator mode event history=%v", modes)
+	}
+	if _, err := Append(root, session.ID, EventCoordinatorMode, map[string]any{"enabled": true, "forged": true}); err == nil {
+		t.Fatal("unknown coordinator mode event field accepted")
+	}
+}
+
 func addRunEvent(t *testing.T, root, sessionID, runID, eventID string, runSeq uint64) Event {
 	t.Helper()
 	e, err := Append(root, sessionID, EventRunEvent, RunEvent{

@@ -106,6 +106,8 @@ func (l DelegationLimits) narrowed(request DelegationLimits) DelegationLimits {
 }
 
 type ParentRun struct {
+	TeamTurn         *TeamTurnIdentity
+	TeamLifecycle    *TeamRunLifecycle
 	RoleInstruction  string
 	ToolCallID       string
 	RunID            string
@@ -136,14 +138,36 @@ type TaskSubmitter interface {
 	SubmitTask(context.Context, ParentRun, DelegationTask) (*TaskHandle, error)
 }
 
+// TaskAdmission identifies a tentative reservation, not an accepted task.
+// The service must not announce success until SubmitTaskCommitted returns.
+type TaskAdmission struct {
+	BatchID, TaskID string
+	ChildRunID      string
+}
+
+// TeamRunLifecycle writes durable child-run attribution before a provider can
+// execute and records the child outcome before the accepted team turn closes.
+// It is present only on service-created team turns; model input cannot set it.
+type TeamRunLifecycle struct {
+	Started  func(ChildRunInput) error
+	Finished func(ChildRunInput, ChildRunResult) error
+}
+
+type CommittedTaskSubmitter interface {
+	SubmitTaskCommitted(context.Context, ParentRun, DelegationTask, func(TaskAdmission) error) (*TaskHandle, error)
+	CapacityChanged() <-chan struct{}
+}
+
 var (
 	ErrDelegationQueueFull = errors.New("delegation queue is full")
 	ErrDelegationClosed    = errors.New("delegation service is shutting down")
 )
 
 type ChildRunInput struct {
+	TeamTurn         *TeamTurnIdentity
 	RoleInstruction  string
 	ParentRunID      string
+	BatchID          string
 	ChildRunID       string
 	Work             WorkRef
 	Task             DelegationTask
@@ -181,17 +205,18 @@ type delegationWork struct {
 // PoolDelegator is a service-scoped bounded FIFO scheduler. Its queue is
 // shared by all parent session runs using this instance.
 type PoolDelegator struct {
-	limits     DelegationLimits
-	runner     ChildRunner
-	reporter   ProgressReporter
-	queue      chan delegationWork
-	queueSlots chan struct{}
-	newID      func() (string, error)
-	life       context.Context
-	cancel     context.CancelFunc
-	submitMu   sync.Mutex
-	closed     bool
-	closeOnce  sync.Once
+	limits          DelegationLimits
+	runner          ChildRunner
+	reporter        ProgressReporter
+	queue           chan delegationWork
+	queueSlots      chan struct{}
+	capacityChanged chan struct{}
+	newID           func() (string, error)
+	life            context.Context
+	cancel          context.CancelFunc
+	submitMu        sync.Mutex
+	closed          bool
+	closeOnce       sync.Once
 }
 
 func NewPoolDelegator(limits DelegationLimits, runner ChildRunner, reporter ProgressReporter) (*PoolDelegator, error) {
@@ -205,9 +230,10 @@ func NewPoolDelegator(limits DelegationLimits, runner ChildRunner, reporter Prog
 	life, cancel := context.WithCancel(context.Background())
 	d := &PoolDelegator{
 		limits: limits, runner: runner, reporter: reporter,
-		queue:      make(chan delegationWork, limits.QueueCapacity),
-		queueSlots: make(chan struct{}, limits.QueueCapacity),
-		newID:      randomDelegationID, life: life, cancel: cancel,
+		queue:           make(chan delegationWork, limits.QueueCapacity),
+		queueSlots:      make(chan struct{}, limits.QueueCapacity),
+		capacityChanged: make(chan struct{}, 1),
+		newID:           randomDelegationID, life: life, cancel: cancel,
 	}
 	for i := 0; i < limits.Workers; i++ {
 		go d.worker()
@@ -237,6 +263,9 @@ func validateDelegationBatch(parent ParentRun, tasks []DelegationTask, maxBytes 
 }
 
 func validateDelegationParent(parent ParentRun, allowGoal bool) error {
+	if parent.TeamTurn != nil && parent.TeamTurn.Validate() != nil {
+		return errors.New("delegation team turn identity is invalid")
+	}
 	if parent.RunID == "" || parent.Work.SessionID == "" {
 		return errors.New("delegation requires a session work run")
 	}
@@ -328,12 +357,22 @@ func (d *PoolDelegator) RunTask(ctx context.Context, parent ParentRun, task Dele
 // A reservation keeps other producers from taking its slot while queued is
 // persisted. No runner can observe the work before persistence succeeds.
 func (d *PoolDelegator) SubmitTask(ctx context.Context, parent ParentRun, task DelegationTask) (*TaskHandle, error) {
+	return d.SubmitTaskCommitted(ctx, parent, task, nil)
+}
+
+// SubmitTaskCommitted reserves a real queue slot before committing service
+// facts, then persists queued and exposes the work to a worker. The callback
+// runs synchronously under the submission lock and must not call this pool.
+// Callback, cancellation or queued-persistence failure releases the tentative
+// slot without starting a provider; caller owns durable abort/terminal facts.
+func (d *PoolDelegator) SubmitTaskCommitted(ctx context.Context, parent ParentRun, task DelegationTask, commit func(TaskAdmission) error) (*TaskHandle, error) {
 	if d == nil {
 		return nil, errors.New("delegator is nil")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	parent.TeamTurn = cloneTeamTurnIdentity(parent.TeamTurn)
 	if err := validateDelegationParent(parent, true); err != nil {
 		return nil, err
 	}
@@ -351,7 +390,7 @@ func (d *PoolDelegator) SubmitTask(ctx context.Context, parent ParentRun, task D
 	accepted := false
 	defer func() {
 		if !accepted {
-			<-d.queueSlots
+			d.releaseQueueSlot()
 		}
 	}()
 	d.submitMu.Lock()
@@ -366,14 +405,55 @@ func (d *PoolDelegator) SubmitTask(ctx context.Context, parent ParentRun, task D
 	if err != nil {
 		return nil, fmt.Errorf("create delegation batch id: %w", err)
 	}
+	childRunID := ""
+	if parent.TeamTurn != nil {
+		childRunID, err = d.newID()
+		if err != nil {
+			return nil, fmt.Errorf("create child run ID: %w", err)
+		}
+	}
+	if commit != nil {
+		if err := commit(TaskAdmission{BatchID: batchID, TaskID: task.ID, ChildRunID: childRunID}); err != nil {
+			return nil, fmt.Errorf("commit delegation admission: %w", err)
+		}
+		if d.life.Err() != nil {
+			return nil, ErrDelegationClosed
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	if err := d.publish(parent.RunID, parent.Work.SessionID, DelegationEvent{BatchID: batchID, TaskID: task.ID, TaskName: task.Name, Status: DelegationQueued}); err != nil {
 		return nil, fmt.Errorf("publish queued event for %q: %w", task.ID, err)
 	}
 	workCtx, cancel := context.WithCancel(ctx)
 	results := make(chan DelegationResult, 1)
-	d.queue <- delegationWork{parent: parent, parentContext: workCtx, cancel: cancel, batchID: batchID, task: task, result: results}
+	d.queue <- delegationWork{parent: parent, parentContext: workCtx, cancel: cancel, batchID: batchID, task: task, childRunID: childRunID, result: results}
 	accepted = true
 	return &TaskHandle{BatchID: batchID, TaskID: task.ID, Results: results, Cancel: cancel}, nil
+}
+
+// CapacityChanged is one coalescing signal for the service's single team
+// scheduler. It reports released reservations/dequeued work and shutdown;
+// callers still use nonblocking admission and keep their own fair ready set.
+// It is deliberately not a per-member subscription or an unbounded queue.
+func (d *PoolDelegator) CapacityChanged() <-chan struct{} {
+	if d == nil {
+		return nil
+	}
+	return d.capacityChanged
+}
+
+func (d *PoolDelegator) notifyCapacity() {
+	select {
+	case d.capacityChanged <- struct{}{}:
+	default:
+	}
+}
+
+func (d *PoolDelegator) releaseQueueSlot() {
+	<-d.queueSlots
+	d.notifyCapacity()
 }
 
 func (d *PoolDelegator) runTasks(ctx context.Context, parent ParentRun, tasks []DelegationTask) ([]DelegationResult, error) {
@@ -415,13 +495,13 @@ enqueueLoop:
 		d.submitMu.Lock()
 		if d.closed || d.life.Err() != nil {
 			d.submitMu.Unlock()
-			<-d.queueSlots
+			d.releaseQueueSlot()
 			fillTerminal(i, DelegationInterrupted, ErrDelegationClosed.Error(), batchID)
 			break
 		}
 		if err := ctx.Err(); err != nil {
 			d.submitMu.Unlock()
-			<-d.queueSlots
+			d.releaseQueueSlot()
 			fillTerminal(i, DelegationCanceled, err.Error(), batchID)
 			break
 		}
@@ -462,7 +542,7 @@ func (d *PoolDelegator) worker() {
 	for {
 		select {
 		case work := <-d.queue:
-			<-d.queueSlots
+			d.releaseQueueSlot()
 			d.finishWork(work, d.runWork(work))
 		case <-d.life.Done():
 			// Producers may be persisting a queued event when life is canceled.
@@ -472,7 +552,7 @@ func (d *PoolDelegator) worker() {
 			for {
 				select {
 				case work := <-d.queue:
-					<-d.queueSlots
+					d.releaseQueueSlot()
 					pending = append(pending, work)
 				default:
 					d.submitMu.Unlock()
@@ -488,17 +568,48 @@ func (d *PoolDelegator) worker() {
 
 func (d *PoolDelegator) runWork(work delegationWork) DelegationResult {
 	ctx := work.parentContext
+	budget := d.limits.narrowed(work.parent.Budget)
+	if work.childRunID == "" {
+		var err error
+		work.childRunID, err = d.newID()
+		if err != nil {
+			return d.terminal(work, DelegationFailed, "", "could not create child run ID")
+		}
+	}
+	input, inputErr := d.childInput(work, budget)
+	if inputErr != nil {
+		return d.terminal(work, DelegationFailed, "", "child run authority is invalid")
+	}
+	if work.parent.TeamLifecycle != nil && work.parent.TeamLifecycle.Started != nil {
+		if err := work.parent.TeamLifecycle.Started(input); err != nil {
+			return d.terminal(work, DelegationFailed, "", "could not persist team child run start")
+		}
+	}
+	finishTeamRun := func(result ChildRunResult) DelegationResult {
+		if !result.Status.IsTerminal() {
+			if result.Error != "" {
+				result.Status = DelegationFailed
+			} else {
+				result.Status = DelegationSucceeded
+			}
+		}
+		if work.parent.TeamLifecycle != nil && work.parent.TeamLifecycle.Finished != nil {
+			if err := work.parent.TeamLifecycle.Finished(input, result); err != nil {
+				return d.terminal(work, DelegationFailed, result.Summary, "could not persist team child run outcome")
+			}
+		}
+		return d.terminal(work, result.Status, result.Summary, result.Error)
+	}
 	if d.life.Err() != nil {
-		return d.terminal(work, DelegationInterrupted, "", "delegation service interrupted")
+		return finishTeamRun(ChildRunResult{Status: DelegationInterrupted, Error: "delegation service interrupted"})
 	}
 	if err := ctx.Err(); err != nil {
-		return d.terminal(work, DelegationCanceled, "", err.Error())
+		return finishTeamRun(ChildRunResult{Status: DelegationCanceled, Error: err.Error()})
 	}
-	budget := d.limits.narrowed(work.parent.Budget)
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return d.terminal(work, DelegationCanceled, "", context.DeadlineExceeded.Error())
+			return finishTeamRun(ChildRunResult{Status: DelegationCanceled, Error: context.DeadlineExceeded.Error()})
 		}
 		if remaining < budget.MaxDuration {
 			budget.MaxDuration = remaining
@@ -507,7 +618,7 @@ func (d *PoolDelegator) runWork(work delegationWork) DelegationResult {
 	if !work.parent.Deadline.IsZero() {
 		remaining := time.Until(work.parent.Deadline)
 		if remaining <= 0 {
-			return d.terminal(work, DelegationFailed, "", "parent run budget exhausted")
+			return finishTeamRun(ChildRunResult{Status: DelegationFailed, Error: "parent run budget exhausted"})
 		}
 		if remaining < budget.MaxDuration {
 			budget.MaxDuration = remaining
@@ -518,34 +629,7 @@ func (d *PoolDelegator) runWork(work delegationWork) DelegationResult {
 	defer cancel()
 	defer stopLife()
 	if err := d.publish(work.parent.RunID, work.parent.Work.SessionID, DelegationEvent{BatchID: work.batchID, TaskID: work.task.ID, TaskName: work.task.Name, Status: DelegationRunning}); err != nil {
-		return d.terminal(work, DelegationFailed, "", "could not record child start")
-	}
-	childID, err := d.newID()
-	if err != nil {
-		return d.terminal(work, DelegationFailed, "", "could not create child run ID")
-	}
-	work.childRunID = childID
-	var authority map[string]json.RawMessage
-	if json.Unmarshal(work.parent.PermissionBounds, &authority) != nil {
-		return d.terminal(work, DelegationFailed, "", "parent permission bounds are invalid")
-	}
-	var parentAuthorityRunID string
-	if json.Unmarshal(authority["run_id"], &parentAuthorityRunID) != nil || parentAuthorityRunID != work.parent.RunID {
-		return d.terminal(work, DelegationFailed, "", "parent permission bounds are invalid")
-	}
-	authority["run_id"], _ = json.Marshal(childID)
-	childBounds, err := json.Marshal(authority)
-	if err != nil {
-		return d.terminal(work, DelegationFailed, "", "could not derive child permission bounds")
-	}
-	input := ChildRunInput{
-		ParentRunID: work.parent.RunID, ChildRunID: childID, Task: work.task, RoleInstruction: work.parent.RoleInstruction,
-		Work:        work.parent.Work,
-		ProjectRoot: work.parent.ProjectRoot, Provider: work.parent.Provider,
-		PermissionBounds: childBounds,
-		ProviderName:     work.parent.ProviderName, Model: work.parent.Model, Budget: budget,
-		ToolSchemas:     append([]llm.ToolSchema(nil), work.parent.ToolSchemas...),
-		ExecutorFactory: work.parent.ExecutorFactory,
+		return finishTeamRun(ChildRunResult{Status: DelegationFailed, Error: "could not record child start"})
 	}
 	var progressMu sync.Mutex
 	var progressErr error
@@ -567,30 +651,49 @@ func (d *PoolDelegator) runWork(work delegationWork) DelegationResult {
 	}
 	child := d.runner.Run(childCtx, input)
 	progressMu.Lock()
-	err = progressErr
+	progressFailed := progressErr != nil
 	progressMu.Unlock()
-	if err != nil {
-		return d.terminal(work, DelegationFailed, "", "could not record child progress")
+	if progressFailed {
+		child.Status, child.Error = DelegationFailed, "could not record child progress"
 	}
-	if d.life.Err() != nil {
-		return d.terminal(work, DelegationInterrupted, child.Summary, "delegation service interrupted")
+	if d.life.Err() != nil && !child.Status.IsTerminal() {
+		child.Status, child.Error = DelegationInterrupted, "delegation service interrupted"
 	}
 	if childCtx.Err() != nil && (child.Status == "" || child.Status == DelegationRunning) {
 		status := DelegationCanceled
 		if errors.Is(childCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 			status = DelegationFailed
 		}
-		return d.terminal(work, status, child.Summary, childCtx.Err().Error())
+		child.Status, child.Error = status, childCtx.Err().Error()
 	}
-	status := child.Status
-	if !status.IsTerminal() {
-		if child.Error != "" {
-			status = DelegationFailed
-		} else {
-			status = DelegationSucceeded
-		}
+	child.Summary = truncateUTF8(child.Summary, budget.MaxSummaryBytes)
+	return finishTeamRun(child)
+}
+
+func (d *PoolDelegator) childInput(work delegationWork, budget DelegationLimits) (ChildRunInput, error) {
+	childID := work.childRunID
+	var err error
+	var authority map[string]json.RawMessage
+	if json.Unmarshal(work.parent.PermissionBounds, &authority) != nil {
+		return ChildRunInput{}, errors.New("parent permission bounds are invalid")
 	}
-	return d.terminal(work, status, truncateUTF8(child.Summary, budget.MaxSummaryBytes), child.Error)
+	var parentAuthorityRunID string
+	if json.Unmarshal(authority["run_id"], &parentAuthorityRunID) != nil || parentAuthorityRunID != work.parent.RunID {
+		return ChildRunInput{}, errors.New("parent permission bounds are invalid")
+	}
+	authority["run_id"], _ = json.Marshal(childID)
+	childBounds, err := json.Marshal(authority)
+	if err != nil {
+		return ChildRunInput{}, err
+	}
+	return ChildRunInput{
+		TeamTurn: cloneTeamTurnIdentity(work.parent.TeamTurn), ParentRunID: work.parent.RunID,
+		BatchID: work.batchID, ChildRunID: childID, Task: work.task, RoleInstruction: work.parent.RoleInstruction,
+		Work: work.parent.Work, ProjectRoot: work.parent.ProjectRoot, Provider: work.parent.Provider,
+		PermissionBounds: childBounds, ProviderName: work.parent.ProviderName, Model: work.parent.Model,
+		Budget: budget, ToolSchemas: append([]llm.ToolSchema(nil), work.parent.ToolSchemas...),
+		ExecutorFactory: work.parent.ExecutorFactory,
+	}, nil
 }
 
 func (d *PoolDelegator) terminal(work delegationWork, status DelegationStatus, summary, errText string) DelegationResult {
@@ -631,6 +734,7 @@ func truncateUTF8(text string, maxBytes int) string {
 
 var _ Delegator = (*PoolDelegator)(nil)
 var _ TaskSubmitter = (*PoolDelegator)(nil)
+var _ CommittedTaskSubmitter = (*PoolDelegator)(nil)
 
 func (d *PoolDelegator) Close() {
 	if d == nil {
@@ -638,6 +742,7 @@ func (d *PoolDelegator) Close() {
 	}
 	d.closeOnce.Do(func() {
 		d.cancel()
+		d.notifyCapacity()
 		d.submitMu.Lock()
 		d.closed = true
 		d.submitMu.Unlock()

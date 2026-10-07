@@ -244,7 +244,11 @@ func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest,
 			completedCalls = map[string]bool{}
 			emittedContent := false
 			usageSeen := false
-			events, errs := r.provider.Stream(ctx, llm.Request{Model: request.Model, Messages: messages, Tools: r.options.ToolSchemas})
+			toolSchemas := r.options.ToolSchemas
+			if request.ToolSchemas != nil {
+				toolSchemas = request.ToolSchemas
+			}
+			events, errs := r.provider.Stream(ctx, llm.Request{Model: request.Model, Messages: messages, Tools: toolSchemas})
 			for events != nil || errs != nil {
 				select {
 				case <-ctx.Done():

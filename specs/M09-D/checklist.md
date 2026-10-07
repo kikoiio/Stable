@@ -1,6 +1,6 @@
 # M09-D Agent 定义与后台任务 Checklist
 
-> 状态：四份文档已获用户批准，正在实现（2026-10-07）。验收项取得实际证据后勾选。
+> 状态：实现已提交，最终 SHA 云端 Go、package、E2E 验证通过；功能 AC 仍待逐项核对（2026-10-07）。
 
 ## 功能验收
 
@@ -27,7 +27,8 @@
 
 - [ ] fake 场景使用临时目录，未读取真实用户 definitions 或调用真实 provider/外网。
 - [ ] 格式化、diff和协议文档检查通过，无未审阅生成文件。
-- [ ] 重型构建、Go 全量、E2E 与 package acceptance 在已授权 GitHub Actions 执行；记录代码 SHA、workflow/run 链接、每个 job 和失败场景。未完成/失败项不打勾。
-- [ ] README 记载只读角色、后台生命周期、查看/取消入口与重启不重跑；M09 总范围状态同步更新，E/F 仍单独验收。
+- [x] 重型构建、Go 全量、E2E 与 package acceptance 在已授权 GitHub Actions 执行；精确 SHA、workflow/run/job 记录如下。所有列出的 job 均成功。
+- [x] README 记载只读角色、后台生命周期、查看/取消入口与重启不重跑；M09 总范围状态已更新，E/F 仍单独验收。
 
-实现与 fake 测试已提交开发，格式化和 diff 检查通过；完整云端验证尚待运行，暂不勾选验收项。
+- 代码提交 `ccc3fbc7a606f29c07f3d2156fea6736f892d641`：GitHub Actions [Go run 37590568076](https://github.com/kikoiio/Stable/actions/runs/37590568076) 的 `build-and-test`（依赖校验、构建、`go test ./...`）与 `test-package` 均通过。
+- 同一 SHA 的 GitHub Actions [E2E run 37590568082](https://github.com/kikoiio/Stable/actions/runs/37590568082)：`unit`、`cases`、`e2e-m03`、`e2e-m04`、`e2e-sessions` 与 `e2e-core`（`make e2e`）全部通过。

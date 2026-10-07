@@ -23,17 +23,21 @@ type WorkRef struct {
 }
 
 type ExecutionRequest struct {
-	RunID            string          `json:"run_id"`
-	Work             WorkRef         `json:"work"`
-	Intent           string          `json:"intent"`
-	Messages         []llm.Message   `json:"messages"`
-	ProviderName     string          `json:"provider_name"`
-	Model            string          `json:"model"`
-	BaselineVersion  string          `json:"baseline_version,omitempty"`
-	AllowedScope     []string        `json:"allowed_scope,omitempty"`
-	ResourceBounds   json.RawMessage `json:"resource_bounds,omitempty"`
-	PermissionBounds json.RawMessage `json:"permission_bounds,omitempty"`
-	RunDeadline      time.Time       `json:"-"`
+	RunID            string            `json:"run_id"`
+	Work             WorkRef           `json:"work"`
+	TeamTurn         *TeamTurnIdentity `json:"-"`
+	TeamUser         bool              `json:"-"` // trusted local session action; never accepted from wire/model input
+	TeamCoordinator  bool              `json:"-"` // trusted per-run static team-only tool mode
+	ToolSchemas      []llm.ToolSchema  `json:"-"` // trusted per-run tool allowlist; nil uses runner defaults
+	Intent           string            `json:"intent"`
+	Messages         []llm.Message     `json:"messages"`
+	ProviderName     string            `json:"provider_name"`
+	Model            string            `json:"model"`
+	BaselineVersion  string            `json:"baseline_version,omitempty"`
+	AllowedScope     []string          `json:"allowed_scope,omitempty"`
+	ResourceBounds   json.RawMessage   `json:"resource_bounds,omitempty"`
+	PermissionBounds json.RawMessage   `json:"permission_bounds,omitempty"`
+	RunDeadline      time.Time         `json:"-"`
 }
 
 type EventKind string

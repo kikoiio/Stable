@@ -1,0 +1,118 @@
+package conversation
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+
+	"stable/internal/agent"
+	"stable/internal/permission"
+	"stable/internal/sessionlog"
+	"stable/internal/workspace"
+)
+
+func (s *Service) workspaceService(formalRoot string) (*workspace.LifecycleService, error) {
+	if s.deps.WorkspaceStateRoot == "" {
+		return nil, workspace.ErrUnavailable
+	}
+	root, err := filepath.EvalSymlinks(formalRoot)
+	if err != nil {
+		return nil, err
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	s.workspaceMu.Lock()
+	defer s.workspaceMu.Unlock()
+	if manager := s.workspaces[root]; manager != nil {
+		return manager, nil
+	}
+	digest := sha256.Sum256([]byte(filepath.Clean(root)))
+	projectID := "p" + hex.EncodeToString(digest[:16])
+	layout, err := workspace.NewLayout(s.deps.WorkspaceStateRoot, root, projectID)
+	if err != nil {
+		return nil, err
+	}
+	manager, err := workspace.NewService(layout, workspace.DefaultLimits(), workspace.ServiceDependencies{})
+	if err != nil {
+		return nil, err
+	}
+	s.workspaces[root] = manager
+	return manager, nil
+}
+
+func (s *Service) workspaceScope(ctx context.Context, msg ClientMsg) (string, workspace.Scope, error) {
+	work := agent.WorkRef{Kind: agent.WorkKind(msg.WorkKind), SessionID: msg.SessionID, GoalID: msg.GoalID, WorkItemID: msg.WorkItemID}
+	if work.Kind == "" {
+		work.Kind = agent.WorkSession
+	}
+	_, trusted, err := s.scopeForWork(ctx, currentProjectRoot(s.deps.ProjectRoot), work)
+	if err != nil {
+		return "", workspace.Scope{}, workspace.ErrOwnership
+	}
+	// scopeForWork's first result is the session log root; the validated scope
+	// carries the exact formal root bound to the persisted session/Goal.
+	projectRoot := trusted.ProjectRoot
+	digest := sha256.Sum256([]byte(filepath.Clean(projectRoot)))
+	scope := workspace.Scope{ProjectID: "p" + hex.EncodeToString(digest[:16]), SessionID: msg.SessionID, Work: work}
+	if err := scope.Validate(); err != nil {
+		return "", workspace.Scope{}, err
+	}
+	return projectRoot, scope, nil
+}
+
+func (s *Service) handleWorkspaceRequest(ctx context.Context, msg ClientMsg) (ServerMsg, error) {
+	if err := ctx.Err(); err != nil {
+		return ServerMsg{}, err
+	}
+	projectRoot, scope, err := s.workspaceScope(ctx, msg)
+	if err != nil {
+		return ServerMsg{}, err
+	}
+	manager, err := s.workspaceService(projectRoot)
+	if err != nil {
+		return ServerMsg{}, err
+	}
+	var snapshot workspace.Snapshot
+	switch msg.Op {
+	case "worktree_create":
+		request, requestErr := s.activeRunRequest(msg.SessionID, msg.RunID)
+		if requestErr != nil || request.Work != scope.Work {
+			return ServerMsg{}, workspace.ErrOwnership
+		}
+		run, found, runErr := sessionlog.FindRunStart(currentProjectRoot(s.deps.ProjectRoot), msg.SessionID, msg.RunID)
+		if runErr != nil || !found || !workRefMatchesRun(request.Work, run) || run.TeamID != "" || run.AgentTaskID != "" || run.OriginRunID != "" || request.TeamTurn != nil || request.TeamUser {
+			return ServerMsg{}, workspace.ErrOwnership
+		}
+		var authority permission.Authority
+		if json.Unmarshal(request.PermissionBounds, &authority) != nil || authority.RunID != request.RunID || authority.SessionID != request.Work.SessionID || authority.GoalID != request.Work.GoalID || authority.WorkItemID != request.Work.WorkItemID {
+			return ServerMsg{}, workspace.ErrOwnership
+		}
+		scope.Authority = authority
+		scope.OriginRunID = request.RunID
+		snapshot, err = manager.Create(ctx, scope, msg.Text)
+	case "worktree_list":
+		var snapshots []workspace.Snapshot
+		snapshots, err = manager.List(ctx, scope, msg.AfterSeq, msg.Limit)
+		if err != nil {
+			return ServerMsg{}, err
+		}
+		return ServerMsg{Type: "worktree_list", Worktrees: snapshots, Cursor: msg.AfterSeq + uint64(len(snapshots))}, nil
+	case "worktree_get":
+		snapshot, err = manager.Get(ctx, scope, msg.ID)
+	case "worktree_keep":
+		snapshot, err = manager.Keep(ctx, scope, msg.ID)
+	case "worktree_remove":
+		snapshot, err = manager.RemoveClean(ctx, scope, msg.ID)
+	default:
+		return ServerMsg{}, fmt.Errorf("unsupported worktree operation")
+	}
+	if err != nil {
+		return ServerMsg{}, err
+	}
+	return ServerMsg{Type: "worktree", Worktree: &snapshot}, nil
+}

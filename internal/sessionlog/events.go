@@ -92,8 +92,13 @@ const (
 	EventHookReload            = "hook_reload"
 	EventMCPReload             = "mcp_reload"
 	EventMCPServer             = "mcp_server"
+	EventCoordinatorMode       = "coordinator_mode"
 	EventAgentTaskNotification = "agent_task_notification"
 )
+
+type CoordinatorMode struct {
+	Enabled bool `json:"enabled"`
+}
 
 // SnapshotRef records a candidate file snapshot owned by this session.
 type SnapshotRef struct {
@@ -305,17 +310,22 @@ type MCPServer struct {
 }
 
 type RunStarted struct {
-	RunID        string `json:"run_id"`
-	WorkKind     string `json:"work_kind"`
-	GoalID       string `json:"goal_id,omitempty"`
-	WorkItemID   string `json:"work_item_id,omitempty"`
-	Intent       string `json:"intent"`
-	ForkSkill    string `json:"fork_skill,omitempty"`
-	ForkEntry    string `json:"fork_entry,omitempty"`
-	AgentTaskID  string `json:"agent_task_id,omitempty"`
-	AgentName    string `json:"agent_name,omitempty"`
-	OriginRunID  string `json:"origin_run_id,omitempty"`
-	OriginCallID string `json:"origin_call_id,omitempty"`
+	TeamID              string `json:"team_id,omitempty"`
+	TeamMemberID        string `json:"team_member_id,omitempty"`
+	TeamTurnID          string `json:"team_turn_id,omitempty"`
+	RunID               string `json:"run_id"`
+	WorkKind            string `json:"work_kind"`
+	GoalID              string `json:"goal_id,omitempty"`
+	WorkItemID          string `json:"work_item_id,omitempty"`
+	Intent              string `json:"intent"`
+	ForkSkill           string `json:"fork_skill,omitempty"`
+	ForkEntry           string `json:"fork_entry,omitempty"`
+	AgentTaskID         string `json:"agent_task_id,omitempty"`
+	AgentName           string `json:"agent_name,omitempty"`
+	WorkspaceID         string `json:"workspace_id,omitempty"`
+	WorkspaceGeneration uint64 `json:"workspace_generation,omitempty"`
+	OriginRunID         string `json:"origin_run_id,omitempty"`
+	OriginCallID        string `json:"origin_call_id,omitempty"`
 }
 
 // AgentTaskNotification records a terminal summary handed to a later parent

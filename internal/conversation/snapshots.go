@@ -130,7 +130,7 @@ func (s *Service) rewindSnapshot(ctx context.Context, c ClientMsg) (sessionlog.R
 	if snap.SessionID != c.SessionID {
 		return sessionlog.RewindRecord{}, errors.New("snapshot belongs to a different session")
 	}
-	_, digest, err := candidate.BuildManifest(cand.CandidateRoot)
+	_, digest, err := candidate.BuildManifestForPolicy(cand.CandidateRoot, cand.ManifestPolicy)
 	if err != nil {
 		return sessionlog.RewindRecord{}, err
 	}
@@ -175,11 +175,11 @@ func (s *Service) rewindSnapshot(ctx context.Context, c ClientMsg) (sessionlog.R
 	}
 	// A crash from here on leaves the journal for startup reconciliation;
 	// the synchronous path reports the same transitions as they happen.
-	tx := candidate.DirectoryTransaction{ID: journal.ID, Kind: candidate.TransactionRewind, CurrentRoot: cand.CandidateRoot, IncomingRoot: staging, RollbackRoot: journal.RollbackPath, ExpectedDigest: journal.ExpectedDigest, TargetDigest: journal.TargetDigest, Mode: journal.TransactionMode}
+	tx := candidate.DirectoryTransaction{ID: journal.ID, Kind: candidate.TransactionRewind, ManifestPolicy: cand.ManifestPolicy, CurrentRoot: cand.CandidateRoot, IncomingRoot: staging, RollbackRoot: journal.RollbackPath, ExpectedDigest: journal.ExpectedDigest, TargetDigest: journal.TargetDigest, Mode: journal.TransactionMode}
 	if err = candidate.NewTransactionCoordinator().Apply(ctx, tx, rewindJournalAdapter{store: s.deps.Store}); err != nil {
 		return fail(fmt.Errorf("exchange candidate with staged snapshot: %w", err))
 	}
-	if _, after, err := candidate.BuildManifest(cand.CandidateRoot); err != nil {
+	if _, after, err := candidate.BuildManifestForPolicy(cand.CandidateRoot, cand.ManifestPolicy); err != nil {
 		return fail(err)
 	} else if after != snap.Digest {
 		return fail(errors.New("rewound candidate does not match the snapshot digest"))

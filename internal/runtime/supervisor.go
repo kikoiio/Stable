@@ -311,6 +311,12 @@ func runtimeToolSchemasWithDelegation(delegator agent.Delegator, callers ...exec
 	if delegator != nil {
 		schemas = append(schemas, execution.DelegationToolSchemas()...)
 		schemas = append(schemas, execution.AgentTaskToolSchemas()...)
+		for _, schema := range execution.TeamToolSchemas() {
+			name, _ := schema["name"].(string)
+			description, _ := schema["description"].(string)
+			input, _ := schema["input_schema"].(map[string]any)
+			schemas = append(schemas, llm.ToolSchema{Name: name, Description: description, InputSchema: input})
+		}
 	}
 	if len(callers) > 0 && callers[0] != nil {
 		if manager, ok := callers[0].(interface{ Configured() bool }); ok && manager.Configured() {
@@ -396,6 +402,7 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sa
 	}
 	agentCatalog := agentcatalog.New(userAgentsDir, filepath.Join(p.Share, ".stable", "agents"))
 	var delegator *agent.PoolDelegator
+	teamToolHost := &agent.TeamToolHost{}
 	// The interaction sinks need the conversation service, which only exists
 	// once Serve returns, so they are built unbound here and bound right
 	// after Serve — no run can reach a tool call before that.
@@ -437,7 +444,7 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sa
 			QuestionSink:       askSink,
 			TodoProvider:       todoProvider,
 			Provider:           streamingProvider,
-		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate), execution.WithMCPCaller(mcpManager), execution.WithDelegator(delegator, streamingProvider), execution.WithAgentTaskService(agentTasks))
+		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate), execution.WithMCPCaller(mcpManager), execution.WithDelegator(delegator, streamingProvider), execution.WithAgentTaskService(agentTasks), execution.WithTeamToolHost(teamToolHost))
 		executorFactory = baseFactory
 		forkExecutorFactory = execution.ReadOnlyExecutorFactory(baseFactory)
 		toolSchemas = runtimeToolSchemasWithDelegation(delegator, mcpManager)
@@ -451,7 +458,7 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sa
 	}
 	permissionService := &permission.PermissionService{Repository: s, NewID: func() string { id, _ := sessionlog.NewID(); return id }}
 	svc, err := conversation.Serve(ctx, conversation.Deps{
-		Store: s, Provider: provider, ChatProvider: chatProvider, Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: address, ProjectRoot: p.Share, RunRoot: p.Goals, SocketPath: p.ChatSocket,
+		Store: s, Provider: provider, ChatProvider: chatProvider, Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: address, ProjectRoot: p.Share, RunRoot: p.Goals, SocketPath: p.ChatSocket, WorkspaceStateRoot: filepath.Join(p.State, "workspaces"),
 		Agents: agentCatalog, AgentTasks: agentTasks,
 		Delegator: delegator, ForkProvider: forkProvider, ForkExecutorFactory: forkExecutorFactory, ForkToolSchemas: execution.ReadOnlyToolSchemas(),
 		Refresher:           refresher,
@@ -465,6 +472,7 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sa
 	if err != nil {
 		return err
 	}
+	teamToolHost.Bind(svc.ExecuteTeamTool)
 	askSink.Bind(svc)
 	todoProvider.Bind(svc)
 	planSink.Bind(svc)

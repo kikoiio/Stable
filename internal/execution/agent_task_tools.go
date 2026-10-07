@@ -115,7 +115,7 @@ func (e *toolRunExecutor) executeAgentTaskTool(ctx context.Context, call llm.Too
 
 func parseAgentTaskRequest(args map[string]any) (agent.AgentTaskRequest, error) {
 	var request agent.AgentTaskRequest
-	if err := agentTaskFields(args, "agent_name", "instruction", "background", "model", "timeout_ms"); err != nil {
+	if err := agentTaskFields(args, "agent_name", "instruction", "background", "model", "timeout_ms", "isolation"); err != nil {
 		return request, err
 	}
 	var err error
@@ -128,6 +128,12 @@ func parseAgentTaskRequest(args map[string]any) (agent.AgentTaskRequest, error) 
 	}
 	if request.Instruction, err = agentTaskString(args, "instruction", true, 65536); err != nil {
 		return request, err
+	}
+	if request.Isolation, err = agentTaskString(args, "isolation", false, 32); err != nil {
+		return request, err
+	}
+	if request.Isolation != "" && request.Isolation != "none" && request.Isolation != "worktree" {
+		return request, errors.New("isolation must be none or worktree")
 	}
 	if request.Model, err = agentTaskString(args, "model", false, 256); err != nil {
 		return request, err

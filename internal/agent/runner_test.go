@@ -217,6 +217,34 @@ func TestRunnerToolCallEndsAwaitingTools(t *testing.T) {
 	}
 }
 
+func TestRunnerUsesTrustedPerRunToolSchemaOverride(t *testing.T) {
+	var tools []llm.ToolSchema
+	provider := providerFunc(func(_ context.Context, request llm.Request) (<-chan llm.Event, <-chan error) {
+		tools = append([]llm.ToolSchema(nil), request.Tools...)
+		events := make(chan llm.Event, 1)
+		errs := make(chan error)
+		events <- llm.Event{Kind: llm.StreamEnd, StopReason: "completed"}
+		close(events)
+		close(errs)
+		return events, errs
+	})
+	runner := NewRunner(provider, RunnerOptions{MaxRetries: -1, ToolSchemas: []llm.ToolSchema{{Name: "write_file"}, {Name: "read_file"}}})
+	request := sessionRequest("coordinator-tools")
+	request.ToolSchemas = []llm.ToolSchema{{Name: "team_send"}, {Name: "team_task_update"}}
+	handle, err := runner.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range handle.Events {
+	}
+	if outcome := <-handle.Done; outcome.Status != RunCompleted {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	if len(tools) != 2 || tools[0].Name != "team_send" || tools[1].Name != "team_task_update" {
+		t.Fatalf("per-run tool schemas were not applied: %+v", tools)
+	}
+}
+
 func TestRunnerCancelIsIdempotentAndClosesProvider(t *testing.T) {
 	started := make(chan struct{})
 	providerCancelled := make(chan struct{})

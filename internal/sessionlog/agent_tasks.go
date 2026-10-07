@@ -111,7 +111,7 @@ func validAgentIdentity(value string, max int) bool {
 
 func (st *agentTaskState) checkStarted(start RunStarted) error {
 	if start.AgentTaskID == "" {
-		if start.AgentName != "" || start.OriginRunID != "" || start.OriginCallID != "" {
+		if start.AgentName != "" || start.WorkspaceID != "" || start.WorkspaceGeneration != 0 || (start.TeamID == "" && (start.OriginRunID != "" || start.OriginCallID != "")) {
 			return errors.New("agent source fields require agent_task_id")
 		}
 	} else {
@@ -120,6 +120,9 @@ func (st *agentTaskState) checkStarted(start RunStarted) error {
 		}
 		if !validAgentIdentity(start.RunID, 128) {
 			return errors.New("agent task run ID is invalid")
+		}
+		if start.WorkspaceID == "" && start.WorkspaceGeneration != 0 || start.WorkspaceID != "" && (!validAgentIdentity(start.WorkspaceID, 128) || start.WorkspaceGeneration == 0) {
+			return errors.New("agent task workspace identity is invalid")
 		}
 		if start.ForkSkill != "" || start.ForkEntry != "" {
 			return errors.New("agent task run cannot also be a fork skill")
@@ -159,7 +162,7 @@ func (st *agentTaskState) checkStarted(start RunStarted) error {
 	for _, notification := range st.notifications {
 		if notification.DestinationRunID == start.RunID {
 			task := st.tasks[notification.TaskID]
-			if start.AgentTaskID != "" || !sameAgentTaskWork(task.Started, start) {
+			if start.AgentTaskID != "" || start.TeamID != "" || !sameAgentTaskWork(task.Started, start) {
 				return errors.New("agent task notification destination does not own the same work")
 			}
 			for _, prior := range st.notifications {
@@ -332,7 +335,7 @@ func (st *agentTaskState) observe(sessionID string, e Event) error {
 			if start.OriginCallID != "" {
 				st.usedCalls[start.OriginCallID] = start.AgentTaskID
 			}
-		} else {
+		} else if start.TeamID == "" {
 			st.currentParent = start.RunID
 		}
 	case EventRunEvent:

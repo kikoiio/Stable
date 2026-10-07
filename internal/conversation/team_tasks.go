@@ -1,0 +1,175 @@
+package conversation
+
+import (
+	"context"
+
+	"stable/internal/agent"
+	"stable/internal/sessionlog"
+	"stable/internal/teams"
+)
+
+// CreateTeamTask creates one team-local task. Identity, team ID, creator and
+// revision are assigned by the service; only task content is accepted.
+func (s *Service) CreateTeamTask(ctx context.Context, request agent.ExecutionRequest, teamID string, input teams.Task) (teams.Task, error) {
+	root, scope, actor, err := s.teamOperationScope(ctx, request)
+	if err != nil {
+		return teams.Task{}, err
+	}
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return teams.Task{}, err
+	}
+	if _, currentScope, currentActor, scopeErr := s.teamOperationScope(ctx, request); scopeErr != nil || !currentScope.Matches(scope) || currentActor != actor {
+		return teams.Task{}, teams.ErrPermission
+	}
+	team, projection, err := s.teamForOperation(root, scope, teamID, actor)
+	if err != nil {
+		return teams.Task{}, err
+	}
+	graph, err := teamTaskGraph(projection, teamID)
+	if err != nil {
+		return teams.Task{}, err
+	}
+	id, err := sessionlog.NewID()
+	if err != nil {
+		return teams.Task{}, err
+	}
+	input.ID, input.TeamID, input.CreatedBy, input.Revision = id, teamID, "", 0
+	input.Status = teams.TaskPending
+	task, err := graph.Create(input, actor)
+	if err != nil {
+		return teams.Task{}, err
+	}
+	persistedTask := task
+	persistedTask.Status = teams.TaskPending
+	eventID, err := sessionlog.NewID()
+	if err != nil {
+		return teams.Task{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return teams.Task{}, err
+	}
+	_, err = sessionlog.Append(root, scope.SessionID, sessionlog.EventTeam, sessionlog.TeamEvent{ID: eventID, TeamID: teamID, SessionID: scope.SessionID, Kind: sessionlog.TeamTaskCreated, Revision: team.Revision + 1, ActorID: task.CreatedBy, ActorRunID: request.RunID, Task: &persistedTask})
+	return task, err
+}
+
+func (s *Service) GetTeamTask(ctx context.Context, request agent.ExecutionRequest, teamID, taskID string) (teams.Task, error) {
+	root, scope, actor, err := s.teamOperationScope(ctx, request)
+	if err != nil {
+		return teams.Task{}, err
+	}
+	_, projection, err := s.teamForOperation(root, scope, teamID, actor)
+	if err != nil {
+		return teams.Task{}, err
+	}
+	task, ok := projection.Tasks[taskID]
+	if !ok || task.TeamID != teamID {
+		return teams.Task{}, teams.ErrNotFound
+	}
+	graph, err := teamTaskGraph(projection, teamID)
+	if err != nil {
+		return teams.Task{}, err
+	}
+	projected, ok := graph.Get(taskID)
+	if !ok {
+		return teams.Task{}, teams.ErrNotFound
+	}
+	return projected, nil
+}
+
+func (s *Service) ListTeamTasks(ctx context.Context, request agent.ExecutionRequest, teamID string) ([]teams.Task, error) {
+	root, scope, actor, err := s.teamOperationScope(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	_, projection, err := s.teamForOperation(root, scope, teamID, actor)
+	if err != nil {
+		return nil, err
+	}
+	graph, err := teamTaskGraph(projection, teamID)
+	if err != nil {
+		return nil, err
+	}
+	return graph.List(), nil
+}
+
+func (s *Service) UpdateTeamTask(ctx context.Context, request agent.ExecutionRequest, teamID, taskID string, expectedRevision uint64, patch teams.TaskPatch) (teams.Task, error) {
+	root, scope, actor, err := s.teamOperationScope(ctx, request)
+	if err != nil {
+		return teams.Task{}, err
+	}
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return teams.Task{}, err
+	}
+	if _, currentScope, currentActor, scopeErr := s.teamOperationScope(ctx, request); scopeErr != nil || !currentScope.Matches(scope) || currentActor != actor {
+		return teams.Task{}, teams.ErrPermission
+	}
+	team, projection, err := s.teamForOperation(root, scope, teamID, actor)
+	if err != nil {
+		return teams.Task{}, err
+	}
+	graph, err := teamTaskGraph(projection, teamID)
+	if err != nil {
+		return teams.Task{}, err
+	}
+	task, err := graph.Update(taskID, expectedRevision, patch, actor)
+	if err != nil {
+		return task, err
+	}
+	eventID, err := sessionlog.NewID()
+	if err != nil {
+		return teams.Task{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return teams.Task{}, err
+	}
+	persistedTask := task
+	persistedTask.Blocks = nil
+	_, err = sessionlog.Append(root, scope.SessionID, sessionlog.EventTeam, sessionlog.TeamEvent{ID: eventID, TeamID: teamID, SessionID: scope.SessionID, Kind: sessionlog.TeamTaskUpdated, Revision: team.Revision + 1, ActorID: actorID(actor), ActorRunID: request.RunID, Task: &persistedTask})
+	return task, err
+}
+
+func actorID(actor teams.Actor) string {
+	if actor.Lead {
+		return teams.Lead
+	}
+	return actor.MemberID
+}
+
+func (s *Service) teamForOperation(root string, scope teams.Scope, teamID string, actor teams.Actor) (teams.Team, sessionlog.TeamProjection, error) {
+	if teams.ValidateID(teamID) != nil {
+		return teams.Team{}, sessionlog.TeamProjection{}, teams.ErrNotFound
+	}
+	projection, err := sessionlog.ReplayTeams(root, scope.SessionID, teamID)
+	if err != nil {
+		return teams.Team{}, sessionlog.TeamProjection{}, err
+	}
+	team := projection.Teams[teamID]
+	if team.Status != teams.TeamOpen || !team.Scope.Matches(scope) {
+		return teams.Team{}, sessionlog.TeamProjection{}, teams.ErrPermission
+	}
+	if !actor.Lead {
+		member, ok := projection.Members[actor.MemberID]
+		if !ok || member.TeamID != teamID || member.Status.IsTerminal() {
+			return teams.Team{}, sessionlog.TeamProjection{}, teams.ErrPermission
+		}
+	}
+	return team, projection, nil
+}
+
+func teamTaskGraph(projection sessionlog.TeamProjection, teamID string) (*teams.TaskGraph, error) {
+	tasks := make([]teams.Task, 0, len(projection.Tasks))
+	for _, task := range projection.Tasks {
+		if task.TeamID == teamID {
+			tasks = append(tasks, task)
+		}
+	}
+	graph, err := teams.LoadTaskGraph(teamID, tasks)
+	if err != nil {
+		return nil, err
+	}
+	return graph, nil
+}

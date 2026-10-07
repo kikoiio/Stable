@@ -62,6 +62,23 @@ func TestDefaultAndExplicitEmptyTools(t *testing.T) {
 	}
 }
 
+func TestWorktreeIsolationEnablesOnlyBoundedFileTools(t *testing.T) {
+	d, err := ParseDefinition(definitionText("builder", "isolation: worktree\ntools: [read_file, glob, grep, write_file, edit_file, command]\n", "Instructions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"edit_file", "glob", "grep", "read_file", "write_file"}
+	if got := d.EffectiveTools(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("effective worktree tools=%v want %v", got, want)
+	}
+	if got := d.EffectiveToolsForIsolation("none"); !reflect.DeepEqual(got, []string{"glob", "grep", "read_file"}) {
+		t.Fatalf("explicit read-only override enabled writes: %v", got)
+	}
+	if got := (Definition{Name: "explore"}).EffectiveToolsForIsolation("worktree"); !reflect.DeepEqual(got, []string{"glob", "grep", "read_file"}) {
+		t.Fatalf("explore gained write tools: %v", got)
+	}
+}
+
 func TestParseRejectsInvalidDefinitionsWithoutLeakingValues(t *testing.T) {
 	secret := "PRIVATE_ROLE_OR_CREDENTIAL_MARKER"
 	cases := map[string][]byte{

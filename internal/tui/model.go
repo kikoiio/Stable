@@ -20,6 +20,7 @@ import (
 	"stable/internal/permission"
 	"stable/internal/sessionlog"
 	"stable/internal/skills"
+	"stable/internal/workspace"
 )
 
 type Panel int
@@ -94,7 +95,9 @@ type Model struct {
 	LastCursor        uint64
 	stream            *conversation.StreamClient
 	AgentTasks        []agent.AgentTaskSnapshot
+	Worktrees         []workspace.Snapshot
 	agentTaskState
+	teamUIState
 	history    *inputhistory.Store
 	historyErr error
 	histCursor *inputhistory.Cursor
@@ -314,6 +317,8 @@ func (m *Model) surfaceCommandReport(rejected []string) {
 // registry keeps user-visible behavior unchanged.
 func registerBuiltins(host *commandHost, registry *commands.Registry) {
 	registerAgentCommands(host, registry)
+	registerTeamCommands(host, registry)
+	registerWorkspaceCommands(host, registry)
 	set := func(name, description, argPrompt string, local func(args string)) {
 		registry.Register(&commands.Command{Name: name, Description: description, ArgPrompt: argPrompt, Kind: commands.KindLocal, Local: local})
 	}
@@ -706,6 +711,20 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(r.op, "agent_") {
 		return m.handleAgentResult(r)
 	}
+	if strings.HasPrefix(r.op, "team_") {
+		return m.handleTeamResult(r)
+	}
+	if strings.HasPrefix(r.op, "worktree_") {
+		m.Pending = false
+		if r.err != nil {
+			m.Err = r.err
+			m.Status = "工作树请求失败：" + r.err.Error()
+			return m, nil
+		}
+		m.Err = nil
+		applyWorktreeMessages(&m, r.op, r.msgs)
+		return m, nil
+	}
 	m.Pending = false
 	if r.err != nil {
 		m.Err = r.err
@@ -908,6 +927,7 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 		case "transcript":
 			if x.Transcript != nil {
 				m.Events = x.Transcript.Events
+				m.restoreTeamState()
 				m.LastCursor = 0
 				for _, event := range m.Events {
 					if event.Seq > m.LastCursor {
@@ -1672,6 +1692,9 @@ func (m Model) acceptReview(mode candidate.AcceptanceMode, confirmed ...string) 
 
 func (m *Model) applyRunMessage(message conversation.ServerMsg) {
 	switch message.Type {
+	case "team_update", "team_message_update", "team_task_update", "team_request_update":
+		m.captureTeamMessage(message)
+		m.Status = "团队状态已更新。"
 	case "agent_task_update":
 		if message.AgentTask != nil {
 			m.applyAgentTask(*message.AgentTask, true)
