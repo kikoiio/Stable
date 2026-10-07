@@ -8,6 +8,8 @@
 
 **当前受支持的平台:Linux(x86_64,CLI/TUI)。** 本表对 Linux 列给出的是经代码审计与可运行验证确认的当前真实行为,作为后续所有阶段的回归基线。
 
+**S05 Linux 发布包基线**:版本化 tar.gz 仅在 Ubuntu 26.04 x86_64 runner 上构建和包级验收。本轮证据不声明其他 Linux 发行版/架构的发布包支持,也不改变 macOS/Windows 的真实环境待验状态。
+
 **macOS 与 Windows:未评估(计划评估)。** 本表不为其承诺支持状态、版本、架构与时限;平台优先顺序在阶段 2 开始前再行决定。两平台的等价机制线索仅为后续评估起点,均未经验证,不构成承诺。
 
 **「支持」的判定依据**:某平台对某能力行声明「支持」,必须满足该行验收条件的全部条目;声明「降级」必须满足标注〔降级〕的条目子集,且不得静默降低安全语义。平台整体声明「支持」还必须通过第 4 节发布门槛清单。KiCad 规则:无头 ERC 检查是任何平台声明「支持」的前提;交互式 GUI 会话允许以「降级」状态存在。
@@ -491,3 +493,20 @@ S02 将 C01–C05 的跨平台实现接入 `internal/platform`，并完成 Linux
 | C05 私密文件 | `internal/platform/secfile/private_{unix,windows}.go`、业务调用点 | secfile 权限单测、门禁、三向编译 |
 
 可运行验证路径同步：`go test ./internal/sandbox/...` 现为 `go test ./internal/platform/sandbox/...`。S01 回放（2026-10-06）：appconfig TestLoadAndValidate、store TestReconcile、platform/sandbox Bubblewrap/进程组/网络代理/Probe、conversation TestSessionProtocolClientLifecycle、candidate 全包、execution computer bridge、redact、workers/kicad 与 workers/computer unittest 均通过。`make platform-check` 与 `CGO_ENABLED=0 GOOS=windows/darwin go build ./...` 退出码 0。
+
+## 9. S05 Linux 发布验收更新（2026-10-07）
+
+本节仅记录 S05 发布切片证据，不代表路线图阶段 5 整体完成，也不改变 macOS/Windows 的待真实系统验收状态。
+
+| 项目 | 实际结果 |
+| --- | --- |
+| 提交 | `31993ea`（推送分支 `s05`） |
+| runner | GitHub Actions `ubuntu-26.04`；workflow 日志记录 `Image: ubuntu-26.04`。包名与 Linux x86_64 守卫均通过，产物为 `linux-amd64` |
+| 源码 job | `build-and-test` 成功：`go mod verify`、`go build ./cmd/...`、`go test ./...` |
+| 包 job | `test-package` 成功：`make test-package` 构建包并顺序通过 install、lifecycle、CLI、runtime/e2e、restart；生命周期日志包含首装/重装、升级/回退、无效包保护、入口切换回滚、卸载与数据保留 PASS |
+| workflow run | [Go run 37568537248](https://github.com/kikoiio/Stable/actions/runs/37568537248)；`build-and-test` job 112621724440，`test-package` job 112621724171 |
+| workflow artifact | `stable-linux-amd64-37568537248-1`，含版本化 tar.gz 和 `.sha256`；下载后 `sha256sum -c` 通过。归档 SHA-256：`f7b2453df8fe2a4b0b10396b162c98b39a658dadd40c1575fdf95fa598b58cf7` |
+| 包版本/依赖 | 包级 `AC1 manifest PASS` 验证 Stable 版本 `0.1.0`、Temporal CLI `1.9.1`、包清单与 CLI；包名为 `stable-0.1.0-linux-amd64.tar.gz` |
+| 发布渠道 | 未创建 GitHub Release；产物仅作为 workflow artifact 保存 |
+
+因此，S05 的发布包验收范围是 Ubuntu 26.04 x86_64。其他 Linux 发行版/架构、macOS 与 Windows 仍未由本轮 runner 验收，不据此增加支持声明。
