@@ -147,7 +147,11 @@ PY
 start_runner
 start_chat
 wait_status 'import json,sys; x=json.load(open(sys.argv[1])); sys.exit(0 if x["verified"] and x["snapshot"]["goal"]["criteria_revision"]==1 else 1)'
-for _ in $(seq 1 120); do
+# Same race as phase 4 below: the goal re-evaluates on its interval after
+# verification, and each evaluation flips the status (e.g. waiting, "computer
+# session opened") while it runs. 60s was not enough on a loaded CI runner to
+# catch a verified export; use the same 300s budget as phase 4.
+for _ in $(seq 1 600); do
   rm -rf "$run_root/delivery-p3"
   export_delivery delivery-p3
   if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["verified"] else 1)' "$run_root/delivery-p3/delivery.json" 2>/dev/null; then break; fi
