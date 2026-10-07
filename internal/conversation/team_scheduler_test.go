@@ -254,7 +254,11 @@ func TestLeadMessageAutomaticallyResumesIdleTeamMember(t *testing.T) {
 	if err := os.MkdirAll(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	service, request := teamServiceFixture(t, root, "parent-run")
+	runID, err := sessionlog.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, request := teamServiceFixture(t, root, runID)
 	request.PermissionBounds, _ = json.Marshal(permission.Authority{RunID: request.RunID, SessionID: request.Work.SessionID, AllowedRoot: root})
 	role := agentcatalog.Definition{Name: "explore", Instruction: "Inspect the assigned area.", Model: "inherit", Tools: []string{"read_file"}, MaxTurns: 3}
 	runner := &capturingTeamChildRunner{inputs: make(chan agent.ChildRunInput, 2)}
