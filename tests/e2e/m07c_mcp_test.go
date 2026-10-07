@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -138,6 +139,182 @@ func TestM07CMCPServiceLifecycle(t *testing.T) {
 		t.Fatalf("MCP lifecycle events missing: reload=%v server=%v", seenReload, seenServer)
 	}
 	_ = os.Remove(fixture)
+}
+
+func TestM07CMCPServiceRestartReplaysLifecycleEvents(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "state.db")
+	fixture := m07cFixtureBinary(t)
+	db, err := store.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	type childService struct {
+		cmd    *exec.Cmd
+		stop   string
+		output *bytes.Buffer
+	}
+	startChild := func(phase int) *childService {
+		t.Helper()
+		base := t.TempDir()
+		readyPath := filepath.Join(base, "ready")
+		stopPath := filepath.Join(base, "stop")
+		cmd := exec.Command(os.Args[0], "-test.run=^TestM07CMCPRestartProcessHelper$")
+		cmd.Env = append(os.Environ(),
+			"M07C_MCP_HELPER=1", "M07C_ROOT="+root, "M07C_STATE="+statePath,
+			"M07C_FIXTURE="+fixture, "M07C_SOCKET="+filepath.Join(base, fmt.Sprintf("service-%d.sock", phase)),
+			"M07C_READY="+readyPath, "M07C_STOP="+stopPath,
+		)
+		output := &bytes.Buffer{}
+		cmd.Stdout, cmd.Stderr = output, output
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(readyPath); err == nil {
+				return &childService{cmd: cmd, stop: stopPath, output: output}
+			}
+			if cmd.ProcessState != nil {
+				t.Fatalf("MCP service child exited during startup: %s", output.String())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("MCP service child did not become ready: %s", output.String())
+		return nil
+	}
+	stopChild := func(child *childService) {
+		t.Helper()
+		if err := os.WriteFile(child.stop, []byte("stop"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := child.cmd.Wait(); err != nil {
+			t.Fatalf("MCP service child exit: %v\n%s", err, child.output.String())
+		}
+	}
+	first := startChild(1)
+	t.Cleanup(func() {
+		if first != nil && first.cmd.ProcessState == nil {
+			_ = first.cmd.Process.Kill()
+			_ = first.cmd.Wait()
+		}
+	})
+	created := m06Op(t, ctx, filepath.Join(filepath.Dir(first.stop), "service-1.sock"), conversation.ClientMsg{
+		Op: "session_create", ProjectRoot: root,
+	})
+	var sessionID string
+	for _, msg := range created {
+		if msg.Type == "session" && msg.Session != nil {
+			sessionID = msg.Session.ID
+		}
+	}
+	if sessionID == "" {
+		t.Fatalf("session_create response=%s", m06Dump(created))
+	}
+	msgs := m06Op(t, ctx, filepath.Join(filepath.Dir(first.stop), "service-1.sock"), conversation.ClientMsg{Op: "mcp_reload", SessionID: sessionID})
+	if len(msgs) != 1 || msgs[0].MCPReport == nil || msgs[0].MCPReport.After != 1 {
+		t.Fatalf("initial MCP reload=%s", m06Dump(msgs))
+	}
+	before, err := sessionlog.Replay(root, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var beforeTypes []string
+	for _, event := range before.Events {
+		if event.Type == sessionlog.EventMCPReload || event.Type == sessionlog.EventMCPServer {
+			beforeTypes = append(beforeTypes, event.Type)
+		}
+	}
+	if len(beforeTypes) != 2 || beforeTypes[0] != sessionlog.EventMCPReload || beforeTypes[1] != sessionlog.EventMCPServer {
+		t.Fatalf("MCP lifecycle events before restart=%v", beforeTypes)
+	}
+
+	// Stop the actual service process and start a fresh one over the same
+	// session journal and SQLite store, as happens across a daemon restart.
+	stopChild(first)
+	first = nil
+	second := startChild(2)
+	t.Cleanup(func() {
+		if second != nil && second.cmd.ProcessState == nil {
+			_ = second.cmd.Process.Kill()
+			_ = second.cmd.Wait()
+		}
+	})
+	loaded := m06Op(t, ctx, filepath.Join(filepath.Dir(second.stop), "service-2.sock"), conversation.ClientMsg{
+		Op: "session_load", ProjectRoot: root, SessionID: sessionID,
+	})
+	if len(loaded) != 1 || loaded[0].Transcript == nil {
+		t.Fatalf("session_load after restart=%s", m06Dump(loaded))
+	}
+	var afterTypes []string
+	for _, event := range loaded[0].Transcript.Events {
+		if event.Type == sessionlog.EventMCPReload || event.Type == sessionlog.EventMCPServer {
+			afterTypes = append(afterTypes, event.Type)
+		}
+	}
+	if fmt.Sprint(afterTypes) != fmt.Sprint(beforeTypes) {
+		t.Fatalf("MCP lifecycle events changed after restart: before=%v after=%v", beforeTypes, afterTypes)
+	}
+	var reload sessionlog.MCPReload
+	var server sessionlog.MCPServer
+	for _, event := range loaded[0].Transcript.Events {
+		switch event.Type {
+		case sessionlog.EventMCPReload:
+			m06Decode(t, event.Data, &reload)
+		case sessionlog.EventMCPServer:
+			m06Decode(t, event.Data, &server)
+		}
+	}
+	if reload.Trigger != "manual" || reload.After != 1 || server.Name != "fixture" || server.State != "connected" {
+		t.Fatalf("replayed MCP lifecycle payloads: reload=%+v server=%+v", reload, server)
+	}
+	stopChild(second)
+	second = nil
+}
+
+// TestM07CMCPRestartProcessHelper is invoked in a separate OS process by the
+// restart e2e test. It keeps the service alive until the parent asks it to
+// stop, so the next phase can prove recovery across a real process boundary.
+func TestM07CMCPRestartProcessHelper(t *testing.T) {
+	if os.Getenv("M07C_MCP_HELPER") != "1" {
+		return
+	}
+	db, err := store.Open(os.Getenv("M07C_STATE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	manager := mcp.NewManager([]appconfig.MCPServerConfig{{Name: "fixture", Command: os.Getenv("M07C_FIXTURE")}}, "")
+	if err = manager.ConnectAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Shutdown()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc, err := conversation.Serve(ctx, conversation.Deps{
+		Store: db, ChatProvider: &m06Agent{}, ProjectRoot: os.Getenv("M07C_ROOT"),
+		SocketPath: os.Getenv("M07C_SOCKET"), PollEvery: 100 * time.Millisecond, MCP: manager,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Close()
+	if err = os.WriteFile(os.Getenv("M07C_READY"), []byte("ready"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stopPath := os.Getenv("M07C_STOP")
+	for {
+		if _, err = os.Stat(stopPath); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestM07CMCPDispatchAndUnknownTarget(t *testing.T) {
