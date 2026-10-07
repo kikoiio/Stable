@@ -141,12 +141,20 @@ func installMergedManifest(ctx context.Context, target, formalRoot, workspaceRoo
 	if err != nil || !pathIdentity.IsDir() || pathIdentity.Mode()&os.ModeSymlink != 0 || !os.SameFile(rootIdentity, pathIdentity) {
 		return workspace.ErrOwnership
 	}
-	entries, err := root.ReadDir(".")
+	directory, err := root.Open(".")
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		if err := root.RemoveAll(entry.Name()); err != nil {
+	names, err := directory.Readdirnames(-1)
+	closeErr := directory.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	for _, name := range names {
+		if err := root.RemoveAll(name); err != nil {
 			return err
 		}
 	}
