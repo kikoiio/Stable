@@ -82,6 +82,23 @@ class CandidateBridgeTests(unittest.TestCase):
     def test_stop_classifies_invalid_owned_pid(self):
         self.assertEqual(bridge.stop({'eeschema_pid': 'bad', 'xvfb_pid': 0}), ['eeschema:invalid_pid'])
 
+    def test_stop_never_signals_pid_with_unrelated_process_identity(self):
+        with mock.patch.object(bridge, 'pid_alive', side_effect=lambda pid, name: (pid, name) in {(101, 'Xvfb')}), \
+             mock.patch.object(bridge, '_wait_dead', return_value=True), \
+             mock.patch.object(bridge.os, 'kill') as kill:
+            failures = bridge.stop({'eeschema_pid': 202, 'xvfb_pid': 101})
+
+        self.assertEqual(failures, [])
+        kill.assert_called_once_with(101, bridge.signal.SIGTERM)
+
+    def test_clear_owned_lock_refuses_path_outside_handle(self):
+        unrelated_lock = self.project / '~sensor.kicad_sch.lck'
+        unrelated_lock.write_text('unrelated lock', encoding='utf-8')
+        handle = {'path': str(self.design.resolve()), 'eeschema_pid': 0}
+
+        self.assertFalse(bridge.clear_owned_lock(handle, unrelated_lock))
+        self.assertEqual(unrelated_lock.read_text(encoding='utf-8'), 'unrelated lock')
+
 
 if __name__ == '__main__':
     unittest.main()
