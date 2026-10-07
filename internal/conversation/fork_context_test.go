@@ -64,7 +64,7 @@ func TestForkContextFullIsBoundedAndSessionScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].Content != "keep this latest answer" {
+	if len(got) != 2 || got[0].Content != "latest question" || got[1].Content != "keep this latest answer" {
 		t.Fatalf("full context should trim oldest content to configured budget: %#v", got)
 	}
 	if forkApproxTokens(got) > forkInputBudget(1024) {
