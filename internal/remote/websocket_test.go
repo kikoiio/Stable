@@ -339,6 +339,15 @@ func TestRemoteConversationEndToEndWithLocalApprovalAndFakeProvider(t *testing.T
 	if got := receive(); got.Message.Type != "done" {
 		t.Fatalf("session create completion = %+v", got)
 	}
+	send("forbidden-goal", conversation.ClientMsg{Op: "create_goal", Text: "must remain read-only"})
+	forbidden, forbiddenDone := receive(), receive()
+	if forbidden.ID != "forbidden-goal" || forbidden.Message.Type != "error" || forbiddenDone.Message.Type != "done" {
+		t.Fatalf("remote target mutation response = %+v, %+v", forbidden, forbiddenDone)
+	}
+	goalsAfterDeniedMutation, err := db.ListGoals(ctx)
+	if err != nil || len(goalsAfterDeniedMutation) != 1 || goalsAfterDeniedMutation[0].ID != "remote-goal" || goalsAfterDeniedMutation[0].Objective != "Remote read-only target" {
+		t.Fatalf("remote target state changed after denied mutation: %+v, err %v", goalsAfterDeniedMutation, err)
+	}
 
 	// Drive the same ask_user adapter used by tools, then answer its pending
 	// question through the remote conversation protocol.

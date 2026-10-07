@@ -7,7 +7,7 @@
 - [x] `stable remote status` 能显示停止和运行状态；无参数启动 remote 时监听地址为 loopback（验证：`TestRemoteStatusIsStoppedWhenRuntimeIsDown`、`TestRemoteStatusReportsSupervisorRemoteState`、`TestRemoteConfigDefaults` 与 `TestRemoteManagerServesEmbeddedIndexAndStops`）。
 - [ ] `stable up` 不会自行启动 remote；`stable remote up` 在 runtime 未运行时会启动 runtime 后监听；`stable remote down` 关闭 remote 但保留 runtime（验证：生命周期集成测试，分别检查 runtime/remote 状态）。
 - [x] 非 loopback 监听缺少证书或私钥时启动失败，错误不会回退到明文；提供有效自签证书后 HTTPS 可访问（验证：`TestRemoteConfigNonLoopbackRequiresCertificateAndKey` 与 `TestRemoteManagerTLSUsesSecureCookie`；后者将 listener 绑定 `0.0.0.0` 并通过 HTTPS 请求配对）。
-- [ ] 执行 `stable down` 后 remote listener 关闭且 WebSocket 连接结束（验证：端到端启动服务、连接后执行 down，再确认端口连接失败）。
+- [x] 执行 `stable down` 后 remote listener 关闭且 WebSocket 连接结束（验证：`TestDispatchSupervisorDownStopsRemoteBeforeReply` 确认 supervisor down 先停止 remote；`TestRemoteManagerServesEmbeddedIndexAndStops`/`TestWebSocketAccessGrantAndScopedConversationBridge` 确认 listener 关闭、WebSocket 结束并释放 grant）。
 
 ## AC2：配对、Origin 与凭据保护
 
@@ -48,11 +48,11 @@
 ## AC7：文档与完整验证
 
 - [x] README 说明 loopback 默认、LAN TLS 证书配置、pair token、目录批准、remote up/down/status 及 `stable down` 行为，且示例与 `stable remote --help` 一致（验证：逐条对照 README 与 CLI help 输出）。
-- [x] GitHub Actions `Go` workflow 的 `go test ./...` 全部通过（验证：run `37575229655` 的 `build-and-test` job 成功；该 job 包含全仓 Go 单元测试）。
+- [x] GitHub Actions `Go` workflow 的 `go test ./...` 全部通过（验证：最终提交 run `37576139088` 的 `build-and-test` job 成功；package acceptance job 同样成功）。
 - [x] `gofmt`/静态格式检查通过，工作区没有本次新增的格式错误（验证：格式检查命令输出为空且退出码为 0）。
 
 ## 端到端场景
 
 - [x] 用户启动 remote 并配对；服务端建立同源 HttpOnly cookie；用户请求项目目录；本机 TUI 显示客户端与规范目录并批准；远程会话完成创建、流式聊天、取消 run 和权限审批（验证：`TestRemoteConversationEndToEndWithLocalApprovalAndFakeProvider` 逐段通过真实 manager、WebSocket、conversation service、fake provider 与本机 IPC 审批替身）。
-- [ ] 同一连接获批后断开并重连；第二次目录请求被 TUI 再次展示。随后尝试跨站 Origin、无效 grant 和 LAN 无证书启动；三者均被拒绝，原获批目录与目标状态未被越权访问（验证：安全边界端到端测试检查拒绝结果及状态未变）。
+- [x] 同一连接获批后断开并重连；第二次目录请求被 TUI 再次展示。随后尝试跨站 Origin、无效 grant 和 LAN 无证书启动；三者均被拒绝，原获批目录与目标状态未被越权访问（验证：remote end-to-end 重连申请新 grant 并拒绝远程 `create_goal`、确认目标状态未变；Origin、grant/root 和无 TLS 边界分别由 `TestWebSocketRequiresAuthenticationAndSameOrigin`、`TestAuthorizeRemoteMessageUsesGrantAndServerRunBounds`、`TestRemoteConfigNonLoopbackRequiresCertificateAndKey` 覆盖）。
 - [ ] 远程连接仍活动时执行 `stable down`；浏览器连接终止，remote 端口关闭，runtime 退出（验证：生命周期端到端测试检查 WebSocket close、listener 拒绝新连接及 runtime 状态）。
