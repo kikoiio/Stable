@@ -57,6 +57,7 @@ func (b Boundary) EffectiveScope() string {
 }
 
 type ToolCall struct {
+	RunID  string `json:"run_id,omitempty"`
 	CallID string `json:"call_id"`
 	Name   string `json:"name"`
 	Input  any    `json:"input,omitempty"`
@@ -68,29 +69,30 @@ type ToolResult struct {
 }
 
 const (
-	EventSessionCreated = "session_created"
-	EventActivity       = "activity"
-	EventMessage        = "message"
-	EventProposal       = "proposal_reference"
-	EventToolCall       = "tool_call"
-	EventToolResult     = "tool_result"
-	EventBoundary       = "compaction_boundary"
-	EventRunStarted     = "run_started"
-	EventRunEvent       = "run_event"
-	EventSnapshot       = "candidate_snapshot"
-	EventRewind         = "candidate_rewind"
-	EventQuestion       = "pending_question"
-	EventReply          = "question_reply"
-	EventPlanMode       = "plan_mode"
-	EventPlanApproval   = "plan_approval"
-	EventTodo           = "todo_update"
-	EventSkillInventory = "skill_inventory"
-	EventSkillDelta     = "skill_delta"
-	EventSkillInvoked   = "skill_invoked"
-	EventHookFired      = "hook_fired"
-	EventHookReload     = "hook_reload"
-	EventMCPReload      = "mcp_reload"
-	EventMCPServer      = "mcp_server"
+	EventSessionCreated        = "session_created"
+	EventActivity              = "activity"
+	EventMessage               = "message"
+	EventProposal              = "proposal_reference"
+	EventToolCall              = "tool_call"
+	EventToolResult            = "tool_result"
+	EventBoundary              = "compaction_boundary"
+	EventRunStarted            = "run_started"
+	EventRunEvent              = "run_event"
+	EventSnapshot              = "candidate_snapshot"
+	EventRewind                = "candidate_rewind"
+	EventQuestion              = "pending_question"
+	EventReply                 = "question_reply"
+	EventPlanMode              = "plan_mode"
+	EventPlanApproval          = "plan_approval"
+	EventTodo                  = "todo_update"
+	EventSkillInventory        = "skill_inventory"
+	EventSkillDelta            = "skill_delta"
+	EventSkillInvoked          = "skill_invoked"
+	EventHookFired             = "hook_fired"
+	EventHookReload            = "hook_reload"
+	EventMCPReload             = "mcp_reload"
+	EventMCPServer             = "mcp_server"
+	EventAgentTaskNotification = "agent_task_notification"
 )
 
 // SnapshotRef records a candidate file snapshot owned by this session.
@@ -303,13 +305,26 @@ type MCPServer struct {
 }
 
 type RunStarted struct {
-	RunID      string `json:"run_id"`
-	WorkKind   string `json:"work_kind"`
-	GoalID     string `json:"goal_id,omitempty"`
-	WorkItemID string `json:"work_item_id,omitempty"`
-	Intent     string `json:"intent"`
-	ForkSkill  string `json:"fork_skill,omitempty"`
-	ForkEntry  string `json:"fork_entry,omitempty"`
+	RunID        string `json:"run_id"`
+	WorkKind     string `json:"work_kind"`
+	GoalID       string `json:"goal_id,omitempty"`
+	WorkItemID   string `json:"work_item_id,omitempty"`
+	Intent       string `json:"intent"`
+	ForkSkill    string `json:"fork_skill,omitempty"`
+	ForkEntry    string `json:"fork_entry,omitempty"`
+	AgentTaskID  string `json:"agent_task_id,omitempty"`
+	AgentName    string `json:"agent_name,omitempty"`
+	OriginRunID  string `json:"origin_run_id,omitempty"`
+	OriginCallID string `json:"origin_call_id,omitempty"`
+}
+
+// AgentTaskNotification records a terminal summary handed to a later parent
+// run. The destination may not yet have a run_started event; recovery treats
+// such a reference as undelivered until that start has been persisted.
+type AgentTaskNotification struct {
+	TaskID           string `json:"task_id"`
+	TerminalSeq      uint64 `json:"terminal_seq"`
+	DestinationRunID string `json:"destination_run_id"`
 }
 
 type RunEvent struct {

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"stable/internal/agent"
+	"stable/internal/agentcatalog"
 	"stable/internal/candidate"
 	"stable/internal/core"
 	"stable/internal/mcp"
@@ -39,11 +40,20 @@ type ClientMsg struct {
 	QuestionID      string                  `json:"question_id,omitempty"`
 	SkillName       string                  `json:"skill_name,omitempty"`
 	SkillArgs       string                  `json:"skill_args,omitempty"`
+	AgentName       string                  `json:"agent_name,omitempty"`
+	TaskID          string                  `json:"task_id,omitempty"`
+	Background      bool                    `json:"background,omitempty"`
+	WaitMS          int                     `json:"wait_ms,omitempty"`
+	TimeoutMS       int                     `json:"timeout_ms,omitempty"`
+	Model           string                  `json:"model,omitempty"`
 	Limit           int                     `json:"limit,omitempty"`
 }
 
 // ServerMsg is one line of JSON pushed from the session service to clients.
 type ServerMsg struct {
+	Agents     *agentcatalog.Snapshot         `json:"agents,omitempty"`
+	AgentTask  *agent.AgentTaskSnapshot       `json:"agent_task,omitempty"`
+	AgentTasks []agent.AgentTaskSnapshot      `json:"agent_tasks,omitempty"`
 	Type       string                         `json:"type"` // message | proposal | goal_update | error | done
 	Message    *core.SessionMessage           `json:"message,omitempty"`
 	Proposal   *core.CriteriaProposal         `json:"proposal,omitempty"`
@@ -146,7 +156,7 @@ type SkillReport struct {
 
 func validOp(op string) bool {
 	switch op {
-	case "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list", "hooks_list", "hooks_reload", "mcp_list", "mcp_reload":
+	case "agent_list", "agent_reload", "agent_task_start", "agent_task_list", "agent_task_get", "agent_task_cancel", "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list", "hooks_list", "hooks_reload", "mcp_list", "mcp_reload":
 		return true
 	}
 	return false
@@ -170,6 +180,22 @@ func validateClient(m ClientMsg) error {
 		return fmt.Errorf("unknown op %q", m.Op)
 	}
 	switch m.Op {
+	case "agent_list", "agent_reload", "agent_task_start", "agent_task_list", "agent_task_get", "agent_task_cancel":
+		if m.SessionID == "" {
+			return fmt.Errorf("op %s requires session_id", m.Op)
+		}
+		if m.Op == "agent_task_start" && (m.AgentName == "" || strings.TrimSpace(m.Text) == "") {
+			return fmt.Errorf("agent_task_start requires agent_name and text")
+		}
+		if (m.Op == "agent_task_get" || m.Op == "agent_task_cancel") && m.TaskID == "" {
+			return fmt.Errorf("op %s requires task_id", m.Op)
+		}
+		if m.WaitMS < 0 || m.WaitMS > 30000 || m.TimeoutMS < 0 || m.TimeoutMS > 180000 || m.Limit < 0 || m.Limit > 100 {
+			return fmt.Errorf("agent task bounds are invalid")
+		}
+		if m.Run != nil || m.RunID != "" || m.ProjectRoot != "" {
+			return fmt.Errorf("agent operations use server-owned execution scope")
+		}
 	case "session_list", "session_create":
 		if m.ProjectRoot == "" {
 			return fmt.Errorf("op %s requires project_root", m.Op)

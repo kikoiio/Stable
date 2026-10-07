@@ -59,6 +59,13 @@ func SubscribeRun(ctx context.Context, socket, sessionID, runID string, afterSeq
 	return client, nil
 }
 
+// SubscribeAgentTasks follows the session's run cursor on an independent
+// connection. Clients filter delegation events and task notifications without
+// changing a currently active parent run subscription.
+func SubscribeAgentTasks(ctx context.Context, socket, sessionID string, afterSeq uint64) (*StreamClient, error) {
+	return SubscribeRun(ctx, socket, sessionID, "", afterSeq)
+}
+
 func openStream(ctx context.Context, socket string) (*StreamClient, error) {
 	conn, err := ipc.DialPrivate(socket, 2*time.Second)
 	if err != nil {

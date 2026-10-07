@@ -62,4 +62,8 @@ KiCad GUI 会话进程。
 
 委派工具同步等待本批任务完成。服务级资源池默认最多同时运行 3 项，并最多排队 32 项；每项最多运行 8 轮工具调用或 3 分钟（以先到者为准），结果摘要上限为 8 KiB。取消父 run 会取消活动任务并取消排队项；服务重启会把未完成任务及父 run 记为 `interrupted`，不会自动重跑。
 
+`/agents` 查看内建 `explore`、`plan`、`general-purpose` 及自定义只读角色，`/agents reload` 重载。定义位于 `~/.config/stable/agents/*.md` 和授权项目的 `.stable/agents/*.md`，项目定义覆盖用户与内建角色。Markdown frontmatter 支持 `name`、`description`、`model`、`tools`、`disallowedTools`、`maxTurns`、`background`；正文是角色指令。未知字段、符号链接和超限文件会明确拒绝；角色只能收窄现有只读能力。
+
+`/agent <角色> <任务>` 启动独立后台任务，`/tasks`（或 `/tasks next`）分页查看，`/tasks get <ID>` 查询，`/tasks stop <ID>` 请求取消。父 agent 可通过 `run_agent` 同步等待或后台提交，用 `task_output` 有界等待、`task_stop` 取消。它们与委派、fork、hook 共用池；父正常结束和 TUI 断线后后台任务继续，父显式取消会停止关联任务。取消显示实际退出后的终态；服务重启把未完成任务记为 `interrupted`，不重新执行模型。结果保存在 session 日志，脱敏摘要交接给下次同属工作项的父 run，完成不会自动启动新 run。M09-D 不提供 child 写入、团队或工作树功能。
+
 标记为 `mode: fork`（或旧式 `context: fork`）的技能通过 `/技能名 <参数>` 启动当前 session 下的独立 fork run，也可由父 agent 通过 `load_skill` 工具调用。`fork_context` 支持 `none`（默认）、`recent`（最近 5 轮可见对话）和预算内的 `full`。fork skill 只开放读、搜、列工具，沿用 M09-A 的共享资源池和单项预算；运行状态与脱敏摘要写入 session run 事件，可按游标续读。服务重启中断未完成的 fork skill，不自动重跑。

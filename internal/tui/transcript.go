@@ -23,6 +23,15 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 	var blocks []*block
 	runs := map[string]*block{}
 	delegations := map[string]*block{}
+	backgroundRuns := map[string]bool{}
+	for _, event := range events {
+		if event.Type == sessionlog.EventRunStarted {
+			var started sessionlog.RunStarted
+			if decodeEventData(event.Data, &started) == nil && started.AgentTaskID != "" {
+				backgroundRuns[started.RunID] = true
+			}
+		}
+	}
 	// First pass: pair tool calls with their results and questions with
 	// their replies, so recovery display can flag interrupted calls and
 	// already-answered questions instead of leaving both ambiguous.
@@ -286,6 +295,9 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 		case sessionlog.EventRunEvent:
 			var run sessionlog.RunEvent
 			if decodeEventData(e.Data, &run) != nil {
+				continue
+			}
+			if backgroundRuns[run.RunID] && run.Kind != "delegation_event" {
 				continue
 			}
 			if run.Kind == "text_delta" || run.Kind == "thinking_delta" {

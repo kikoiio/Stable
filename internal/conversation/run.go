@@ -107,6 +107,14 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		}
 	}
 	s.eventMu.Lock()
+	taskPrefix, taskErr := s.agentTaskNotifications(request)
+	if taskErr != nil {
+		s.eventMu.Unlock()
+		return taskErr
+	}
+	if request.Work.Kind != agent.WorkSession {
+		request.Messages = append(taskPrefix, request.Messages...)
+	}
 	if request.Work.Kind == agent.WorkSession {
 		history := sessionConversationMessages(s.deps.ProjectRoot, msg.SessionID)
 		prefix := []llm.Message{{Role: "system", Content: "你是 Stable 的通用 agent。读、搜、列只能访问正式工程只读视图；写、编辑只能写入本次运行的候选区。工具路径使用工作区相对路径。工具结果代表真实受控执行结果。"}}
@@ -117,6 +125,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		prefix = append(prefix, skillPrefix...)
 		prefix = append(prefix, mcpPrefix...)
 		prefix = append(prefix, hookPrefix...)
+		prefix = append(prefix, taskPrefix...)
 		if plan.Mode == sessionlog.PlanModePlan && plan.PlanPath != "" {
 			// The plan workflow reminder is per-turn context, not session
 			// history: it is inserted after the replayed conversation and
@@ -375,6 +384,9 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 	s.mu.Lock()
 	delete(s.activeRuns, request.RunID)
 	s.mu.Unlock()
+	if s.deps.AgentTasks != nil {
+		s.deps.AgentTasks.ForgetParent(request.Work.SessionID, request.RunID)
+	}
 }
 
 func (s *Service) finalizeRunCandidate(ctx context.Context, request agent.ExecutionRequest) error {
@@ -542,6 +554,12 @@ func (s *Service) subscribeRun(ctx context.Context, msg ClientMsg, updates chan 
 }
 
 func (s *Service) cancelRun(msg ClientMsg, updates chan ServerMsg) error {
+	if s.deps.AgentTasks != nil {
+		if task, err := s.findAgentRun(msg.SessionID, msg.RunID); err == nil {
+			_, err = s.deps.AgentTasks.Stop(context.Background(), agent.ParentRun{Work: agent.WorkRef{SessionID: msg.SessionID}}, task.ID)
+			return err
+		}
+	}
 	s.mu.Lock()
 	sessionID, active := s.activeRuns[msg.RunID]
 	forkRun := s.activeForkRuns[msg.RunID]
@@ -562,6 +580,9 @@ func (s *Service) cancelRun(msg ClientMsg, updates chan ServerMsg) error {
 	if s.deps.Runner == nil {
 		return errors.New("streaming agent is not configured")
 	}
+	if s.deps.AgentTasks != nil {
+		s.deps.AgentTasks.CancelParent(msg.SessionID, msg.RunID)
+	}
 	return s.deps.Runner.Cancel(msg.RunID)
 }
 
@@ -569,7 +590,7 @@ func (s *Service) broadcastRun(msg ServerMsg, sessionID, runID string, cursor ui
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, sub := range s.clients {
-		if sub.sessionID != sessionID || (sub.runID != "" && sub.runID != runID) {
+		if sub.sessionID != sessionID || (msg.Type != "agent_task_update" && sub.runID != "" && sub.runID != runID) {
 			continue
 		}
 		if sub.pendingCursor != 0 {

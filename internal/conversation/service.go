@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"stable/internal/agent"
+	"stable/internal/agentcatalog"
 	"stable/internal/candidate"
 	"stable/internal/core"
 	"stable/internal/decision"
@@ -25,6 +26,8 @@ type Deps struct {
 	ChatProvider        decision.ChatProvider
 	Runner              agent.Runner
 	Delegator           agent.Delegator
+	Agents              agentcatalog.Catalog
+	AgentTasks          *AgentTaskCoordinator
 	ForkProvider        llm.Provider
 	ForkExecutorFactory agent.ExecutorFactory
 	ForkToolSchemas     []llm.ToolSchema
@@ -113,6 +116,9 @@ func Serve(ctx context.Context, deps Deps) (*Service, error) {
 	if deps.PollEvery <= 0 {
 		deps.PollEvery = 2 * time.Second
 	}
+	if err := recoverAgentTaskRuns(deps.ProjectRoot); err != nil {
+		return nil, fmt.Errorf("recover agent tasks: %w", err)
+	}
 	if err := recoverDelegationRuns(deps.ProjectRoot); err != nil {
 		return nil, fmt.Errorf("recover interrupted delegations: %w", err)
 	}
@@ -121,6 +127,9 @@ func Serve(ctx context.Context, deps Deps) (*Service, error) {
 		return nil, err
 	}
 	s := &Service{deps: deps, lifeCtx: ctx, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, activeForkRuns: map[string]*forkRunState{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks, mcp: deps.MCP, mcpInstructions: map[string]bool{}}
+	if deps.AgentTasks != nil {
+		deps.AgentTasks.Bind(s)
+	}
 	if deps.Skills != nil {
 		deps.Skills.Bind(s)
 	}
@@ -156,6 +165,9 @@ func (s *Service) Close() error {
 		run.cancel()
 	}
 	s.mu.Unlock()
+	if s.deps.AgentTasks != nil {
+		s.deps.AgentTasks.Close()
+	}
 	if s.hooks != nil {
 		s.hooks.Close()
 	}
@@ -201,6 +213,16 @@ func (s *Service) readLoop(ctx context.Context, conn net.Conn, updates chan Serv
 			continue
 		}
 		switch c.Op {
+		case "agent_list", "agent_reload", "agent_task_start", "agent_task_list", "agent_task_get", "agent_task_cancel":
+			msgs, err := s.handleAgentRequest(ctx, c)
+			for _, msg := range msgs {
+				updates <- msg
+			}
+			if err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			}
+			updates <- ServerMsg{Type: "done"}
+			continue
 		case "run_start":
 			if err := s.startRun(ctx, c, updates); err != nil {
 				updates <- ServerMsg{Type: "error", Error: err.Error()}

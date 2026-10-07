@@ -83,7 +83,11 @@ func recoverSessionDelegation(root, sessionID string, events []sessionlog.Event)
 		case sessionlog.EventToolCall:
 			var call sessionlog.ToolCall
 			if decodeSessionData(event.Data, &call) == nil && call.CallID != "" {
-				pending[call.CallID] = recoveredToolCall{call: call, runID: activeRun, seq: event.Seq}
+				owner := activeRun
+				if call.RunID != "" {
+					owner = call.RunID
+				}
+				pending[call.CallID] = recoveredToolCall{call: call, runID: owner, seq: event.Seq}
 			}
 		case sessionlog.EventToolResult:
 			var result sessionlog.ToolResult

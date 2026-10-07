@@ -93,13 +93,15 @@ type Model struct {
 	ActiveRunID       string
 	LastCursor        uint64
 	stream            *conversation.StreamClient
-	history           *inputhistory.Store
-	historyErr        error
-	histCursor        *inputhistory.Cursor
-	histDraft         string
-	registry          *commands.Registry
-	loader            *commands.Loader
-	host              *commandHost
+	AgentTasks        []agent.AgentTaskSnapshot
+	agentTaskState
+	history    *inputhistory.Store
+	historyErr error
+	histCursor *inputhistory.Cursor
+	histDraft  string
+	registry   *commands.Registry
+	loader     *commands.Loader
+	host       *commandHost
 	// skills is the TUI-side skill catalog: it feeds the /skills listing and
 	// registers one slash command per skill behind the built-in and custom
 	// command names. The conversation service keeps its own instance.
@@ -126,9 +128,11 @@ type commandHost struct {
 func (h *commandHost) send(cmd tea.Cmd) { h.cmds = append(h.cmds, cmd) }
 
 type resultMsg struct {
-	op   string
-	msgs []conversation.ServerMsg
-	err  error
+	taskID    string
+	sessionID string
+	op        string
+	msgs      []conversation.ServerMsg
+	err       error
 }
 
 type runStreamStartedMsg struct {
@@ -309,6 +313,7 @@ func (m *Model) surfaceCommandReport(rejected []string) {
 // hardcoded submitComposer branches one to one, so dispatching through the
 // registry keeps user-visible behavior unchanged.
 func registerBuiltins(host *commandHost, registry *commands.Registry) {
+	registerAgentCommands(host, registry)
 	set := func(name, description, argPrompt string, local func(args string)) {
 		registry.Register(&commands.Command{Name: name, Description: description, ArgPrompt: argPrompt, Kind: commands.KindLocal, Local: local})
 	}
@@ -526,7 +531,7 @@ func requestCmd(socket string, req conversation.ClientMsg) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 		msgs, err := conversation.Request(ctx, socket, req)
-		return resultMsg{op: req.Op, msgs: msgs, err: err}
+		return resultMsg{op: req.Op, sessionID: req.SessionID, taskID: req.TaskID, msgs: msgs, err: err}
 	}
 }
 
@@ -570,6 +575,12 @@ func (m Model) pendingDialog() DialogKind {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
+	case agentStreamStartedMsg:
+		return m.handleAgentStreamStarted(v)
+	case agentStreamMsg:
+		return m.handleAgentStreamMessage(v)
+	case agentReconnectMsg:
+		return m.handleAgentReconnect(v)
 	case tea.WindowSizeMsg:
 		m.Width, m.Height = v.Width, v.Height
 		m.resize()
@@ -623,6 +634,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if v.message.Type == "resubscribed" {
 			return m, receiveRunCmd(v.client)
 		}
+		if v.message.Type == "agent_task_update" {
+			m.applyRunMessage(v.message)
+			return m, receiveRunCmd(v.client)
+		}
 		if m.Pending && m.ActiveRunID != "" && v.message.RunID != "" && v.message.RunID != m.ActiveRunID {
 			return m, receiveRunCmd(v.client)
 		}
@@ -652,6 +667,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, receiveRunCmd(v.client)
 	case tea.KeyMsg:
 		if v.String() == "ctrl+c" {
+			m.closeAgentStream()
 			if m.stream != nil && m.ActiveRunID != "" {
 				_ = m.stream.Cancel(m.ActiveSession, m.ActiveRunID)
 			}
@@ -687,6 +703,9 @@ func (m *Model) resize() {
 }
 
 func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
+	if strings.HasPrefix(r.op, "agent_") {
+		return m.handleAgentResult(r)
+	}
 	m.Pending = false
 	if r.err != nil {
 		m.Err = r.err
@@ -960,11 +979,12 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 	if r.op == "session_load" && m.ActiveSession != "" {
 		list := requestCmd(m.Socket, conversation.ClientMsg{Op: "approval_list", SessionID: m.ActiveSession})
 		questions := requestCmd(m.Socket, conversation.ClientMsg{Op: "question_list", SessionID: m.ActiveSession})
+		tasks := m.restoreAgentTasks()
 		if !m.approvalPollStarted {
 			m.approvalPollStarted = true
-			return m, tea.Batch(list, questions, approvalPollCmd())
+			return m, tea.Batch(list, questions, approvalPollCmd(), tasks)
 		}
-		return m, tea.Batch(list, questions)
+		return m, tea.Batch(list, questions, tasks)
 	}
 	return m, nil
 }
@@ -1652,6 +1672,10 @@ func (m Model) acceptReview(mode candidate.AcceptanceMode, confirmed ...string) 
 
 func (m *Model) applyRunMessage(message conversation.ServerMsg) {
 	switch message.Type {
+	case "agent_task_update":
+		if message.AgentTask != nil {
+			m.applyAgentTask(*message.AgentTask, true)
+		}
 	case "approval_pending":
 		if message.Approval != nil {
 			m.upsertApproval(*message.Approval)

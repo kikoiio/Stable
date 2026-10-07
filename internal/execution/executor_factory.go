@@ -73,6 +73,8 @@ type ToolExecutorDeps struct {
 	MCP       MCPCaller
 	Delegator agent.Delegator
 	Provider  llm.Provider
+	// AgentTasks serves named-agent launch, output and cancellation to parents.
+	AgentTasks agent.AgentTaskService
 	// ReadOnly restricts dispatch to project read/search/list tools. It is
 	// applied by the executor as a hard allowlist, independently of schemas.
 	ReadOnly bool
@@ -192,6 +194,10 @@ func WithMCPCaller(caller MCPCaller) ToolExecutorOption {
 	return func(deps *ToolExecutorDeps) { deps.MCP = caller }
 }
 
+func WithAgentTaskService(service agent.AgentTaskService) ToolExecutorOption {
+	return func(deps *ToolExecutorDeps) { deps.AgentTasks = service }
+}
+
 func WithReadOnlyTools() ToolExecutorOption {
 	return func(deps *ToolExecutorDeps) {
 		deps.ReadOnly = true
@@ -202,6 +208,7 @@ func WithReadOnlyTools() ToolExecutorOption {
 		deps.PlanSink = nil
 		deps.TodoProvider = nil
 		deps.SkillProvider = nil
+		deps.AgentTasks = nil
 		deps.HookRunner = nil
 	}
 }

@@ -28,6 +28,9 @@ func (r *DelegationEventReporter) Publish(parentRunID string, event agent.Delega
 	if service == nil {
 		return errors.New("delegation event service is unavailable")
 	}
+	if service.deps.AgentTasks != nil {
+		event = service.deps.AgentTasks.sanitizeEvent(parentRunID, event)
+	}
 	credential := service.deps.ProviderCredential
 	event.TaskName = truncateDelegationText(redactRunCredential(event.TaskName, credential), 256)
 	event.Stage = truncateDelegationText(redactRunCredential(event.Stage, credential), 256)

@@ -323,6 +323,16 @@ func checkSkillInvoked(i SkillInvoked) error {
 func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSeq uint64) error {
 	st := scanEvents(events)
 	switch typ {
+	case EventAgentTaskNotification:
+		tasks, err := scanAgentTasks(sessionID, events)
+		if err != nil {
+			return err
+		}
+		var notification AgentTaskNotification
+		if err := decodeData(data, &notification); err != nil {
+			return errors.New("agent task notification has invalid shape")
+		}
+		return tasks.checkNotification(notification)
 	case EventBoundary:
 		var b Boundary
 		if err := decodeData(data, &b); err != nil {

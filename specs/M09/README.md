@@ -1,6 +1,6 @@
 # M09 并行协作与工作树：范围与进度
 
-> 2026-10-07 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。后续子项目编号与拆分为本轮建议，尚未批准运行实现。
+> 2026-10-07 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。M09-D 四份文档已获批准，正在实现；M09-E/F 尚未批准运行实现。
 
 ## 已完成
 
@@ -16,7 +16,7 @@
 
 | 建议子项 | 源端行为与文件 | 当前缺口 | 实施前置 |
 |---|---|---|---|
-| M09-D agent 定义与后台任务 | `internal/agents/definition.go`、`loader.go`、`agent_tool.go`、`subagent.go`；具名角色、定义覆盖、后台启动、状态/摘要、取消、完成通知 | Stable 尚无 agent 定义目录、通用具名 agent 入口、后台任务列表/查询/取消；hook async 和 slash fork 仅覆盖特定入口 | M09-A/C 资源池、M05 持久恢复；本轮已准备四份待审批文档 |
+| M09-D agent 定义与后台任务 | `internal/agents/definition.go`、`loader.go`、`agent_tool.go`、`subagent.go`；具名角色、定义覆盖、后台启动、状态/摘要、取消、完成通知 | Stable 尚无 agent 定义目录、通用具名 agent 入口、后台任务列表/查询/取消；hook async 和 slash fork 仅覆盖特定入口 | M09-A/C 资源池、M05 持久恢复；四份文档已获批准，正在实现并准备云端验收 |
 | M09-E 团队与协调器 | `internal/teams/teams.go`、`tools.go`、`sharedtask.go`、`tasktools.go`、`runner.go`、`protocol.go`、`coordinator.go`；团队成员多轮驻留、点对点/广播消息、依赖任务板、计划/关闭请求、纯协调工具集 | 尚无团队注册、持久消息、团队任务板、成员继续工作/空闲循环或 coordinator 模式 | M09-D 后台生命周期；写入成员依赖 M09-F。需独立规格审批 |
 | M09-F 受控工作树与并行写入 | `internal/worktree/`、`internal/tools/enter_worktree.go`、`exit_worktree.go`，以及 `Agent` 的 `isolation: worktree`；创建/进入/退出/保留、会话恢复、变更预览、agent 工作树清理 | 尚无工作树工具、工作树归属或隔离写入 child；所有现有 child 固定只读 | M03/M04 候选接收与权限门；需要单独设计私有 Git 管理区、候选导出与冲突处理，并审批 |
 
@@ -35,4 +35,4 @@ Linux 为当前首发平台，源端 iTerm 专用后端不属于本轮 Linux 验
 
 ## 下一步
 
-审阅 [M09-D spec](../M09-D/spec.md)、[plan](../M09-D/plan.md)、[task](../M09-D/task.md)、[checklist](../M09-D/checklist.md)。它们是可审阅草案；审批后按任务 DAG 开始运行实现。M09-E/F 的范围仍列为待完成，不提前标记通过。
+审阅 [M09-D spec](../M09-D/spec.md)、[plan](../M09-D/plan.md)、[task](../M09-D/task.md)、[checklist](../M09-D/checklist.md)。四份文档已获批准，正在按任务 DAG 实施并准备 GitHub Actions 验收。M09-E/F 的范围仍列为待完成，不提前标记通过。

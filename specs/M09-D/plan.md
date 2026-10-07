@@ -1,6 +1,6 @@
 # M09-D Agent 定义与后台任务 Plan
 
-> 状态：待审批草案（2026-10-07）。建立在同目录待审批 spec 上；新增运行实现须等四份文档批准。复用单一 PoolDelegator，不增加第二套 child runner。
+> 状态：四份文档已获用户批准，正在实现（2026-10-07）。验收项取得实际证据后勾选。
 
 ## 架构与职责
 
@@ -74,11 +74,11 @@ type AgentTaskService interface {
 1. 服务从调用者 ParentRun 构造受信 WorkRef、授权根与 permission bounds；请求内无 session/root/credential 字段。
 2. 解析角色，取有效只读工具交集，拼接角色正文和显式任务；检查完整 JSON 编码后的 64 KiB 上限。
 3. 创建独立 run ID、task ID；保留 OriginRunID，用独立 run ID 重写 authority.run_id，保留 session/goal/workitem/root/permission 其余字段。
-4. session log `RunStarted` 增加可选 `AgentTaskID`、`AgentName`、`OriginRunID` 标识。它保存任务标签与来源，不保存 definition 正文。独立 run 使用与 origin 相同的 WorkRef，以便所属 Goal 的权限保持一致，但不修改目标事实。
+4. session log `RunStarted` 增加可选 `AgentTaskID`、`AgentName`、`OriginRunID` 标识及受信 `OriginCallID` 工具调用关联。它保存任务标签与来源，不保存 definition 正文。独立 run 使用与 origin 相同的 WorkRef，以便所属 Goal 的权限保持一致，但不修改目标事实。
 5. coordinator 在 active map 中先注册取消 handle，再入队；注册与父取消共享锁/取消代次，避免取消期间新加入旧父任务漏取消。提交失败将独立 run 终结为 failed 并向调用方返回未接受错误。
 6. queued/running/progress/terminal 沿已有 DelegationEvent 记录到独立 run；父 tool result 返回引用 ID 或同步结果。所有公开文本先脱敏并截断。
 7. terminal 在事件锁下只记录一次，并追加独立 run outcome；记录成功后广播、移除 active handle并产生 session 完成通知。通知投影以 task ID + terminal seq 去重。
-8. 下一次普通父 run 在构造上下文时读取所属 session 尚未交接的 terminal 摘要，记录 destination run ID 的通知引用；服务恢复时对不存在 run_started 的 destination 不视作已交接。客户端通知通过 cursor 消费，不依赖只在内存中的队列。
+8. 下一次普通父 run 在构造上下文时读取所属 session 尚未交接的 terminal 摘要，每轮至多注入 20 条、编码摘要总计 64 KiB，余项留待后续 run；记录 destination run ID 的通知引用；服务恢复时对不存在 run_started 的 destination 不视作已交接。客户端通知通过 cursor 消费，不依赖只在内存中的队列。
 
 普通 run 的模型历史只增加经过验证的 summary/error 通知，不增加 child 原始 transcript。goal 路径仅接收与其 WorkRef 匹配的任务通知；不把其他目标或普通 session 任务的结果混入目标上下文。
 

@@ -463,3 +463,209 @@ func TestPoolDelegatorRejectsOversizeAndCanceledInput(t *testing.T) {
 		t.Fatalf("err=%v, want context canceled", err)
 	}
 }
+
+type delegationReporterFunc func(string, DelegationEvent) error
+
+func (f delegationReporterFunc) Publish(runID string, event DelegationEvent) error {
+	return f(runID, event)
+}
+
+func awaitSubmittedResult(t *testing.T, handle *TaskHandle) DelegationResult {
+	t.Helper()
+	select {
+	case result, ok := <-handle.Results:
+		if !ok {
+			t.Fatal("task closed without a result")
+		}
+		return result
+	case <-time.After(time.Second):
+		t.Fatal("accepted task did not settle")
+		return DelegationResult{}
+	}
+}
+
+func TestPoolDelegatorSubmitTaskRejectsWithoutPublishingOrStarting(t *testing.T) {
+	started := make(chan struct{})
+	var calls atomic.Int32
+	collector := &eventCollector{}
+	runner := childRunnerFunc(func(ctx context.Context, _ ChildRunInput) ChildRunResult {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-ctx.Done()
+		return ChildRunResult{Status: DelegationCanceled}
+	})
+	d, err := NewPoolDelegator(DelegationLimits{Workers: 1, QueueCapacity: 1}, runner, collector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	first, err := d.SubmitTask(context.Background(), validParent(), tasks(1)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	secondTask := DelegationTask{ID: "second", Name: "second", Instruction: "inspect"}
+	second, err := d.SubmitTask(context.Background(), validParent(), secondTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(collector.snapshot())
+	thirdTask := DelegationTask{ID: "rejected", Name: "rejected", Instruction: "inspect"}
+	if rejected, err := d.SubmitTask(context.Background(), validParent(), thirdTask); rejected != nil || !errors.Is(err, ErrDelegationQueueFull) {
+		t.Fatalf("rejected handle=%+v err=%v", rejected, err)
+	}
+	if got := len(collector.snapshot()); got != before {
+		t.Fatalf("rejected request emitted %d events", got-before)
+	}
+	second.Cancel()
+	first.Cancel()
+	if result := awaitSubmittedResult(t, first); result.Status != DelegationCanceled {
+		t.Fatalf("first result=%+v", result)
+	}
+	if result := awaitSubmittedResult(t, second); result.Status != DelegationCanceled {
+		t.Fatalf("queued cancel result=%+v", result)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("runner invoked %d times; queued canceled or rejected task started", calls.Load())
+	}
+	if _, ok := <-second.Results; ok {
+		t.Fatal("task delivered more than one terminal result")
+	}
+}
+
+func TestPoolDelegatorSubmitTaskRequiresQueuedPersistence(t *testing.T) {
+	var calls atomic.Int32
+	var fail atomic.Bool
+	fail.Store(true)
+	persistErr := errors.New("disk unavailable")
+	reporter := delegationReporterFunc(func(_ string, event DelegationEvent) error {
+		if fail.Load() && event.Status == DelegationQueued {
+			return persistErr
+		}
+		return nil
+	})
+	d, err := NewPoolDelegator(DelegationLimits{Workers: 1, QueueCapacity: 1}, childRunnerFunc(func(context.Context, ChildRunInput) ChildRunResult {
+		calls.Add(1)
+		return ChildRunResult{Status: DelegationSucceeded}
+	}), reporter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if handle, err := d.SubmitTask(context.Background(), validParent(), tasks(1)[0]); handle != nil || !errors.Is(err, persistErr) {
+		t.Fatalf("unpersisted handle=%+v err=%v", handle, err)
+	}
+	if calls.Load() != 0 || len(d.queueSlots) != 0 || len(d.queue) != 0 {
+		t.Fatal("failed persistence started work or leaked queue capacity")
+	}
+	fail.Store(false)
+	handle, err := d.SubmitTask(context.Background(), validParent(), tasks(1)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := awaitSubmittedResult(t, handle); result.Status != DelegationSucceeded {
+		t.Fatalf("after persistence recovery result=%+v", result)
+	}
+}
+
+func TestPoolDelegatorCloseDuringQueuedPersistenceSettlesAcceptedTask(t *testing.T) {
+	persisting := make(chan struct{})
+	releasePersistence := make(chan struct{})
+	var calls atomic.Int32
+	reporter := delegationReporterFunc(func(_ string, event DelegationEvent) error {
+		if event.Status == DelegationQueued {
+			close(persisting)
+			<-releasePersistence
+		}
+		return nil
+	})
+	d, err := NewPoolDelegator(DelegationLimits{Workers: 1, QueueCapacity: 1}, childRunnerFunc(func(context.Context, ChildRunInput) ChildRunResult {
+		calls.Add(1)
+		return ChildRunResult{Status: DelegationSucceeded}
+	}), reporter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	handles := make(chan *TaskHandle, 1)
+	errs := make(chan error, 1)
+	go func() {
+		handle, err := d.SubmitTask(context.Background(), validParent(), tasks(1)[0])
+		handles <- handle
+		errs <- err
+	}()
+	<-persisting
+	closed := make(chan struct{})
+	go func() {
+		d.Close()
+		close(closed)
+	}()
+	select {
+	case <-d.life.Done():
+	case <-time.After(time.Second):
+		t.Fatal("close did not cancel service lifetime")
+	}
+	close(releasePersistence)
+	if err := <-errs; err != nil {
+		t.Fatalf("in-flight durable acceptance failed: %v", err)
+	}
+	handle := <-handles
+	if result := awaitSubmittedResult(t, handle); result.Status != DelegationInterrupted {
+		t.Fatalf("shutdown result=%+v", result)
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("service close did not return")
+	}
+	if calls.Load() != 0 {
+		t.Fatal("shutdown task reached the runner")
+	}
+	if handle, err := d.SubmitTask(context.Background(), validParent(), tasks(1)[0]); handle != nil || !errors.Is(err, ErrDelegationClosed) {
+		t.Fatalf("closed service handle=%+v err=%v", handle, err)
+	}
+}
+
+func TestPoolDelegatorTaskBudgetCanOnlyNarrow(t *testing.T) {
+	defaults := DefaultDelegationLimits()
+	larger := defaults
+	larger.MaxInputBytes *= 2
+	larger.MaxToolRounds *= 2
+	larger.MaxDuration *= 2
+	larger.MaxSummaryBytes *= 2
+	larger.MaxToolOutputBytes *= 2
+	gotBudgets := make(chan DelegationLimits, 2)
+	d, err := NewPoolDelegator(larger, childRunnerFunc(func(_ context.Context, input ChildRunInput) ChildRunResult {
+		gotBudgets <- input.Budget
+		return ChildRunResult{Status: DelegationSucceeded, Summary: "long summary"}
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	parent := validParent()
+	parent.Budget = larger
+	handle, err := d.SubmitTask(context.Background(), parent, tasks(1)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitSubmittedResult(t, handle)
+	if got := <-gotBudgets; got != defaults {
+		t.Fatalf("expanded budgets accepted: %+v, want %+v", got, defaults)
+	}
+	parent.Budget = DelegationLimits{MaxToolRounds: 2, MaxDuration: time.Second, MaxSummaryBytes: 4, MaxToolOutputBytes: 100}
+	handle, err = d.SubmitTask(context.Background(), parent, tasks(1)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := awaitSubmittedResult(t, handle)
+	got := <-gotBudgets
+	if got.MaxToolRounds != 2 || got.MaxDuration != time.Second || got.MaxSummaryBytes != 4 || got.MaxToolOutputBytes != 100 || len(result.Summary) > 4 {
+		t.Fatalf("narrowed budget=%+v result=%+v", got, result)
+	}
+	parent.Budget.MaxInputBytes = 8
+	if handle, err := d.SubmitTask(context.Background(), parent, tasks(1)[0]); handle != nil || err == nil {
+		t.Fatalf("per-task input cap ignored: handle=%+v err=%v", handle, err)
+	}
+}

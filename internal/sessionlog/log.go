@@ -38,7 +38,7 @@ func Append(root, id, typ string, data any) (Event, error) {
 		return Event{}, errors.New("event type is required")
 	}
 	switch typ {
-	case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload, EventMCPReload, EventMCPServer:
+	case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload, EventMCPReload, EventMCPServer, EventAgentTaskNotification:
 	default:
 		return Event{}, fmt.Errorf("unknown event type %q", typ)
 	}
@@ -79,7 +79,7 @@ func Append(root, id, typ string, data any) (Event, error) {
 			}
 		}
 		switch typ {
-		case EventBoundary, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload, EventMCPReload, EventMCPServer:
+		case EventBoundary, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload, EventMCPReload, EventMCPServer, EventAgentTaskNotification:
 			if err := validateOwnedAppend(id, typ, data, replay.Events, seq+1); err != nil {
 				return Event{}, err
 			}
@@ -201,6 +201,10 @@ func ReplayAfter(root, id string, afterSeq uint64) (Transcript, error) {
 }
 
 func validateRunAppend(sessionID, typ string, data any, events []Event) error {
+	agentTasks, err := scanAgentTasks(sessionID, events)
+	if err != nil {
+		return err
+	}
 	starts := map[string]RunStarted{}
 	lastSeq := map[string]uint64{}
 	terminal := map[string]bool{}
@@ -241,7 +245,7 @@ func validateRunAppend(sessionID, typ string, data any, events []Event) error {
 		default:
 			return errors.New("run has invalid work kind")
 		}
-		return nil
+		return agentTasks.checkStarted(started)
 	}
 	var runEvent RunEvent
 	if err := decodeData(data, &runEvent); err != nil || runEvent.ID == "" || runEvent.RunID == "" || runEvent.RunSeq == 0 || runEvent.Kind == "" || runEvent.At.IsZero() {
@@ -252,6 +256,9 @@ func validateRunAppend(sessionID, typ string, data any, events []Event) error {
 	}
 	if starts[runEvent.RunID].RunID == "" {
 		return errors.New("run_event has no run_started event")
+	}
+	if err := agentTasks.checkRunEvent(sessionID, runEvent); err != nil {
+		return err
 	}
 	if terminal[runEvent.RunID] && runEvent.Kind != "delegation_event" {
 		return errors.New("run_event follows terminal event")
@@ -310,6 +317,7 @@ func replayFile(path, id string) (Transcript, error) {
 	runSeq := map[string]uint64{}
 	runTerminal := map[string]bool{}
 	runEventIDs := map[string]bool{}
+	agentTasks := newAgentTaskState()
 	for s.Scan() {
 		line := append([]byte(nil), s.Bytes()...)
 		var e Event
@@ -320,7 +328,7 @@ func replayFile(path, id string) (Transcript, error) {
 			return out, fmt.Errorf("session log invalid envelope at seq %d", expected)
 		}
 		switch e.Type {
-		case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload, EventMCPReload, EventMCPServer:
+		case EventSessionCreated, EventActivity, EventMessage, EventProposal, EventToolCall, EventToolResult, EventBoundary, EventRunStarted, EventRunEvent, EventSnapshot, EventRewind, EventQuestion, EventReply, EventPlanMode, EventPlanApproval, EventTodo, EventSkillInventory, EventSkillDelta, EventSkillInvoked, EventHookFired, EventHookReload, EventMCPReload, EventMCPServer, EventAgentTaskNotification:
 		default:
 			return out, fmt.Errorf("session log has unknown event type %q at seq %d", e.Type, e.Seq)
 		}
@@ -460,6 +468,9 @@ func replayFile(path, id string) (Transcript, error) {
 			if err := checkMCPServer(server); err != nil {
 				return out, fmt.Errorf("session log has invalid mcp server event at seq %d: %v", e.Seq, err)
 			}
+		case EventAgentTaskNotification:
+			// The task lifecycle validator below checks the terminal reference
+			// and destination work ownership.
 		case EventRunStarted:
 			var started RunStarted
 			if decodeData(e.Data, &started) != nil || started.RunID == "" || started.Intent == "" || runStarts[started.RunID].RunID != "" {
@@ -502,6 +513,9 @@ func replayFile(path, id string) (Transcript, error) {
 			}
 			runSeq[runEvent.RunID] = runEvent.RunSeq
 			runEventIDs[runEvent.ID] = true
+		}
+		if err := agentTasks.observe(id, e); err != nil {
+			return out, fmt.Errorf("session log has invalid agent task at seq %d: %w", e.Seq, err)
 		}
 		out.Events = append(out.Events, e)
 		expected++

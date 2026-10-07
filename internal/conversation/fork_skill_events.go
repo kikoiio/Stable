@@ -10,6 +10,17 @@ import (
 )
 
 func (s *Service) publishDelegationEvent(runID string, event agent.DelegationEvent) error {
+	if s.deps.AgentTasks != nil && s.deps.AgentTasks.ownsRun(runID, event.SessionID) {
+		if err := s.appendParentDelegationEvent(runID, event); err != nil {
+			return err
+		}
+		snapshot, err := s.findAgentRun(event.SessionID, runID)
+		if err != nil {
+			return err
+		}
+		s.broadcastRun(ServerMsg{Type: "agent_task_update", AgentTask: &snapshot, RunID: runID, Cursor: snapshot.Cursor}, event.SessionID, "", snapshot.Cursor)
+		return nil
+	}
 	s.mu.Lock()
 	forkRun := s.activeForkRuns[runID]
 	_, parentRun := s.activeRuns[runID]
@@ -82,7 +93,7 @@ func (s *Service) appendParentDelegationEvent(runID string, event agent.Delegati
 	}
 	runEvent := sessionlog.RunEvent{
 		ID: id, RunID: runID, SessionID: sessionID, RunSeq: lastSeq + 1,
-		At: updatedAt, Kind: string(agent.EventDelegation), Payload: payload,
+		At: updatedAt, Kind: string(agent.EventDelegation), Payload: json.RawMessage(payload),
 	}
 	stored, appendErr := sessionlog.Append(s.deps.ProjectRoot, sessionID, sessionlog.EventRunEvent, runEvent)
 	s.eventMu.Unlock()
@@ -105,7 +116,7 @@ func (s *Service) appendForkProgress(state *forkRunState, runID string, event ag
 	state.runSeq++
 	runEvent := sessionlog.RunEvent{
 		ID: id, RunID: runID, SessionID: state.sessionID, RunSeq: state.runSeq,
-		At: time.Now().UTC(), Kind: string(agent.EventDelegation), Payload: payload,
+		At: time.Now().UTC(), Kind: string(agent.EventDelegation), Payload: json.RawMessage(payload),
 	}
 	stored, err := sessionlog.Append(s.deps.ProjectRoot, state.sessionID, sessionlog.EventRunEvent, runEvent)
 	s.eventMu.Unlock()

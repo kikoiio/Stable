@@ -95,7 +95,7 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		}
 	}
 	if e.deps.SessionRoot != "" {
-		if _, logErr := sessionlog.Append(e.deps.SessionRoot, e.request.Work.SessionID, sessionlog.EventToolCall, sessionlog.ToolCall{CallID: call.ID, Name: call.Name, Input: redactJSON(args, e.deps.ProviderCredential)}); logErr != nil {
+		if _, logErr := sessionlog.Append(e.deps.SessionRoot, e.request.Work.SessionID, sessionlog.EventToolCall, sessionlog.ToolCall{CallID: call.ID, RunID: e.request.RunID, Name: call.Name, Input: redactJSON(args, e.deps.ProviderCredential)}); logErr != nil {
 			return outcome, fmt.Errorf("record tool call: %w", logErr)
 		}
 	}
@@ -670,6 +670,8 @@ func (e *toolRunExecutor) executeHostTool(ctx context.Context, call llm.ToolUse,
 		return e.executeTaskTool(call, args, outcome), true
 	case "load_skill":
 		return e.executeLoadSkill(ctx, call, args, outcome), true
+	case "run_agent", "task_output", "task_stop":
+		return e.executeAgentTaskTool(ctx, call, args, outcome), true
 	case "mcp_call":
 		if e.deps.MCP != nil {
 			return e.executeMCPCall(ctx, call, args, outcome), true
