@@ -441,12 +441,12 @@ func (g *PrivateGit) makeRepositoryPrivate(ctx context.Context, path string) err
 			return ErrUnsafePath
 		}
 		if info.IsDir() {
-			return root.Chmod(name, 0700)
+			return secfile.ChmodRoot(root, name, 0700)
 		}
 		if err := validateHardlinks(info); err != nil {
 			return err
 		}
-		return root.Chmod(name, 0600)
+		return secfile.ChmodRoot(root, name, 0600)
 	})
 	if err != nil {
 		return err

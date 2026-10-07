@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"stable/internal/platform/secfile"
 )
 
 type ManifestEntry struct {
@@ -426,7 +428,7 @@ func copySnapshot(ctx context.Context, source, target string, limits Limits, all
 		if written != entry.Size || hex.EncodeToString(h.Sum(nil)) != entry.Digest {
 			return Manifest{}, ErrSourceChanged
 		}
-		if err := destination.Chmod(entry.Path, os.FileMode(entry.Mode)); err != nil {
+		if err := secfile.ChmodRoot(destination, entry.Path, os.FileMode(entry.Mode)); err != nil {
 			return Manifest{}, err
 		}
 	}
