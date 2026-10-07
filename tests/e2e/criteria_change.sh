@@ -163,6 +163,7 @@ freeze_verified() { # revision; leaves the worker stopped on a verified goal
       return 0
     fi
     start_runner
+    start_chat
   done
   echo 'goal did not stay verified across worker stop' >&2
   exit 1
@@ -185,7 +186,10 @@ PY
 # --- phase 4: confirm tightened criteria mid-run, controlled pause, converge ---
 # freeze_verified left the worker stopped; bring it back so the v2 confirm
 # lands mid-run instead of taking the deferred path covered by phase 2.
+# stable up rebinds the chat socket with its own root, so chatserve must be
+# restarted too before any e2e_chat call.
 start_runner
+start_chat
 e2e_chat create_goal --session "$session_id" --goal "$goal_id" --text "修复传感器连接，ERC 必须全过，J1 连接要恢复" >"$run_root/create-v2.jsonl"
 proposal_v2=$(proposal_from "$run_root/create-v2.jsonl")
 [[ -n "$proposal_v2" ]] || { echo 'no v2 proposal' >&2; exit 1; }
