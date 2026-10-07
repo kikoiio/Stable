@@ -73,6 +73,23 @@ wait_candidate() {
 	return 1
 }
 
+queue_notification() {
+  local event=$1 kind=$2 error_file="$run_root/notify-$1.error"
+  for _ in $(seq 1 100); do
+    if "$run_root/bin/agentctl" notify --run-root "$run_root/goals" --db "$run_root/state.db" --temporal "$address" \
+      --goal "$goal_id" --event "$event" --kind "$kind" >/dev/null 2>"$error_file"; then
+      return 0
+    fi
+    if ! grep -q 'database is locked' "$error_file"; then
+      cat "$error_file" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  cat "$error_file" >&2
+  return 1
+}
+
 start_runner
 session_id=$(e2e_new_session "$run_root/session.jsonl")
 cat > "$run_root/goal-definition.json" <<'JSON'
@@ -89,6 +106,7 @@ e2e_chat confirm --session "$session_id" --goal "$goal_id" --proposal "$proposal
 
 session_restarted=0
 for _ in $(seq 1 900); do
+	if [[ -e "$marker" ]]; then break; fi
 	e2e_allow_pending_approvals "$session_id" || true
 	if ! read_status; then sleep 0.5; continue; fi
   # M03: the isolated KiCad session runs inside a PID namespace, so host-side
@@ -110,10 +128,8 @@ wait "$runner_pid" 2>/dev/null || true
 runner_pid=
 
 # These notifications are accepted by the SQLite inbox while Temporal is down.
-"$run_root/bin/agentctl" notify --run-root "$run_root/goals" --db "$run_root/state.db" --temporal "$address" \
-  --goal "$goal_id" --event design-event --kind design_changed >/dev/null
-"$run_root/bin/agentctl" notify --run-root "$run_root/goals" --db "$run_root/state.db" --temporal "$address" \
-  --goal "$goal_id" --event after-crash --kind external_check_failed >/dev/null
+queue_notification design-event design_changed
+queue_notification after-crash external_check_failed
 
 start_runner
 for _ in $(seq 1 240); do [[ -S "$run_root/chat.sock" ]] && break; sleep 0.5; done
