@@ -23,8 +23,8 @@
 ## 验证记录
 
 - [ ] fake-provider 验证不调用真实 provider 或外网，并覆盖 AC1–AC8。
-- [ ] 本机只运行轻量定向验证；重型集成验证在 GitHub Actions 执行，并记录 workflow/run 链接、结论及失败项。若云端运行未完成或失败，明确记录未覆盖部分，不标记通过。
-- [ ] 最终 diff、格式化和文档状态检查完成；没有未审阅的生成文件或运行结果。
+- [x] 本机只运行轻量定向验证；重型集成验证在 GitHub Actions 执行，并记录 workflow/run 链接、结论及失败项。若云端运行未完成或失败，明确记录未覆盖部分，不标记通过。
+- [x] 最终 diff、格式化和文档状态检查完成；没有未审阅的生成文件或运行结果。
 
 ### 2026-10-07 本轮进度
 
@@ -36,4 +36,6 @@
 - 通过：`go test -p 2 ./internal/agent ./internal/hooks ./internal/conversation ./internal/execution ./internal/sessionlog ./internal/tui -run 'HookAgent|RunTask|Delegation|HookEvents|HookFired|ForkSkill|ForkContext|ReadOnlyExecutor|Validate|Fire' -count=1`。
 - 相关模块整包测试未全部完成：一次运行因工作区 `TMPDIR` 过长导致 Unix socket bind 失败；改回系统临时目录后，conversation/execution 测试二进制链接遇到 disk quota exceeded。未将该次运行计为通过。
 - GitHub Actions [E2E run 37578219968](https://github.com/kikoiio/Stable/actions/runs/37578219968) 在远端分支提交 `47bf2de` 运行。`unit`、`cases`、`e2e-m03`、`e2e-m04`、`e2e-sessions` 通过；`e2e-core` 的 `make e2e` 失败，脚本报告 `candidate did not become ready`，期间 chat client 多次报告 socket `FileNotFoundError`。此失败不在 M09-C Hook Agent 测试路径。
-- 云端 checkout 是未包含本地工作区改动的 `47bf2de`；本轮恢复修复只由上面的本地定向测试验证。AC1–AC8 尚未全量验收，整体不标记通过。
+- GitHub Actions [Go run 37580835794](https://github.com/kikoiio/Stable/actions/runs/37580835794) 在提交 `6fcc08fbd0ce7b2e823709922e4d893aa247efa1` 运行；`build-and-test`（依赖校验、构建、`go test ./...`）与 `test-package` 全部通过。
+- GitHub Actions [E2E run 37580835641](https://github.com/kikoiio/Stable/actions/runs/37580835641) 在同一提交运行；`unit`、`cases`、`e2e-sessions`、`e2e-m03`、`e2e-m04`、`e2e-core`（`make e2e`）全部通过。
+- 上一条 E2E 失败属于旧提交 `47bf2de`，不包含本轮修复；本轮提交对应的 Go 与 E2E workflow 均通过。AC1–AC8 尚未全量验收，整体不标记通过。
