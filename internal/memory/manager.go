@@ -24,11 +24,12 @@ const (
 )
 
 type BackgroundEvent struct {
-	Action string
-	State  string
-	Count  int
-	Reason string
-	At     time.Time
+	Action    string
+	State     string
+	Count     int
+	Reason    string
+	SessionID string
+	At        time.Time
 }
 
 type Options struct {
@@ -271,7 +272,7 @@ func (s *Service) CompleteRun(_ context.Context, completion RunCompletion) {
 		return
 	}
 	if err := s.checkProjectRoot(completion.ProjectRoot); err != nil {
-		s.emit(s.projectRoot, BackgroundEvent{Action: "extract", State: "failed", Reason: safeError(err)})
+		s.emitFor(completion.SessionID, BackgroundEvent{Action: "extract", State: "failed", Reason: safeError(err)})
 		return
 	}
 	s.closeMu.Lock()
@@ -282,7 +283,7 @@ func (s *Service) CompleteRun(_ context.Context, completion RunCompletion) {
 	select {
 	case s.queue <- completion:
 	default:
-		s.emit(s.projectRoot, BackgroundEvent{Action: "extract", State: "skipped", Reason: "background queue is full"})
+		s.emitFor(completion.SessionID, BackgroundEvent{Action: "extract", State: "skipped", Reason: "background queue is full"})
 	}
 }
 
@@ -292,7 +293,7 @@ func (s *Service) MaybeConsolidate(ctx context.Context, projectRoot string) erro
 	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
-	return s.consolidate(ctx)
+	return s.consolidate(ctx, "")
 }
 
 func (s *Service) runWorker() {
@@ -309,7 +310,7 @@ func (s *Service) processCompletion(ctx context.Context, completion RunCompletio
 	defer s.opMu.Unlock()
 	state, err := s.loadState()
 	if err != nil {
-		s.emit(s.projectRoot, BackgroundEvent{Action: "extract", State: "failed", Reason: safeError(err)})
+		s.emitFor(completion.SessionID, BackgroundEvent{Action: "extract", State: "failed", Reason: safeError(err)})
 		return
 	}
 	if state.SessionCursors == nil {
@@ -321,7 +322,7 @@ func (s *Service) processCompletion(ctx context.Context, completion RunCompletio
 	state.SessionsSinceConsolidation[completion.SessionID] = true
 	store, err := s.newStore()
 	if err != nil {
-		s.emit(s.projectRoot, BackgroundEvent{Action: "extract", State: "failed", Reason: safeError(err)})
+		s.emitFor(completion.SessionID, BackgroundEvent{Action: "extract", State: "failed", Reason: safeError(err)})
 		return
 	}
 	count := 0
@@ -333,22 +334,22 @@ func (s *Service) processCompletion(ctx context.Context, completion RunCompletio
 	default:
 		headers, _, err := store.List()
 		if err != nil {
-			s.emit(s.projectRoot, BackgroundEvent{Action: "extract", State: "failed", Reason: safeError(err)})
+			s.emitFor(completion.SessionID, BackgroundEvent{Action: "extract", State: "failed", Reason: safeError(err)})
 			return
 		}
 		changes, err := s.processor.Extract(ctx, ExtractionInput{WorkKind: completion.WorkKind, Messages: completion.Messages, Existing: headers})
 		if err != nil {
-			s.emit(s.projectRoot, BackgroundEvent{Action: "extract", State: "failed", Reason: safeError(err)})
+			s.emitFor(completion.SessionID, BackgroundEvent{Action: "extract", State: "failed", Reason: safeError(err)})
 			return
 		}
 		changes, err = validateChanges(changes, completion.WorkKind)
 		if err != nil {
-			s.emit(s.projectRoot, BackgroundEvent{Action: "extract", State: "failed", Reason: safeError(err)})
+			s.emitFor(completion.SessionID, BackgroundEvent{Action: "extract", State: "failed", Reason: safeError(err)})
 			return
 		}
 		count, err = s.applyChanges(store, changes)
 		if err != nil {
-			s.emit(s.projectRoot, BackgroundEvent{Action: "extract", State: "failed", Count: count, Reason: safeError(err)})
+			s.emitFor(completion.SessionID, BackgroundEvent{Action: "extract", State: "failed", Count: count, Reason: safeError(err)})
 			return
 		}
 	}
@@ -356,20 +357,20 @@ func (s *Service) processCompletion(ctx context.Context, completion RunCompletio
 		state.SessionCursors[completion.SessionID] = completion.ThroughSeq
 	}
 	if err := s.saveState(state); err != nil {
-		s.emit(s.projectRoot, BackgroundEvent{Action: "extract", State: "failed", Count: count, Reason: safeError(err)})
+		s.emitFor(completion.SessionID, BackgroundEvent{Action: "extract", State: "failed", Count: count, Reason: safeError(err)})
 		return
 	}
 	stateName := "success"
 	if completion.MainAgentWroteMemory || len(completion.Messages) == 0 {
 		stateName = "skipped"
 	}
-	s.emit(s.projectRoot, BackgroundEvent{Action: "extract", State: stateName, Count: count})
-	if err := s.consolidate(ctx); err != nil {
-		s.emit(s.projectRoot, BackgroundEvent{Action: "consolidate", State: "failed", Reason: safeError(err)})
+	s.emitFor(completion.SessionID, BackgroundEvent{Action: "extract", State: stateName, Count: count})
+	if err := s.consolidate(ctx, completion.SessionID); err != nil {
+		s.emitFor(completion.SessionID, BackgroundEvent{Action: "consolidate", State: "failed", Reason: safeError(err)})
 	}
 }
 
-func (s *Service) consolidate(ctx context.Context) error {
+func (s *Service) consolidate(ctx context.Context, sessionID string) error {
 	state, err := s.loadState()
 	if err != nil {
 		return err
@@ -379,11 +380,11 @@ func (s *Service) consolidate(ctx context.Context) error {
 	}
 	now := s.now().UTC()
 	if !state.LastConsolidatedAt.IsZero() && now.Sub(state.LastConsolidatedAt) < 24*time.Hour {
-		s.emit(s.projectRoot, BackgroundEvent{Action: "consolidate", State: "skipped", Reason: "24-hour interval has not elapsed"})
+		s.emitFor(sessionID, BackgroundEvent{Action: "consolidate", State: "skipped", Reason: "24-hour interval has not elapsed"})
 		return nil
 	}
 	if len(state.SessionsSinceConsolidation) < 5 {
-		s.emit(s.projectRoot, BackgroundEvent{Action: "consolidate", State: "skipped", Reason: "fewer than five active sessions"})
+		s.emitFor(sessionID, BackgroundEvent{Action: "consolidate", State: "skipped", Reason: "fewer than five active sessions"})
 		return nil
 	}
 	store, err := s.newStore()
@@ -411,7 +412,7 @@ func (s *Service) consolidate(ctx context.Context) error {
 	if err := s.saveState(state); err != nil {
 		return err
 	}
-	s.emit(s.projectRoot, BackgroundEvent{Action: "consolidate", State: "success", Count: count})
+	s.emitFor(sessionID, BackgroundEvent{Action: "consolidate", State: "success", Count: count})
 	return nil
 }
 
@@ -571,6 +572,11 @@ func (s *Service) emit(projectRoot string, event BackgroundEvent) {
 		event.Reason = event.Reason[:256]
 	}
 	s.onEvent(projectRoot, event)
+}
+
+func (s *Service) emitFor(sessionID string, event BackgroundEvent) {
+	event.SessionID = sessionID
+	s.emit(s.projectRoot, event)
 }
 
 func safeError(err error) string {

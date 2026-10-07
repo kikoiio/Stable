@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"stable/internal/memory"
 	"stable/internal/sessionlog"
@@ -64,5 +65,26 @@ func TestMemoryGateBindsRootsAndClearDefaultsToProject(t *testing.T) {
 	}
 	if len(clearScopes) != 2 || clearScopes[0] != "project" || clearScopes[1] != "all" {
 		t.Fatalf("clear audit scopes = %v", clearScopes)
+	}
+}
+
+func TestAppendMemoryBackgroundEventWritesMetadataOnly(t *testing.T) {
+	root := t.TempDir()
+	info, err := sessionlog.Create(root, "memory-worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	AppendMemoryBackgroundEvent(root, memory.BackgroundEvent{Action: "extract", State: "success", Count: 2, SessionID: info.ID, At: time.Now().UTC()})
+	replay, err := sessionlog.Replay(root, info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replay.Events) != 2 || replay.Events[1].Type != sessionlog.EventMemoryBackground {
+		t.Fatalf("background events = %+v", replay.Events)
+	}
+	var record sessionlog.MemoryBackgroundRecord
+	data, _ := json.Marshal(replay.Events[1].Data)
+	if err := json.Unmarshal(data, &record); err != nil || record.Action != "extract" || record.State != "success" || record.Count != 2 {
+		t.Fatalf("background event record = %+v, %v", record, err)
 	}
 }

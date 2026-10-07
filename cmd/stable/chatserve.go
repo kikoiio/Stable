@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"syscall"
+	"time"
 
 	"stable/internal/agent"
 	"stable/internal/appconfig"
@@ -21,6 +22,7 @@ import (
 	"stable/internal/execution"
 	"stable/internal/llm"
 	"stable/internal/mcp"
+	"stable/internal/memory"
 	"stable/internal/permission"
 	"stable/internal/platform/paths"
 	"stable/internal/platform/sandbox"
@@ -78,6 +80,30 @@ func chatserve(args []string) error {
 		return err
 	}
 	helperPath := p.HelperBinaryResolved("agentworker")
+	userMemoryDir, err := appconfig.UserMemoryDir()
+	if err != nil {
+		return err
+	}
+	memoryManager, err := memory.NewManager(memory.Options{
+		ProjectRoot:   *projectRoot,
+		UserConfigDir: filepath.Dir(filepath.Dir(userMemoryDir)),
+		StateDir:      p.State,
+		Model:         model.(decision.ChatProvider),
+		OnEvent: func(root string, event memory.BackgroundEvent) {
+			conversation.AppendMemoryBackgroundEvent(root, event)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("memory manager: %w", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+		defer cancel()
+		if closeErr := memoryManager.Close(closeCtx); closeErr != nil {
+			log.Printf("memory manager shutdown: %v", closeErr)
+		}
+	}()
+	memoryGate := conversation.NewMemoryGate(memoryManager, *projectRoot)
 	var runner agent.Runner
 	var executorFactory agent.ExecutorFactory
 	var toolSchemas []llm.ToolSchema
@@ -111,17 +137,10 @@ func chatserve(args []string) error {
 			return fmt.Errorf("candidate snapshot store: %w", err)
 		}
 		executorFactory = execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
-			Sandbox:            sbx,
-			Gate:               execution.StorePermissionGate{Store: s},
-			Approvals:          s,
-			Candidates:         s,
-			HelperPath:         helperPath,
-			SessionRoot:        *projectRoot,
-			ProviderCredential: c.Model.APIKey,
-			Snapshots:          snapshotStore,
-			QuestionSink:       askSink,
-			TodoProvider:       todoProvider,
-		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate), execution.WithMCPCaller(mcpManager))
+			Sandbox: sbx, Gate: execution.StorePermissionGate{Store: s}, Approvals: s, Candidates: s, HelperPath: helperPath,
+			SessionRoot: *projectRoot, ProviderCredential: c.Model.APIKey, Snapshots: snapshotStore, QuestionSink: askSink,
+			TodoProvider: todoProvider,
+		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate), execution.WithMCPCaller(mcpManager), execution.WithMemoryProvider(memoryGate))
 		toolSchemas = chatserveToolSchemas(mcpManager)
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, model.(decision.ChatProvider))
 		if fellBack {
@@ -141,6 +160,7 @@ func chatserve(args []string) error {
 		Skills:              skillGate,
 		Hooks:               hookGate,
 		MCP:                 mcpManager,
+		Memory:              memoryGate,
 	})
 	if err != nil {
 		return err
@@ -185,11 +205,15 @@ func chatserveToolSchemas(callers ...execution.MCPCaller) []llm.ToolSchema {
 		"task_list":      "task_list",
 		"task_update":    "task_update",
 		"load_skill":     "load_skill",
+		"memory_list":    "memory_list",
+		"memory_read":    "memory_read",
+		"memory_save":    "memory_save",
+		"memory_delete":  "memory_delete",
 	}
 	registry := tools.CreateDefaultTools().Registry
 	// M06/M07 tools live outside the default registry; the copy keeps append
 	// from aliasing the registry slice.
-	sources := append(append(append([]map[string]any{}, registry.GetAllSchemas()...), execution.M06ToolSchemas()...), execution.SkillToolSchemas()...)
+	sources := append(append(append(append([]map[string]any{}, registry.GetAllSchemas()...), execution.M06ToolSchemas()...), execution.SkillToolSchemas()...), execution.MemoryToolSchemas()...)
 	schemas := make([]llm.ToolSchema, 0, len(nameMap)+1)
 	for _, schema := range sources {
 		internalName, _ := schema["name"].(string)

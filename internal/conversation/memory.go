@@ -138,3 +138,19 @@ func (s *Service) appendMemoryAction(sessionID, scope, operation, entry string, 
 		Scope: scope, Entry: entry, Operation: operation, State: state, At: time.Now().UTC(),
 	})
 }
+
+// AppendMemoryBackgroundEvent is the bounded adapter used by the manager's
+// asynchronous callback. Events without a session owner remain in process
+// diagnostics and are not attributed to an unrelated session.
+func AppendMemoryBackgroundEvent(projectRoot string, event memory.BackgroundEvent) {
+	if projectRoot == "" || event.SessionID == "" {
+		return
+	}
+	reason := strings.ToValidUTF8(event.Reason, "�")
+	if len([]rune(reason)) > sessionlog.MaxMemoryEventText {
+		reason = string([]rune(reason)[:sessionlog.MaxMemoryEventText])
+	}
+	_, _ = sessionlog.Append(projectRoot, event.SessionID, sessionlog.EventMemoryBackground, sessionlog.MemoryBackgroundRecord{
+		Action: event.Action, State: event.State, Count: event.Count, Reason: reason, At: event.At,
+	})
+}

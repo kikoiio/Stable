@@ -121,6 +121,20 @@ func TestManagerAdvancesCursorWhenAgentAlreadySavedMemory(t *testing.T) {
 	}
 }
 
+func TestManagerBackgroundEventsKeepSessionAttribution(t *testing.T) {
+	var events []BackgroundEvent
+	manager, project, _ := newTestManager(t, &fixedProcessor{}, nil, nil, func(_ string, event BackgroundEvent) {
+		events = append(events, event)
+	})
+	manager.CompleteRun(context.Background(), RunCompletion{ProjectRoot: project, SessionID: "session-owner", RunID: "run-1", ThroughSeq: 3})
+	if err := manager.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) < 2 || events[0].Action != "extract" || events[0].SessionID != "session-owner" || events[1].Action != "consolidate" || events[1].SessionID != "session-owner" {
+		t.Fatalf("background event attribution = %+v", events)
+	}
+}
+
 func TestManagerConsolidatesOnlyAfterTimeAndSessionGates(t *testing.T) {
 	now := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	processor := &fixedProcessor{}
