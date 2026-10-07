@@ -67,6 +67,46 @@ func TestTeamLifecycleIsBoundToTrustedWorkScope(t *testing.T) {
 	}
 }
 
+func TestSameTeamNameIsIsolatedAcrossValidSessions(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	firstService, firstRequest := teamServiceFixture(t, root, "run-first")
+	secondService, secondRequest := teamServiceFixture(t, root, "run-second")
+	firstTeam, err := firstService.CreateTeam(context.Background(), firstRequest, "Research")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTeam, err := secondService.CreateTeam(context.Background(), secondRequest, "research")
+	if err != nil {
+		t.Fatalf("same team name in another valid session was rejected: %v", err)
+	}
+	if firstTeam.ID == secondTeam.ID || firstTeam.Scope.SessionID == secondTeam.Scope.SessionID {
+		t.Fatalf("teams did not receive independent identities and scopes: first=%+v second=%+v", firstTeam, secondTeam)
+	}
+	for _, fixture := range []struct {
+		service *Service
+		request agent.ExecutionRequest
+		own     teams.Team
+		other   teams.Team
+	}{
+		{firstService, firstRequest, firstTeam, secondTeam},
+		{secondService, secondRequest, secondTeam, firstTeam},
+	} {
+		listed, err := fixture.service.ListTeams(context.Background(), fixture.request)
+		if err != nil || len(listed) != 1 || listed[0].ID != fixture.own.ID {
+			t.Fatalf("session %s listed %+v, err=%v; want only %s", fixture.request.Work.SessionID, listed, err, fixture.own.ID)
+		}
+		if _, err := fixture.service.GetTeam(context.Background(), fixture.request, fixture.own.ID); err != nil {
+			t.Fatalf("own team %s was not queryable: %v", fixture.own.ID, err)
+		}
+		if _, err := fixture.service.GetTeam(context.Background(), fixture.request, fixture.other.ID); err == nil {
+			t.Fatalf("session %s queried another session's team %s", fixture.request.Work.SessionID, fixture.other.ID)
+		}
+	}
+}
+
 func TestTeamLeadMustBePersistedForSameWork(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "project")
 	if err := os.MkdirAll(root, 0700); err != nil {
