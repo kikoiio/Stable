@@ -546,6 +546,7 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 	var root string
 	var scope teams.Scope
 	var actor teams.Actor
+	var err error
 	if grantGeneration == 0 {
 		root, scope, actor, err = s.teamOperationScope(ctx, request)
 		if err != nil || !actor.Lead {
