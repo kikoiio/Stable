@@ -245,7 +245,9 @@ def start(root: Path, path: Path, session_id: str, generation: int) -> dict:
         'path': str(path.resolve()),
     }
     accepted = set()
-    for _ in range(80):
+    # 80×0.15s(12s)在共享 CI runner 上不够 eeschema 冷启动(实测 13.6s 才出窗口),
+    # 放宽到 30s;窗口出现后仍立即返回,不影响正常路径耗时。
+    for _ in range(200):
         if window(root, display, path.stem):
             return handle
         seen = subprocess.run(['xwininfo', '-root', '-tree'], env=env, text=True, capture_output=True, timeout=5)

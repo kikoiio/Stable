@@ -60,9 +60,9 @@ jobs:
         if: failure()
         run: |
           mkdir -p ci-logs
-          cp -a run ci-logs/run 2>/dev/null || true
+          cp -aL run ci-logs/run 2>/dev/null || true
           for d in /tmp/stable-e2e-* /tmp/stable-m04-helper-*; do
-            [[ -d $d ]] && cp -a "$d" ci-logs/ || true
+            [[ -d $d ]] && cp -aL "$d" ci-logs/ || true
           done
       - name: Upload logs on failure
         if: failure()
@@ -89,9 +89,9 @@ jobs:
         if: failure()
         run: |
           mkdir -p ci-logs
-          cp -a run ci-logs/run 2>/dev/null || true
+          cp -aL run ci-logs/run 2>/dev/null || true
           for d in /tmp/stable-e2e-* /tmp/stable-m04-helper-*; do
-            [[ -d $d ]] && cp -a "$d" ci-logs/ || true
+            [[ -d $d ]] && cp -aL "$d" ci-logs/ || true
           done
       - name: Upload logs on failure
         if: failure()
@@ -118,9 +118,9 @@ jobs:
         if: failure()
         run: |
           mkdir -p ci-logs
-          cp -a run ci-logs/run 2>/dev/null || true
+          cp -aL run ci-logs/run 2>/dev/null || true
           for d in /tmp/stable-e2e-* /tmp/stable-m04-helper-*; do
-            [[ -d $d ]] && cp -a "$d" ci-logs/ || true
+            [[ -d $d ]] && cp -aL "$d" ci-logs/ || true
           done
       - name: Upload logs on failure
         if: failure()
@@ -151,9 +151,9 @@ jobs:
         if: failure()
         run: |
           mkdir -p ci-logs
-          cp -a run ci-logs/run 2>/dev/null || true
+          cp -aL run ci-logs/run 2>/dev/null || true
           for d in /tmp/stable-e2e-* /tmp/stable-m04-helper-*; do
-            [[ -d $d ]] && cp -a "$d" ci-logs/ || true
+            [[ -d $d ]] && cp -aL "$d" ci-logs/ || true
           done
       - name: Upload logs on failure
         if: failure()
@@ -181,9 +181,9 @@ jobs:
         if: failure()
         run: |
           mkdir -p ci-logs
-          cp -a run ci-logs/run 2>/dev/null || true
+          cp -aL run ci-logs/run 2>/dev/null || true
           for d in /tmp/stable-e2e-* /tmp/stable-m04-helper-*; do
-            [[ -d $d ]] && cp -a "$d" ci-logs/ || true
+            [[ -d $d ]] && cp -aL "$d" ci-logs/ || true
           done
       - name: Upload logs on failure
         if: failure()

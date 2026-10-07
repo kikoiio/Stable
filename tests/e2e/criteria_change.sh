@@ -69,7 +69,8 @@ start_chat() {
   "$dev_root/bin/stable" chatserve --db "$run_root/state.db" --socket "$run_root/chat.sock" \
     --temporal "$address" --project-root "$project_root" --run-root "$run_root/goals" >"$run_root/chatserve.log" 2>&1 &
   chat_pid=$!
-  for _ in $(seq 1 40); do [[ -S "$run_root/chat.sock" ]] && return 0; sleep 0.25; done
+  # 40×0.25s(10s)在慢 CI runner 上不够 chatserve 完成绑定;统一用 lib.sh 的 120s 等待。
+  if e2e_wait_for_chat_socket "$run_root/chat.sock"; then return 0; fi
   cat "$run_root/chatserve.log" >&2
   return 1
 }

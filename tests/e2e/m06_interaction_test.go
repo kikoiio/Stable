@@ -785,9 +785,11 @@ func TestM06PlanApprovalAutoAndAcceptEdits(t *testing.T) {
 		}
 		return false
 	})
-	if !stream.hasType("plan_approval_pending") {
-		t.Fatal("run stream did not receive the plan_approval_pending push")
-	}
+	// 日志可见不等于推送已扇出:push 由异步 poll 循环驱动,瞬时断言在慢
+	// runner 上是竞态,轮询等待推送到达。
+	m06Poll(t, 30*time.Second, "plan_approval_pending push", func() bool {
+		return stream.hasType("plan_approval_pending")
+	})
 	resolve := m06Op(t, ctx, env.socket, conversation.ClientMsg{Op: "plan_resolve", SessionID: sessionID, ApprovalChoice: conversation.PlanResolveAuto})
 	var resolvedState *conversation.PlanState
 	for _, m := range resolve {
@@ -1047,9 +1049,10 @@ func TestM06AskUserReplyRoundTrip(t *testing.T) {
 		}
 		return false
 	})
-	if !stream.hasType("questions") {
-		t.Fatal("run stream did not receive the questions push")
-	}
+	// 与 plan_approval_pending 同理:questions 推送是异步扇出,轮询而非瞬时断言。
+	m06Poll(t, 30*time.Second, "questions push", func() bool {
+		return stream.hasType("questions")
+	})
 	if questions := m06Questions(t, ctx, env, sessionID); len(questions) != 1 || questions[0].Prompt == "" {
 		t.Fatalf("questions = %+v", questions)
 	}

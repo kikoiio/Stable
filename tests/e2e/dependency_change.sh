@@ -330,10 +330,17 @@ print('V02 CHECKER VERSION RECOVERY PASS')
 PY
 
 # A required input disappearing keeps the target pending and explains the
-# missing source. Stop the worker before restoring it so the durable wake is
-# replayed after restart rather than relying on another user command.
+# missing source. Stop the worker BEFORE removing the input: with the worker
+# up, the queued wake re-evaluates the goal and the tool loop can flip the
+# status to needs_human ("unmet criteria: erc-clean") between read_status and
+# the export below, racing both assertions (CI flake). agentctl status/export
+# collect dependencies and reconcile against the store directly, so the
+# dependency change is still detected with the worker down, and the durable
+# wake is replayed after the restart rather than relying on another user
+# command.
 project_file="$goal_dir/sensor.kicad_pro"
 cp "$project_file" "$run_root/sensor.kicad_pro.saved"
+"$dev_root/bin/stable" down >/dev/null 2>&1 || true
 rm "$project_file"
 read_status
 python3 - "$status_file" <<'PY'
@@ -352,7 +359,8 @@ import json,sys
 d=json.load(open(sys.argv[1])); assert not d['verified'] and d['snapshot']['goal']['status']=='pending_reverification', d
 assert not any(e['criterion_id']=='erc-clean' and e['current'] for e in d['evidence']), d['evidence']
 PY
-"$dev_root/bin/stable" down >/dev/null 2>&1 || true
+# The worker is already down (stopped before the removal above); restore the
+# input and reconcile once more so the recovery wake is queued durably.
 cp "$run_root/sensor.kicad_pro.saved" "$project_file"
 read_status
 python3 - "$run_root/state.db" <<'PY'
