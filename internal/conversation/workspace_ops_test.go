@@ -8,8 +8,18 @@ import (
 	"testing"
 
 	"stable/internal/agent"
+	"stable/internal/candidate"
+	"stable/internal/permission"
+	"stable/internal/sessionlog"
+	"stable/internal/store"
 	"stable/internal/workspace"
 )
+
+type passingWorkspaceChecker struct{}
+
+func (passingWorkspaceChecker) Check(context.Context, candidate.Candidate) (candidate.Finding, error) {
+	return candidate.Finding{ID: "workspace-check", Checker: "workspace-test", Result: candidate.FindingPass}, nil
+}
 
 func TestInstallMergedManifestKeepsIndependentFormalAndWorkspaceChanges(t *testing.T) {
 	root := t.TempDir()
@@ -91,6 +101,145 @@ func TestWorkspacePreviewExporterReturnsOnlyConflictsAndInputDigests(t *testing.
 	}
 	if preview.ID != record.Snapshot.ID || preview.ConflictCount != 1 || len(preview.Conflicts) != 1 || preview.Conflicts[0] != "conflict.txt" || len(preview.BaselineDigest) != 64 || len(preview.FormalDigest) != 64 || len(preview.WorkspaceDigest) != 64 || preview.Summary != "" {
 		t.Fatalf("workspace preview included incomplete or unbounded data: %+v", preview)
+	}
+}
+
+func TestWorkspaceConflictResolutionExportsReviewedCandidateForAcceptance(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	formal := filepath.Join(root, "project")
+	if err := os.MkdirAll(formal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formal, "board.txt"), []byte("baseline"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := sessionlog.Create(root, "workspace-acceptance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.Open(filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	service := &Service{deps: Deps{
+		Store: state, ProjectRoot: root,
+		CandidateCheckers: []candidate.Checker{passingWorkspaceChecker{}},
+	}}
+	layout, err := workspace.NewLayout(filepath.Join(root, "workspace-state"), formal, "project1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := workspace.NewService(layout, workspace.DefaultLimits(), workspace.ServiceDependencies{
+		Exporter: workspaceCandidateExporter{service: service},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := manager.Close(context.Background()); err != nil {
+			t.Errorf("close workspace service: %v", err)
+		}
+	})
+	scope := workspace.Scope{
+		ProjectID: "project1", SessionID: session.ID,
+		Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: session.ID},
+	}
+	formalAbs, err := filepath.Abs(formal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope.Authority = permission.Authority{
+		RunID: "originrun", SessionID: session.ID, AllowedRoot: formalAbs,
+		FormalRoot: formalAbs, CandidateRoot: filepath.Join(root, "candidate"),
+	}
+	created, err := manager.Create(ctx, scope, "workspace conflict")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := layout.Paths(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkoutFile := filepath.Join(paths.Checkout, "board.txt")
+	if err := os.WriteFile(checkoutFile, []byte("workspace choice"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formal, "board.txt"), []byte("formal choice"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := manager.Preview(ctx, scope, created.ID)
+	if err != nil || preview.ConflictCount != 1 || len(preview.Conflicts) != 1 || preview.Conflicts[0] != "board.txt" {
+		t.Fatalf("conflict preview=%+v err=%v", preview, err)
+	}
+	if _, err := manager.Export(ctx, scope, created.ID); err == nil {
+		t.Fatal("export succeeded before a user resolution")
+	}
+	if _, err := manager.ResolveUser(ctx, scope, created.ID, "user", preview.PreviewID, preview.Generation, map[string]string{}); err == nil {
+		t.Fatal("empty resolution was accepted")
+	}
+	if _, err := manager.ResolveUser(ctx, scope, created.ID, "user", preview.PreviewID, preview.Generation, map[string]string{"other.txt": workspace.UseWorkspace}); err == nil {
+		t.Fatal("resolution of an unrelated path was accepted")
+	}
+	if _, err := manager.ResolveUser(ctx, scope, created.ID, "user", "0123456789abcdef0123456789abcdef", preview.Generation, map[string]string{"board.txt": workspace.UseWorkspace}); err == nil {
+		t.Fatal("resolution for a stale preview was accepted")
+	}
+	resolution, err := manager.ResolveUser(ctx, scope, created.ID, "user", preview.PreviewID, preview.Generation, map[string]string{"board.txt": workspace.UseWorkspace})
+	if err != nil || resolution.ResolvedCount != 1 {
+		t.Fatalf("user resolution=%+v err=%v", resolution, err)
+	}
+	if err := os.WriteFile(filepath.Join(formal, "board.txt"), []byte("formal changed after resolution"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Export(ctx, scope, created.ID); err == nil {
+		t.Fatal("export accepted a resolution after the formal digest changed")
+	}
+	preview, err = manager.Preview(ctx, scope, created.ID)
+	if err != nil || preview.PreviewID == resolution.PreviewID {
+		t.Fatalf("changed inputs did not invalidate preview: preview=%+v err=%v", preview, err)
+	}
+	if _, err := manager.Export(ctx, scope, created.ID); err == nil {
+		t.Fatal("export reused a resolution bound to the prior input digests")
+	}
+	if _, err := manager.ResolveUser(ctx, scope, created.ID, "user", preview.PreviewID, preview.Generation, map[string]string{"board.txt": workspace.UseWorkspace}); err != nil {
+		t.Fatal(err)
+	}
+	exported, err := manager.Export(ctx, scope, created.ID)
+	if err != nil || exported.State != workspace.StateExported || exported.CandidateID == "" {
+		t.Fatalf("workspace export=%+v err=%v", exported, err)
+	}
+	retried, err := manager.Export(ctx, scope, created.ID)
+	if err != nil || retried.CandidateID != exported.CandidateID {
+		t.Fatalf("repeated export=%+v err=%v; first=%+v", retried, err, exported)
+	}
+	candidateRecord, err := state.GetCandidate(ctx, exported.CandidateID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := os.ReadFile(filepath.Join(candidateRecord.Candidate.CandidateRoot, "board.txt"))
+	if err != nil || string(merged) != "workspace choice" {
+		t.Fatalf("exported candidate content=%q err=%v", merged, err)
+	}
+	review, err := service.reviewCandidate(ctx, exported.CandidateID, session.ID)
+	if err != nil || review.CandidateDigest == "" || review.Digest == "" || len(review.Findings) != 1 || review.Findings[0].Result != candidate.FindingPass {
+		t.Fatalf("candidate review=%+v err=%v", review, err)
+	}
+	decisionID, err := workspace.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := service.acceptReviewedCandidate(ctx, ClientMsg{
+		CandidateID: exported.CandidateID, SessionID: session.ID, DecisionID: decisionID,
+		PreviewDigest: review.Digest, CandidateDigest: review.CandidateDigest,
+		FormalDigest: review.FormalDigest, AcceptanceMode: string(candidate.AcceptNormal),
+	})
+	if err != nil || receipt.ID == "" {
+		t.Fatalf("candidate acceptance receipt=%+v err=%v", receipt, err)
+	}
+	accepted, err := os.ReadFile(filepath.Join(formal, "board.txt"))
+	if err != nil || string(accepted) != "workspace choice" {
+		t.Fatalf("accepted formal content=%q err=%v", accepted, err)
 	}
 }
 

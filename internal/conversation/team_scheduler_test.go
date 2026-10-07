@@ -284,18 +284,42 @@ func TestLeadMessageAutomaticallyResumesIdleTeamMember(t *testing.T) {
 	}
 	first := receiveTeamChildInput(t, runner.inputs)
 	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberIdle)
-	message, err := service.SendTeamMessage(t.Context(), request, TeamSendRequest{TeamID: team.ID, Recipient: member.ID, Body: "Inspect area two.", Token: "message-follow-up"})
+	clientMsg := ClientMsg{
+		Op: "team_send", SessionID: request.Work.SessionID, RunID: request.RunID,
+		TeamID: team.ID, TeamRecipient: member.ID, TeamToken: "message-follow-up", Text: "Inspect area two.",
+	}
+	if err := validateClient(clientMsg); err != nil {
+		t.Fatal(err)
+	}
+	response, err := service.handleTeamRequest(t.Context(), clientMsg)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if response.Type != "team_send" || response.TeamMessage == nil {
+		t.Fatalf("team_send handler response=%+v", response)
+	}
+	message := *response.TeamMessage
+	if message.ID == "" || message.Seq == 0 || message.Body != clientMsg.Text || !reflect.DeepEqual(message.Recipients, []string{member.ID}) {
+		t.Fatalf("team_send returned a different or unsequenced message: %+v", message)
 	}
 	second := receiveTeamChildInput(t, runner.inputs)
 	if first.TeamTurn == nil || second.TeamTurn == nil || first.TeamTurn.MemberID != second.TeamTurn.MemberID || first.TeamTurn.TurnID == second.TeamTurn.TurnID {
 		t.Fatalf("automatic follow-up did not continue the same member: first=%+v second=%+v", first.TeamTurn, second.TeamTurn)
 	}
-	if !strings.Contains(second.Task.Instruction, message.Body) {
+	if second.TeamTurn.TeamID != team.ID || !strings.Contains(second.Task.Instruction, message.Body) {
 		t.Fatalf("persisted lead message was not included as the follow-up handoff: %+v", second.Task)
 	}
+	projection, err := sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Messages) != 1 || !reflect.DeepEqual(projection.Messages[message.ID], message) {
+		t.Fatalf("team_send response and durable projection differ: response=%+v projection=%+v", message, projection.Messages)
+	}
 	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberIdle)
+	if runner.count() != 2 {
+		t.Fatalf("lead message started %d child turns, want one initial and one follow-up", runner.count())
+	}
 }
 
 func memberIDForName(t *testing.T, projection sessionlog.TeamProjection, name string) string {

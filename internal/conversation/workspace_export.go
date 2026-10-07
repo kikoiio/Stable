@@ -144,11 +144,19 @@ func (e workspaceCandidateExporter) ExportWorkspace(ctx context.Context, scope w
 	if candidateDigest != preview.Manifest.Digest || len(entries) != len(preview.Manifest.Entries) {
 		return workspace.Snapshot{}, workspace.ErrSourceChanged
 	}
-	created.CandidateDigest = candidateDigest
-	created.Status = "ready"
-	created.ManifestPolicy = candidate.ManifestPolicyProject
+	frozen, err := candidate.FreezeCandidate(created, nil, ctx)
+	if err != nil {
+		return workspace.Snapshot{}, err
+	}
+	if frozen.CandidateDigest != candidateDigest {
+		return workspace.Snapshot{}, workspace.ErrSourceChanged
+	}
+	// Persist the existing candidate lifecycle's reviewable state after the
+	// freezer has sealed and verified the merged manifest.
+	frozen.Status = "ready"
+	frozen.ManifestPolicy = candidate.ManifestPolicyProject
 	if err := e.service.deps.Store.SaveCandidate(ctx, store.CandidateRecord{
-		Candidate: created, ActionID: actionID, GoalID: goalID, CreatedAt: time.Now().UTC(),
+		Candidate: frozen, ActionID: actionID, GoalID: goalID, CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		return workspace.Snapshot{}, err
 	}
