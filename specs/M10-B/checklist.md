@@ -48,7 +48,7 @@
 ## AC7：文档与完整验证
 
 - [x] README 说明 loopback 默认、LAN TLS 证书配置、pair token、目录批准、remote up/down/status 及 `stable down` 行为，且示例与 `stable remote --help` 一致（验证：逐条对照 README 与 CLI help 输出）。
-- [x] GitHub Actions `Go` workflow 的 `go test ./...` 全部通过（验证：最终提交 run `37576641898` 的 `build-and-test` job 成功；package acceptance job 同样成功）。
+- [x] GitHub Actions `Go` workflow 的 `go test ./...` 全部通过（验证：当前分支提交 `350521e` 的 run `37577815813` 中，`build-and-test` 与 `test-package` jobs 均成功）。
 - [x] `gofmt`/静态格式检查通过，工作区没有本次新增的格式错误（验证：格式检查命令输出为空且退出码为 0）。
 
 ## 端到端场景
