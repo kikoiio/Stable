@@ -304,6 +304,7 @@ type MemoryActionRecord struct {
 	Entry     string    `json:"entry,omitempty"`
 	Operation string    `json:"operation"`
 	State     string    `json:"state"`
+	RunID     string    `json:"run_id,omitempty"`
 	At        time.Time `json:"at"`
 }
 

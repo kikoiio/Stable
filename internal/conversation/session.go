@@ -380,6 +380,22 @@ func (s *Service) say(ctx context.Context, c ClientMsg, kind, eventKind string) 
 	if err != nil {
 		return nil, err
 	}
+	if c.SessionID != "" {
+		root, rootErr := s.trustedSessionRoot(c.ProjectRoot)
+		if rootErr != nil {
+			return nil, rootErr
+		}
+		if _, rootErr = sessionlog.Replay(root, c.SessionID); rootErr != nil {
+			return nil, rootErr
+		}
+		memoryKind := "goal_say"
+		if kind == core.MessageKindReply {
+			memoryKind = "goal_reply"
+		}
+		if _, rootErr = sessionlog.Append(root, c.SessionID, sessionlog.EventMessage, sessionlog.Message{Role: "user", Kind: memoryKind, Text: redactRunCredential(c.Text, s.deps.ProviderCredential)}); rootErr != nil {
+			return nil, rootErr
+		}
+	}
 	event := core.Event{ID: goalrun.RandomID("evt"), GoalID: c.Goal, Kind: eventKind,
 		Payload: mustJSON(map[string]string{"message_id": msg.ID})}
 	e, inserted, err := s.deps.Store.InsertEventIfAbsent(ctx, event)

@@ -702,7 +702,7 @@ func (e *toolRunExecutor) executeHostTool(ctx context.Context, call llm.ToolUse,
 			}
 			if e.deps.SessionRoot != "" {
 				_, _ = sessionlog.Append(e.deps.SessionRoot, e.request.Work.SessionID, sessionlog.EventMemoryAction, sessionlog.MemoryActionRecord{
-					Scope: scope, Entry: boundedMemoryEventText(entry), Operation: operation, State: state, At: memoryActionTime(e.deps.Now),
+					Scope: scope, Entry: boundedMemoryEventText(entry), Operation: operation, State: state, RunID: e.request.RunID, At: memoryActionTime(e.deps.Now),
 				})
 			}
 			outcome.Content = content
