@@ -139,6 +139,8 @@ func (s *Service) handleWorkspaceRequest(ctx context.Context, msg ClientMsg) (Se
 		snapshot, err = manager.Enter(ctx, scope, msg.ID)
 	case "worktree_exit":
 		snapshot, err = manager.Exit(ctx, scope)
+	case "worktree_preview":
+		snapshot, err = manager.Preview(ctx, scope, msg.ID)
 	case "worktree_export":
 		snapshot, err = manager.Export(ctx, scope, msg.ID)
 	case "worktree_keep":

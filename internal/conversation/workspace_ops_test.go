@@ -68,6 +68,32 @@ func TestInstallMergedManifestKeepsIndependentFormalAndWorkspaceChanges(t *testi
 	}
 }
 
+func TestWorkspacePreviewExporterReturnsOnlyConflictsAndInputDigests(t *testing.T) {
+	root := t.TempDir()
+	formal := filepath.Join(root, "formal")
+	baseline := filepath.Join(root, "baseline")
+	checkout := filepath.Join(root, "checkout")
+	for _, path := range []string{formal, baseline, checkout} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, content := range map[string]string{baseline: "base", formal: "formal", checkout: "workspace"} {
+		if err := os.WriteFile(filepath.Join(path, "conflict.txt"), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scope := workspace.Scope{ProjectID: "project", SessionID: "0123456789abcdef0123456789abcdef", Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: "0123456789abcdef0123456789abcdef"}}
+	record := workspace.Record{Scope: scope, Snapshot: workspace.Snapshot{ID: "1123456789abcdef0123456789abcdef"}}
+	preview, err := (workspaceCandidateExporter{service: &Service{}}).PreviewWorkspace(context.Background(), scope, record, workspace.Paths{FormalRoot: formal, Baseline: baseline, Checkout: checkout})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.ID != record.Snapshot.ID || preview.ConflictCount != 1 || len(preview.Conflicts) != 1 || preview.Conflicts[0] != "conflict.txt" || len(preview.BaselineDigest) != 64 || len(preview.FormalDigest) != 64 || len(preview.WorkspaceDigest) != 64 || preview.Summary != "" {
+		t.Fatalf("workspace preview included incomplete or unbounded data: %+v", preview)
+	}
+}
+
 func TestCanSwitchWorkspaceRequiresIdleOwningSession(t *testing.T) {
 	work := agent.WorkRef{Kind: agent.WorkSession, SessionID: "session-1"}
 	svc := &Service{activeRuns: map[string]string{}, activeRequests: map[string]agent.ExecutionRequest{}}

@@ -23,6 +23,39 @@ import (
 // existing M03 path and are never performed by the workspace service.
 type workspaceCandidateExporter struct{ service *Service }
 
+func (e workspaceCandidateExporter) PreviewWorkspace(ctx context.Context, scope workspace.Scope, record workspace.Record, paths workspace.Paths) (workspace.Snapshot, error) {
+	if e.service == nil || !record.Scope.SameOwner(scope) || scope.Validate() != nil || paths.FormalRoot == "" {
+		return workspace.Snapshot{}, workspace.ErrOwnership
+	}
+	baseline, err := workspace.BuildManifest(ctx, paths.Baseline, workspace.DefaultLimits())
+	if err != nil {
+		return workspace.Snapshot{}, err
+	}
+	formal, err := workspace.BuildManifest(ctx, paths.FormalRoot, workspace.DefaultLimits())
+	if err != nil {
+		return workspace.Snapshot{}, err
+	}
+	working, err := workspace.BuildManifest(ctx, paths.Checkout, workspace.DefaultLimits())
+	if err != nil {
+		return workspace.Snapshot{}, err
+	}
+	preview, err := workspace.ThreeWayPreview(baseline, formal, working, workspace.DefaultLimits())
+	if err != nil {
+		return workspace.Snapshot{}, err
+	}
+	pathsOnly := make([]string, 0, min(100, len(preview.Conflicts)))
+	for _, conflict := range preview.Conflicts {
+		if len(pathsOnly) == cap(pathsOnly) {
+			break
+		}
+		pathsOnly = append(pathsOnly, conflict.Path)
+	}
+	return workspace.Snapshot{
+		ID: record.Snapshot.ID, BaselineDigest: preview.BaselineDigest, FormalDigest: preview.FormalDigest,
+		WorkspaceDigest: preview.WorkspaceDigest, ConflictCount: len(preview.Conflicts), Conflicts: pathsOnly,
+	}, nil
+}
+
 func (e workspaceCandidateExporter) ExportWorkspace(ctx context.Context, scope workspace.Scope, record workspace.Record, paths workspace.Paths) (workspace.Snapshot, error) {
 	if e.service == nil || e.service.deps.Store == nil || !record.Scope.SameOwner(scope) || scope.Validate() != nil {
 		return workspace.Snapshot{}, workspace.ErrOwnership

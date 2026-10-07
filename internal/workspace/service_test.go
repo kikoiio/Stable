@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,16 @@ import (
 type idleWorkspaceGuard struct{ err error }
 
 func (g idleWorkspaceGuard) CanSwitchWorkspace(context.Context, Scope) error { return g.err }
+
+type previewWorkspaceExporter struct{}
+
+func (previewWorkspaceExporter) PreviewWorkspace(_ context.Context, _ Scope, record Record, _ Paths) (Snapshot, error) {
+	return Snapshot{ID: record.Snapshot.ID, BaselineDigest: strings.Repeat("a", 64), FormalDigest: strings.Repeat("b", 64), WorkspaceDigest: strings.Repeat("c", 64), ConflictCount: 1, Conflicts: []string{"conflict.txt"}}, nil
+}
+
+func (previewWorkspaceExporter) ExportWorkspace(context.Context, Scope, Record, Paths) (Snapshot, error) {
+	return Snapshot{}, ErrUnavailable
+}
 
 func TestLifecycleServiceCreatesOwnedPrivateGitWorkspace(t *testing.T) {
 	parent := t.TempDir()
@@ -122,6 +133,39 @@ func TestWorkspaceWriterAccountsWritesAndReleasesOnlyAfterCompletion(t *testing.
 	}
 	if _, err := service.ReserveWriterWrite(context.Background(), lease, 1); !errors.Is(err, ErrOwnership) {
 		t.Fatalf("completed lease remained writable: %v", err)
+	}
+}
+
+func TestWorkspacePreviewPersistsBoundedConflictSummary(t *testing.T) {
+	parent := t.TempDir()
+	formal := filepath.Join(parent, "formal")
+	if err := os.Mkdir(formal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	layout, err := NewLayout(filepath.Join(parent, "state"), formal, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := testScope()
+	service, err := NewService(layout, Limits{}, ServiceDependencies{Exporter: previewWorkspaceExporter{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close(context.Background())
+	created, err := service.Create(context.Background(), scope, "preview conflict")
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := service.Preview(context.Background(), scope, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.State != StateReady || preview.ConflictCount != 1 || len(preview.Conflicts) != 1 || preview.Conflicts[0] != "conflict.txt" || preview.BaselineDigest != strings.Repeat("a", 64) || preview.FormalDigest != strings.Repeat("b", 64) || preview.WorkspaceDigest != strings.Repeat("c", 64) {
+		t.Fatalf("preview did not expose the bound conflict summary: %+v", preview)
+	}
+	loaded, err := service.Get(context.Background(), scope, created.ID)
+	if err != nil || loaded.Cursor != preview.Cursor || loaded.Conflicts[0] != "conflict.txt" || loaded.FormalDigest != preview.FormalDigest {
+		t.Fatalf("preview was not persisted: %+v, %v", loaded, err)
 	}
 }
 

@@ -42,6 +42,12 @@
 
 E实现与运行验收进行中。每项完成后记录实际证据；D/A/B/C旧CI不作为E实现证据。
 
+| 全量回归（非 E AC 完成证明） | 代码 SHA | Workflow / run / job | 结果与限制 |
+|---|---|---|---|
+| Go build + `go test ./...` | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [Go run 37640598695](https://github.com/kikoiio/Stable/actions/runs/37640598695), `build-and-test` | 通过；仅证明该 SHA 的全量 Go 检查通过，E AC1–9 仍未完成逐项验收。 |
+| E2E workflow | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [E2E run 37640598926](https://github.com/kikoiio/Stable/actions/runs/37640598926), `unit`, `e2e-core`, `e2e-m03`, `e2e-m04`, `e2e-sessions`, `cases` | 所有 job 通过；现有 workflow 未单独覆盖 checklist 要求的完整 team 多轮/恢复组合，不能据此勾选 AC9。 |
+| Go package acceptance | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [Go run 37640598695](https://github.com/kikoiio/Stable/actions/runs/37640598695), `test-package` | 记录时仍在依赖初始化阶段，尚无结果。 |
+
 | 本地定向检查 | 实际结果 | 覆盖范围与限制 |
 |---|---|---|
 | conversation/sessionlog/workspace 定向 Go 测试 | 通过（2026-10-07）；选择 `TestTeam*`、`TestThreeWay*` | 验证FIFO队首阻塞/硬上限、容量等待重启转 interrupted、提交后发布失败补偿、terminal/member-state恢复间隙、team event 投影与三方合并；不是AC2/AC9或全量验收。首次默认`/tmp`链接因配额失败，改用缓存盘`TMPDIR`后通过。 |

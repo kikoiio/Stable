@@ -11,7 +11,7 @@ import (
 )
 
 func registerWorkspaceCommands(host *commandHost, registry *commands.Registry) {
-	registry.Register(&commands.Command{Name: "worktrees", Description: "列出或管理当前会话的隔离工作树", ArgPrompt: "list | create 标签 | get ID | keep ID | remove ID", Kind: commands.KindLocal, Local: func(args string) {
+	registry.Register(&commands.Command{Name: "worktrees", Description: "列出或管理当前会话的隔离工作树", ArgPrompt: "list | create 标签 | get ID | preview ID | keep ID | remove ID", Kind: commands.KindLocal, Local: func(args string) {
 		m := host.model
 		if sessionlog.ValidateID(m.ActiveSession) != nil {
 			m.Status = "先选择一个会话。"
@@ -36,7 +36,7 @@ func registerWorkspaceCommands(host *commandHost, registry *commands.Registry) {
 				return
 			}
 			request.Op, request.RunID, request.Text = "worktree_create", m.ActiveRunID, label
-		case "get", "enter", "keep", "export", "remove":
+		case "get", "preview", "enter", "keep", "export", "remove":
 			if len(fields) != 2 || !workspace.ValidID(fields[1]) {
 				m.Status = workspaceUsage()
 				return
@@ -45,6 +45,8 @@ func registerWorkspaceCommands(host *commandHost, registry *commands.Registry) {
 			switch fields[0] {
 			case "get":
 				request.Op = "worktree_get"
+			case "preview":
+				request.Op = "worktree_preview"
 			case "enter":
 				request.Op = "worktree_enter"
 			case "keep":
@@ -73,7 +75,7 @@ func registerWorkspaceCommands(host *commandHost, registry *commands.Registry) {
 }
 
 func workspaceUsage() string {
-	return "用法：/worktrees list | create <标签> | get <ID> | enter <ID> | exit | keep <ID> | export <ID> | remove <ID>（remove 仅在内容与基线一致时成功）"
+	return "用法：/worktrees list | create <标签> | get <ID> | preview <ID> | enter <ID> | exit | keep <ID> | export <ID> | remove <ID>（remove 仅在内容与基线一致时成功）"
 }
 
 func formatWorktreeMessages(messages []conversation.ServerMsg) string {
@@ -88,6 +90,18 @@ func formatWorktreeMessages(messages []conversation.ServerMsg) string {
 		if msg.Type == "worktree" && msg.Worktree != nil {
 			item := msg.Worktree
 			fmt.Fprintf(&b, "工作树 %s · %s · %s · generation %d · %d 个变更", item.Label, item.ID, item.State, item.Generation, item.ChangedFiles)
+			if item.ConflictCount > 0 {
+				fmt.Fprintf(&b, "\n冲突 %d 项", item.ConflictCount)
+				for _, path := range item.Conflicts {
+					fmt.Fprintf(&b, "\n- %s", path)
+				}
+				if len(item.Conflicts) < item.ConflictCount {
+					fmt.Fprintf(&b, "\n另有 %d 项未显示", item.ConflictCount-len(item.Conflicts))
+				}
+			}
+			if item.BaselineDigest != "" || item.FormalDigest != "" || item.WorkspaceDigest != "" {
+				fmt.Fprintf(&b, "\nB %s · F %s · W %s", item.BaselineDigest, item.FormalDigest, item.WorkspaceDigest)
+			}
 			if item.CandidateID != "" {
 				fmt.Fprintf(&b, " · candidate %s", item.CandidateID)
 			}
@@ -134,6 +148,8 @@ func applyWorktreeMessages(m *Model, op string, messages []conversation.ServerMs
 		m.Status = "干净工作树已删除。"
 	case "worktree_export":
 		m.Status = "工作树变更已导出为候选；请通过 review_get 检查并单独接受。"
+	case "worktree_preview":
+		m.Status = "工作树冲突预览已更新。"
 	default:
 		m.Status = "工作树状态已更新。"
 	}

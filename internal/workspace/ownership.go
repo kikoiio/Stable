@@ -278,6 +278,11 @@ func validateRecord(record Record) error {
 	if len(record.Snapshot.Summary) > 8<<10 || len(record.Snapshot.Error) > 1024 || len(record.Snapshot.Conflicts) > 100 {
 		return ErrQuota
 	}
+	for _, digest := range []string{record.Snapshot.BaselineDigest, record.Snapshot.FormalDigest, record.Snapshot.WorkspaceDigest} {
+		if digest != "" && !validDigest(digest) {
+			return ErrOwnership
+		}
+	}
 	if !utf8.ValidString(record.Snapshot.Summary) || !utf8.ValidString(record.Snapshot.Error) || record.Snapshot.ChangedFiles < 0 || record.Snapshot.ConflictCount < 0 || record.Snapshot.ConflictCount < len(record.Snapshot.Conflicts) {
 		return ErrOwnership
 	}

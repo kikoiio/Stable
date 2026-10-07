@@ -117,6 +117,7 @@ type Snapshot struct {
 	Generation      uint64   `json:"generation"`
 	Cursor          uint64   `json:"cursor"`
 	BaselineDigest  string   `json:"baseline_digest,omitempty"`
+	FormalDigest    string   `json:"formal_digest,omitempty"`
 	WorkspaceDigest string   `json:"workspace_digest,omitempty"`
 	ChangedFiles    int      `json:"changed_files"`
 	ConflictCount   int      `json:"conflict_count"`
@@ -160,6 +161,7 @@ type Service interface {
 	Keep(context.Context, Scope, string) (Snapshot, error)
 	AcquireWriter(context.Context, Scope, string, string) (WriterLease, error)
 	StopWriter(context.Context, Scope, string) (Snapshot, error)
+	Preview(context.Context, Scope, string) (Snapshot, error)
 	Export(context.Context, Scope, string) (Snapshot, error)
 	RemoveClean(context.Context, Scope, string) (Snapshot, error)
 }

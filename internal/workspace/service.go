@@ -36,6 +36,10 @@ type WorkspaceExporter interface {
 	ExportWorkspace(context.Context, Scope, Record, Paths) (Snapshot, error)
 }
 
+type WorkspacePreviewer interface {
+	PreviewWorkspace(context.Context, Scope, Record, Paths) (Snapshot, error)
+}
+
 type ServiceDependencies struct {
 	IdleGuard IdleGuard
 	Stopper   WriterStopper
@@ -880,6 +884,61 @@ func (s *LifecycleService) Export(ctx context.Context, scope Scope, id string) (
 		return Snapshot{}, err
 	}
 	return exporting.Snapshot, nil
+}
+
+// Preview stops any active writer before inspecting the frozen checkout. The
+// returned snapshot contains only bounded paths and digests, never file data.
+func (s *LifecycleService) Preview(ctx context.Context, scope Scope, id string) (Snapshot, error) {
+	previewer, ok := s.deps.Exporter.(WorkspacePreviewer)
+	if !ok {
+		return Snapshot{}, ErrUnavailable
+	}
+	if _, err := s.StopWriterIfActive(ctx, scope, id); err != nil {
+		return Snapshot{}, err
+	}
+	record, err := s.store.Load(ctx, scope, id)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if record.Snapshot.State != StateReady && record.Snapshot.State != StateKept {
+		return Snapshot{}, ErrOwnership
+	}
+	paths, err := s.layout.Paths(id)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	preview, err := previewer.PreviewWorkspace(ctx, scope, record, paths)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if preview.ID != id || preview.CandidateID != "" || preview.ConflictCount < len(preview.Conflicts) || preview.ConflictCount < 0 || len(preview.Conflicts) > 100 || !validDigest(preview.BaselineDigest) || !validDigest(preview.FormalDigest) || !validDigest(preview.WorkspaceDigest) {
+		return Snapshot{}, ErrOwnership
+	}
+	preview.Label = record.Snapshot.Label
+	preview.SessionID = scope.SessionID
+	preview.State = record.Snapshot.State
+	preview.Generation = record.Snapshot.Generation
+	preview.Cursor = record.Snapshot.Cursor + 1
+	preview.ChangedFiles = record.Snapshot.ChangedFiles
+	updated := record
+	updated.Snapshot = preview
+	updated.Operation = Operation{ID: mustID(), Kind: "preview", Phase: "complete", Generation: updated.Snapshot.Generation, UpdatedAt: time.Now().UTC()}
+	if err := s.store.Save(ctx, scope, updated, record.Snapshot.Generation); err != nil {
+		return Snapshot{}, err
+	}
+	return updated.Snapshot, nil
+}
+
+func validDigest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *LifecycleService) StopWriterIfActive(ctx context.Context, scope Scope, id string) (Snapshot, error) {
