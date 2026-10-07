@@ -310,7 +310,7 @@ func TestLegacyHistoryIsNotReplayedButLiveGoalMessagesBroadcast(t *testing.T) {
 	if msgA.Type != "message" || msgA.Message.Text != "focus on J1" {
 		t.Fatalf("client A: %+v", msgA)
 	}
-	msgB := readMsg(t, rb)
+	msgB := readRequestMsg(t, rb)
 	if msgB.Type != "message" || msgB.Message.Text != "focus on J1" {
 		t.Fatalf("client B missed broadcast: %+v", msgB)
 	}

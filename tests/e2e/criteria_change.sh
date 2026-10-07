@@ -26,9 +26,10 @@ trap e2e_run_cleanups EXIT
 
 source "$project_root/tests/e2e/mock_model_env.sh"
 source "$project_root/tests/e2e/candidate_accept.sh"
-# chatserve binds the repo as its trusted project root; session traffic must
-# address the same root (see trustedSessionRoot).
-export E2E_SESSION_ROOT="$project_root"
+# The supervised worker serves the chat socket and binds dev-install/share as
+# its trusted project root; session traffic must address that same root.
+E2E_SESSION_ROOT="$run_root/dev-install/share"
+export E2E_SESSION_ROOT
 
 # Build the same dev-install layout the runtime supervisor expects: it derives
 # libexec/share from its own executable location, so stable must live in
