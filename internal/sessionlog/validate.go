@@ -421,6 +421,9 @@ func checkHookFired(h HookFired) error {
 	if h.HookID == "" || h.Event == "" || h.Action == "" {
 		return errors.New("hook fired event is missing hook_id, event, or action")
 	}
+	if len(h.ChildRunID) > 128 {
+		return errors.New("hook fired child_run_id is too long")
+	}
 	if len(h.Output) > MaxHookOutput {
 		return fmt.Errorf("hook output exceeds %d bytes", MaxHookOutput)
 	}

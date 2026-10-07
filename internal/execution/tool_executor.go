@@ -80,7 +80,7 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 	postHook := false
 	defer func() {
 		if postHook && ctx.Err() == nil && e.deps.HookRunner != nil {
-			e.deps.HookRunner.PostToolUse(e.request.Work.SessionID, call.Name, args, outcome.Content)
+			e.deps.HookRunner.PostToolUseRun(ctx, e.hookParentRun(), e.request.Work.SessionID, call.Name, args, outcome.Content)
 		}
 	}()
 	outcome = agent.ToolOutcome{CallID: call.ID, ToolName: call.Name, Status: agent.ToolFailed, IsError: true}
@@ -100,7 +100,7 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		}
 	}
 	if e.deps.HookRunner != nil {
-		rejected, hookID, message := e.deps.HookRunner.PreToolUse(e.request.Work.SessionID, call.Name, args)
+		rejected, hookID, message := e.deps.HookRunner.PreToolUseRun(ctx, e.hookParentRun(), e.request.Work.SessionID, call.Name, args)
 		if rejected {
 			outcome.Status = agent.ToolDenied
 			outcome.Content = fmt.Sprintf("Blocked by hook %s: %s", hookID, message)
@@ -723,6 +723,7 @@ func (e *toolRunExecutor) executeDelegation(ctx context.Context, args map[string
 	}
 	childDeps := e.deps
 	childDeps.SessionRoot = "" // child tool calls are intentionally not transcript events
+	childDeps.HookRunner = nil // read-only child tools cannot recursively invoke hooks
 	childFactory := NewToolExecutorFactory(childDeps, WithReadOnlyTools())
 	permissionBounds, err := json.Marshal(e.authority)
 	if err != nil {
@@ -1155,6 +1156,7 @@ func (e *toolRunExecutor) forkSkillParentRun() (agent.ParentRun, error) {
 	}
 	childDeps := e.deps
 	childDeps.SessionRoot = "" // child tool calls are not parent transcript events
+	childDeps.HookRunner = nil
 	childFactory := NewToolExecutorFactory(childDeps, WithReadOnlyTools())
 	return agent.ParentRun{
 		RunID: e.request.RunID, Deadline: e.request.RunDeadline, Work: e.request.Work,
@@ -1162,6 +1164,17 @@ func (e *toolRunExecutor) forkSkillParentRun() (agent.ParentRun, error) {
 		Provider: e.deps.Provider, ProviderName: e.request.ProviderName, Model: e.request.Model,
 		ToolSchemas: ReadOnlyToolSchemas(), ExecutorFactory: childFactory,
 	}, nil
+}
+
+func (e *toolRunExecutor) hookParentRun() agent.ParentRun {
+	parent, err := e.forkSkillParentRun()
+	if err == nil {
+		return parent
+	}
+	// Keep enough event identity for non-agent hooks to proceed even when the
+	// read-only child runtime is unavailable. An agent action will then fail
+	// through its normal hook error policy.
+	return agent.ParentRun{RunID: e.request.RunID, Deadline: e.request.RunDeadline, Work: e.request.Work}
 }
 
 func (e *toolRunExecutor) executeTaskCreate(list *todo.TaskList, args map[string]any, outcome agent.ToolOutcome) agent.ToolOutcome {

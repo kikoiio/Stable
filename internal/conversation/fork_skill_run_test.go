@@ -44,6 +44,14 @@ func (d reportingForkSkillFixtureDelegator) RunBatch(ctx context.Context, parent
 	}}, nil
 }
 
+func (d reportingForkSkillFixtureDelegator) RunTask(ctx context.Context, parent agent.ParentRun, task agent.DelegationTask) (agent.DelegationResult, error) {
+	results, err := d.RunBatch(ctx, parent, []agent.DelegationTask{task})
+	if err != nil || len(results) == 0 {
+		return agent.DelegationResult{}, err
+	}
+	return results[0], nil
+}
+
 type returningForkSkillFixtureDelegator struct{}
 
 func (returningForkSkillFixtureDelegator) RunBatch(_ context.Context, _ agent.ParentRun, tasks []agent.DelegationTask) ([]agent.DelegationResult, error) {
@@ -51,6 +59,14 @@ func (returningForkSkillFixtureDelegator) RunBatch(_ context.Context, _ agent.Pa
 		TaskID: tasks[0].ID, ChildRunID: "child-load-run", Name: tasks[0].Name,
 		Status: agent.DelegationSucceeded, Summary: "found three relevant files",
 	}}, nil
+}
+
+func (d returningForkSkillFixtureDelegator) RunTask(ctx context.Context, parent agent.ParentRun, task agent.DelegationTask) (agent.DelegationResult, error) {
+	results, err := d.RunBatch(ctx, parent, []agent.DelegationTask{task})
+	if err != nil || len(results) == 0 {
+		return agent.DelegationResult{}, err
+	}
+	return results[0], nil
 }
 
 func TestSlashForkSkillRunPersistsAndStreamsProgressAndTerminal(t *testing.T) {

@@ -258,14 +258,16 @@ const MaxHookOutput = 8 * 1024
 
 // HookFired records one hook execution that passed its condition.
 type HookFired struct {
-	HookID   string `json:"hook_id"`
-	Event    string `json:"event"`
-	Action   string `json:"action"`
-	Source   string `json:"source,omitempty"`
-	Success  bool   `json:"success"`
-	Rejected bool   `json:"rejected,omitempty"`
-	Output   string `json:"output,omitempty"`
-	RunID    string `json:"run_id,omitempty"`
+	HookID     string `json:"hook_id"`
+	Event      string `json:"event"`
+	Action     string `json:"action"`
+	Source     string `json:"source,omitempty"`
+	Success    bool   `json:"success"`
+	Rejected   bool   `json:"rejected,omitempty"`
+	TimedOut   bool   `json:"timed_out,omitempty"`
+	Output     string `json:"output,omitempty"`
+	RunID      string `json:"run_id,omitempty"`
+	ChildRunID string `json:"child_run_id,omitempty"`
 }
 
 // HookReload records a hooks configuration reload.

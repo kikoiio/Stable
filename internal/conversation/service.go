@@ -156,6 +156,9 @@ func (s *Service) Close() error {
 		run.cancel()
 	}
 	s.mu.Unlock()
+	if s.hooks != nil {
+		s.hooks.Close()
+	}
 	return s.ln.Close()
 }
 

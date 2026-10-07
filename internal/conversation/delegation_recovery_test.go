@@ -9,6 +9,44 @@ import (
 	"stable/internal/sessionlog"
 )
 
+func TestAppendParentDelegationEventAfterTerminalRun(t *testing.T) {
+	root := t.TempDir()
+	session, err := sessionlog.Create(root, "run-end-hook")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sessionlog.Append(root, session.ID, sessionlog.EventRunStarted, sessionlog.RunStarted{RunID: "run-end", WorkKind: string(agent.WorkSession), Intent: "finish"}); err != nil {
+		t.Fatal(err)
+	}
+	first := sessionlog.RunEvent{ID: "first", RunID: "run-end", SessionID: session.ID, RunSeq: 1, At: time.Now().UTC(), Kind: string(agent.EventTerminal), Payload: map[string]any{"status": agent.RunCompleted}}
+	if _, err = sessionlog.Append(root, session.ID, sessionlog.EventRunEvent, first); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{deps: Deps{ProjectRoot: root}}
+	if err = service.appendParentDelegationEvent("run-end", agent.DelegationEvent{
+		SessionID: session.ID, BatchID: "batch", TaskID: "hook", TaskName: "hook agent: exit", Status: agent.DelegationSucceeded,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	transcript, err := sessionlog.Replay(root, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, event := range transcript.Events {
+		if event.Type != sessionlog.EventRunEvent {
+			continue
+		}
+		var runEvent sessionlog.RunEvent
+		if decodeSessionData(event.Data, &runEvent) == nil && runEvent.RunID == "run-end" && runEvent.RunSeq == 2 && runEvent.Kind == string(agent.EventDelegation) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("run_end delegation was not appended after terminal sequence: %+v", transcript.Events)
+	}
+}
+
 func TestRecoverDelegationClosesOpenToolCallAndIsIdempotent(t *testing.T) {
 	root := t.TempDir()
 	session, err := sessionlog.Create(root, "recovery")

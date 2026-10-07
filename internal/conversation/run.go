@@ -165,10 +165,6 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if request.Work.Kind != agent.WorkSession && len(hookPrefix) > 0 {
 		request.Messages = append(hookPrefix, request.Messages...)
 	}
-	if s.hooks != nil {
-		s.hooks.RunStart(msg.SessionID, request.RunID, request.Intent)
-	}
-
 	handle, err := s.deps.Runner.Start(ctx, request)
 	if err != nil {
 		eventID, idErr := sessionlog.NewID()
@@ -189,6 +185,12 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	}
 	s.activeRuns[request.RunID] = request.Work.SessionID
 	s.mu.Unlock()
+	if s.hooks != nil {
+		// Start the runner first so run_start child progress can be published
+		// into its durable parent event stream. The consumer starts after the
+		// synchronous run_start hooks have completed.
+		s.hooks.RunStartRun(ctx, s.hookAgentParent(request), msg.SessionID, request.Intent)
+	}
 	s.broadcastRun(ServerMsg{Type: "run_started", RunID: request.RunID}, msg.SessionID, request.RunID, 0)
 	go s.consumeRun(request, handle)
 	return nil
@@ -364,7 +366,7 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 		if len([]rune(message)) > sessionlog.MaxHookOutput {
 			message = string([]rune(message)[:sessionlog.MaxHookOutput])
 		}
-		s.hooks.RunEnd(request.Work.SessionID, request.RunID, string(outcome.Status), message)
+		s.hooks.RunEndRun(s.hookAgentServiceContext(), s.hookAgentParent(request), request.Work.SessionID, string(outcome.Status), message)
 	}
 	if err := s.finalizeRunCandidate(context.Background(), request); err != nil {
 		s.broadcastRun(ServerMsg{Type: "error", RunID: request.RunID, Error: "could not finalize candidate: " + err.Error()}, request.Work.SessionID, request.RunID, 0)

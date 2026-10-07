@@ -109,6 +109,7 @@ type ParentRun struct {
 
 type Delegator interface {
 	RunBatch(context.Context, ParentRun, []DelegationTask) ([]DelegationResult, error)
+	RunTask(context.Context, ParentRun, DelegationTask) (DelegationResult, error)
 }
 
 type ChildRunInput struct {
@@ -196,12 +197,35 @@ func (d *PoolDelegator) SetIDGeneratorForTest(fn func() (string, error)) {
 }
 
 func validateDelegationBatch(parent ParentRun, tasks []DelegationTask, maxBytes int) error {
-	if parent.RunID == "" || parent.Work.SessionID == "" || parent.Work.Kind != WorkSession {
+	if err := validateDelegationParent(parent, false); err != nil {
+		return err
+	}
+	return validateDelegationTasks(tasks, maxBytes)
+}
+
+func validateDelegationParent(parent ParentRun, allowGoal bool) error {
+	if parent.RunID == "" || parent.Work.SessionID == "" {
 		return errors.New("delegation requires a session work run")
+	}
+	switch parent.Work.Kind {
+	case WorkSession:
+	case WorkGoal:
+		if !allowGoal {
+			return errors.New("delegation requires a session work run")
+		}
+		if strings.TrimSpace(parent.Work.GoalID) == "" {
+			return errors.New("goal delegation requires a goal ID")
+		}
+	default:
+		return fmt.Errorf("delegation work kind %q is not supported", parent.Work.Kind)
 	}
 	if parent.Provider == nil || parent.Model == "" || parent.ProjectRoot == "" {
 		return errors.New("delegation parent is missing provider, model, or project root")
 	}
+	return nil
+}
+
+func validateDelegationTasks(tasks []DelegationTask, maxBytes int) error {
 	if len(tasks) == 0 {
 		return errors.New("delegation requires at least one task")
 	}
@@ -235,6 +259,39 @@ func (d *PoolDelegator) RunBatch(ctx context.Context, parent ParentRun, tasks []
 	if err := validateDelegationBatch(parent, tasks, d.limits.MaxInputBytes); err != nil {
 		return nil, err
 	}
+	return d.runTasks(ctx, parent, tasks, false)
+}
+
+// RunTask submits one child work item to the same bounded FIFO pool as
+// RunBatch. Hook agents use this path for Session and Goal parent runs; the
+// public batch path remains Session-only.
+func (d *PoolDelegator) RunTask(ctx context.Context, parent ParentRun, task DelegationTask) (DelegationResult, error) {
+	if d == nil {
+		return DelegationResult{}, errors.New("delegator is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return DelegationResult{}, err
+	}
+	if err := validateDelegationParent(parent, true); err != nil {
+		return DelegationResult{}, err
+	}
+	if err := validateDelegationTasks([]DelegationTask{task}, d.limits.MaxInputBytes); err != nil {
+		return DelegationResult{}, err
+	}
+	results, err := d.runTasks(ctx, parent, []DelegationTask{task}, true)
+	if err != nil {
+		return DelegationResult{}, err
+	}
+	if len(results) != 1 {
+		return DelegationResult{}, errors.New("delegation returned an invalid single-task result")
+	}
+	return results[0], nil
+}
+
+func (d *PoolDelegator) runTasks(ctx context.Context, parent ParentRun, tasks []DelegationTask, rejectWhenFull bool) ([]DelegationResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	batchID, err := d.newID()
 	if err != nil {
 		return nil, fmt.Errorf("create delegation batch id: %w", err)
@@ -245,12 +302,12 @@ func (d *PoolDelegator) RunBatch(ctx context.Context, parent ParentRun, tasks []
 	fillTerminal := func(start int, status DelegationStatus, reason string, batchID string) {
 		for j := start; j < len(tasks); j++ {
 			results[j] = DelegationResult{TaskID: tasks[j].ID, Name: tasks[j].Name, Status: status, Error: reason}
-			_ = d.publish(parent.RunID, DelegationEvent{BatchID: batchID, TaskID: tasks[j].ID, TaskName: tasks[j].Name, Status: status, Error: reason})
+			_ = d.publish(parent.RunID, parent.Work.SessionID, DelegationEvent{BatchID: batchID, TaskID: tasks[j].ID, TaskName: tasks[j].Name, Status: status, Error: reason})
 		}
 	}
 enqueueLoop:
 	for i, task := range tasks {
-		if err = d.publish(parent.RunID, DelegationEvent{BatchID: batchID, TaskID: task.ID, TaskName: task.Name, Status: DelegationQueued}); err != nil {
+		if err = d.publish(parent.RunID, parent.Work.SessionID, DelegationEvent{BatchID: batchID, TaskID: task.ID, TaskName: task.Name, Status: DelegationQueued}); err != nil {
 			return nil, fmt.Errorf("publish queued event for %q: %w", task.ID, err)
 		}
 		ch := make(chan DelegationResult, 1)
@@ -262,18 +319,38 @@ enqueueLoop:
 			fillTerminal(i, DelegationInterrupted, "delegation service is shutting down", batchID)
 			break
 		}
-		select {
-		case d.queue <- work:
-			queued[i] = true
-			d.submitMu.RUnlock()
-		case <-ctx.Done():
-			d.submitMu.RUnlock()
-			fillTerminal(i, DelegationCanceled, ctx.Err().Error(), batchID)
-			break enqueueLoop
-		case <-d.life.Done():
-			d.submitMu.RUnlock()
-			fillTerminal(i, DelegationInterrupted, "delegation service is shutting down", batchID)
-			break enqueueLoop
+		if rejectWhenFull {
+			select {
+			case d.queue <- work:
+				queued[i] = true
+				d.submitMu.RUnlock()
+			case <-ctx.Done():
+				d.submitMu.RUnlock()
+				fillTerminal(i, DelegationCanceled, ctx.Err().Error(), batchID)
+				break enqueueLoop
+			case <-d.life.Done():
+				d.submitMu.RUnlock()
+				fillTerminal(i, DelegationInterrupted, "delegation service is shutting down", batchID)
+				break enqueueLoop
+			default:
+				d.submitMu.RUnlock()
+				fillTerminal(i, DelegationFailed, "delegation queue is full", batchID)
+				break enqueueLoop
+			}
+		} else {
+			select {
+			case d.queue <- work:
+				queued[i] = true
+				d.submitMu.RUnlock()
+			case <-ctx.Done():
+				d.submitMu.RUnlock()
+				fillTerminal(i, DelegationCanceled, ctx.Err().Error(), batchID)
+				break enqueueLoop
+			case <-d.life.Done():
+				d.submitMu.RUnlock()
+				fillTerminal(i, DelegationInterrupted, "delegation service is shutting down", batchID)
+				break enqueueLoop
+			}
 		}
 		if ctx.Err() != nil {
 			fillTerminal(i+1, DelegationCanceled, ctx.Err().Error(), batchID)
@@ -288,10 +365,11 @@ enqueueLoop:
 	return results, nil
 }
 
-func (d *PoolDelegator) publish(parentRunID string, event DelegationEvent) error {
+func (d *PoolDelegator) publish(parentRunID, sessionID string, event DelegationEvent) error {
 	if d.reporter == nil {
 		return nil
 	}
+	event.SessionID = sessionID
 	event.UpdatedAt = time.Now().UTC()
 	return d.reporter.Publish(parentRunID, event)
 }
@@ -342,7 +420,7 @@ func (d *PoolDelegator) runWork(work delegationWork) DelegationResult {
 	stopLife := context.AfterFunc(d.life, cancel)
 	defer cancel()
 	defer stopLife()
-	if err := d.publish(work.parent.RunID, DelegationEvent{BatchID: work.batchID, TaskID: work.task.ID, TaskName: work.task.Name, Status: DelegationRunning}); err != nil {
+	if err := d.publish(work.parent.RunID, work.parent.Work.SessionID, DelegationEvent{BatchID: work.batchID, TaskID: work.task.ID, TaskName: work.task.Name, Status: DelegationRunning}); err != nil {
 		return d.terminal(work, DelegationFailed, "", "could not record child start")
 	}
 	childID, err := d.newID()
@@ -378,7 +456,7 @@ func (d *PoolDelegator) runWork(work delegationWork) DelegationResult {
 		if len(summary) > budget.MaxSummaryBytes {
 			summary = truncateUTF8(summary, budget.MaxSummaryBytes)
 		}
-		if err := d.publish(work.parent.RunID, DelegationEvent{
+		if err := d.publish(work.parent.RunID, work.parent.Work.SessionID, DelegationEvent{
 			BatchID: work.batchID, TaskID: work.task.ID, TaskName: work.task.Name,
 			Status: DelegationRunning, Stage: stage, Summary: summary,
 		}); err != nil {
@@ -425,7 +503,7 @@ func (d *PoolDelegator) terminal(work delegationWork, status DelegationStatus, s
 		}
 	}
 	result := DelegationResult{TaskID: work.task.ID, ChildRunID: work.childRunID, Name: work.task.Name, Status: status, Summary: summary, Error: errText}
-	if err := d.publish(work.parent.RunID, DelegationEvent{BatchID: work.batchID, TaskID: work.task.ID, TaskName: work.task.Name, Status: status, Summary: summary, Error: errText}); err != nil && result.Error == "" {
+	if err := d.publish(work.parent.RunID, work.parent.Work.SessionID, DelegationEvent{BatchID: work.batchID, TaskID: work.task.ID, TaskName: work.task.Name, Status: status, Summary: summary, Error: errText}); err != nil && result.Error == "" {
 		result.Status = DelegationFailed
 		result.Error = "could not record child result"
 	}

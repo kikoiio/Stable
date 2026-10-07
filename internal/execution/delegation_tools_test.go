@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -29,6 +30,10 @@ type delegationStub struct {
 func (s *delegationStub) RunBatch(_ context.Context, parent agent.ParentRun, tasks []agent.DelegationTask) ([]agent.DelegationResult, error) {
 	s.parent, s.tasks = parent, append([]agent.DelegationTask(nil), tasks...)
 	return s.results, s.err
+}
+
+func (s *delegationStub) RunTask(context.Context, agent.ParentRun, agent.DelegationTask) (agent.DelegationResult, error) {
+	return agent.DelegationResult{}, errors.New("RunTask is not configured")
 }
 
 func TestDelegateTasksSchemaAndToolDispatch(t *testing.T) {

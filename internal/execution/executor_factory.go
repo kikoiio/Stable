@@ -33,8 +33,8 @@ type SnapshotCreator interface {
 // HookRunner runs lifecycle hooks around individual tool calls. A rejected
 // pre-hook can only block a call; it never alters permission decisions.
 type HookRunner interface {
-	PreToolUse(sessionID, toolName string, args map[string]any) (rejected bool, hookID, message string)
-	PostToolUse(sessionID, toolName string, args map[string]any, result string)
+	PreToolUseRun(ctx context.Context, parent agent.ParentRun, sessionID, toolName string, args map[string]any) (rejected bool, hookID, message string)
+	PostToolUseRun(ctx context.Context, parent agent.ParentRun, sessionID, toolName string, args map[string]any, result string)
 }
 
 type ToolExecutorDeps struct {
@@ -230,6 +230,7 @@ func ReadOnlyExecutorFactory(factory agent.ExecutorFactory) agent.ExecutorFactor
 	}
 	deps := base.deps
 	deps.SessionRoot = ""
+	deps.HookRunner = nil // child tool calls must not recursively trigger parent hooks
 	return NewToolExecutorFactory(deps, WithReadOnlyTools())
 }
 

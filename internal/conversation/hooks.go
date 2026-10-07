@@ -1,6 +1,7 @@
 package conversation
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"stable/internal/agent"
 	"stable/internal/hooks"
 	"stable/internal/sessionlog"
 )
@@ -26,6 +28,8 @@ type queuedNotice struct {
 type HookGate struct {
 	mu          sync.Mutex
 	service     *Service
+	serviceCtx  context.Context
+	serviceStop context.CancelFunc
 	userPath    string
 	projectPath string
 	loaded      []hooks.Hook
@@ -47,10 +51,39 @@ func NewHookGate(service *Service, userPath, projectPath string) *HookGate {
 }
 
 func (g *HookGate) Bind(service *Service) {
+	base := service.lifeCtx
+	if base == nil {
+		base = context.Background()
+	}
+	serviceCtx, stop := context.WithCancel(base)
 	g.mu.Lock()
+	if g.serviceStop != nil {
+		g.serviceStop()
+	}
 	g.service = service
+	g.serviceCtx, g.serviceStop = serviceCtx, stop
 	g.mu.Unlock()
 	service.hooks = g
+}
+
+func (g *HookGate) Close() {
+	g.mu.Lock()
+	stop := g.serviceStop
+	g.serviceStop = nil
+	g.serviceCtx = nil
+	g.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+}
+
+func (g *HookGate) serviceContext() context.Context {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.serviceCtx != nil {
+		return g.serviceCtx
+	}
+	return context.Background()
 }
 
 func (g *HookGate) ensureLoaded() {
@@ -129,31 +162,48 @@ func (g *HookGate) DrainNotifications(sessionID string) string {
 }
 
 func (g *HookGate) PreToolUse(sessionID, toolName string, args map[string]any) (bool, string, string) {
-	ctx := hooks.Context{Event: hooks.EventPreToolUse, ToolName: toolName, ToolArgs: args, FilePath: filePathFromArgs(args)}
-	rejected, hookID, message := g.fire(sessionID, ctx, "", true)
+	return g.PreToolUseRun(context.Background(), agent.ParentRun{Work: agent.WorkRef{SessionID: sessionID}}, sessionID, toolName, args)
+}
+
+func (g *HookGate) PreToolUseRun(ctx context.Context, parent agent.ParentRun, sessionID, toolName string, args map[string]any) (bool, string, string) {
+	hookCtx := hooks.Context{Event: hooks.EventPreToolUse, ToolName: toolName, ToolArgs: args, FilePath: filePathFromArgs(args)}
+	rejected, hookID, message := g.fire(ctx, parent, sessionID, hookCtx, parent.RunID, true)
 	return rejected, hookID, message
 }
 
 func (g *HookGate) PostToolUse(sessionID, toolName string, args map[string]any, result string) {
-	g.fire(sessionID, hooks.Context{Event: hooks.EventPostToolUse, ToolName: toolName, ToolArgs: args, FilePath: filePathFromArgs(args), Message: result}, "", false)
+	g.PostToolUseRun(context.Background(), agent.ParentRun{Work: agent.WorkRef{SessionID: sessionID}}, sessionID, toolName, args, result)
+}
+
+func (g *HookGate) PostToolUseRun(ctx context.Context, parent agent.ParentRun, sessionID, toolName string, args map[string]any, result string) {
+	g.fire(ctx, parent, sessionID, hooks.Context{Event: hooks.EventPostToolUse, ToolName: toolName, ToolArgs: args, FilePath: filePathFromArgs(args), Message: result}, parent.RunID, false)
 }
 
 func (g *HookGate) RunStart(sessionID, runID, intent string) {
-	g.fire(sessionID, hooks.Context{Event: hooks.EventRunStart, Message: intent}, runID, false)
+	g.RunStartRun(context.Background(), agent.ParentRun{RunID: runID, Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: sessionID}}, sessionID, intent)
+}
+
+func (g *HookGate) RunStartRun(ctx context.Context, parent agent.ParentRun, sessionID, intent string) {
+	g.fire(ctx, parent, sessionID, hooks.Context{Event: hooks.EventRunStart, Message: intent}, parent.RunID, false)
 }
 
 func (g *HookGate) RunEnd(sessionID, runID, status, message string) {
-	g.fire(sessionID, hooks.Context{Event: hooks.EventRunEnd, Message: message}, runID, false)
+	g.RunEndRun(context.Background(), agent.ParentRun{RunID: runID, Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: sessionID}}, sessionID, status, message)
 }
 
-func (g *HookGate) fire(sessionID string, ctx hooks.Context, runID string, stopOnReject bool) (bool, string, string) {
+func (g *HookGate) RunEndRun(ctx context.Context, parent agent.ParentRun, sessionID, status, message string) {
+	parent.Deadline = time.Time{}
+	g.fire(ctx, parent, sessionID, hooks.Context{Event: hooks.EventRunEnd, Message: message}, parent.RunID, false)
+}
+
+func (g *HookGate) fire(ctx context.Context, parent agent.ParentRun, sessionID string, hookCtx hooks.Context, runID string, stopOnReject bool) (bool, string, string) {
 	g.mu.Lock()
 	g.ensureLoaded()
 	list := append([]hooks.Hook(nil), g.loaded...)
 	g.mu.Unlock()
 	var firstReject *hooks.Result
 	for _, h := range list {
-		if h.Event != ctx.Event || !hooks.EvaluateCondition(h.If, ctx) {
+		if h.Event != hookCtx.Event || !hooks.EvaluateCondition(h.If, hookCtx) {
 			continue
 		}
 		g.mu.Lock()
@@ -169,10 +219,10 @@ func (g *HookGate) fire(sessionID string, ctx hooks.Context, runID string, stopO
 		}
 		g.mu.Unlock()
 		if h.Async && !stopOnReject {
-			go g.runOne(sessionID, h, ctx, runID)
+			go g.runOne(ctx, parent, sessionID, h, hookCtx, runID)
 			continue
 		}
-		result := g.runOne(sessionID, h, ctx, runID)
+		result := g.runOne(ctx, parent, sessionID, h, hookCtx, runID)
 		if stopOnReject && result.Rejected && firstReject == nil {
 			copy := result
 			firstReject = &copy
@@ -189,8 +239,13 @@ func (g *HookGate) fire(sessionID string, ctx hooks.Context, runID string, stopO
 	return false, "", ""
 }
 
-func (g *HookGate) runOne(sessionID string, h hooks.Hook, ctx hooks.Context, runID string) hooks.Result {
-	result := hooks.FireOne(h, ctx)
+func (g *HookGate) runOne(ctx context.Context, parent agent.ParentRun, sessionID string, h hooks.Hook, hookCtx hooks.Context, runID string) hooks.Result {
+	var result hooks.Result
+	if strings.EqualFold(h.Action.Type, "agent") {
+		result = g.runAgent(ctx, parent, h, hookCtx)
+	} else {
+		result = hooks.FireOne(h, hookCtx)
+	}
 	output := result.Output
 	if g.service != nil {
 		output = redactRunCredential(output, g.service.deps.ProviderCredential)
@@ -214,7 +269,8 @@ func (g *HookGate) journal(sessionID string, h hooks.Hook, result hooks.Result, 
 	}
 	data := sessionlog.HookFired{
 		HookID: h.ID, Event: string(h.Event), Action: h.Action.Type, Source: h.Source,
-		Success: result.Success, Rejected: result.Rejected, Output: result.Output, RunID: runID,
+		Success: result.Success, Rejected: result.Rejected, TimedOut: result.TimedOut,
+		Output: result.Output, RunID: runID, ChildRunID: result.ChildRunID,
 	}
 	svc.eventMu.Lock()
 	_, _ = sessionlog.Append(svc.deps.ProjectRoot, sessionID, sessionlog.EventHookFired, data)

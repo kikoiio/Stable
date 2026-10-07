@@ -127,6 +127,11 @@ func TestPoolDelegatorBoundsConcurrencyAndReturnsPartialResults(t *testing.T) {
 	if len(events) != 12 {
 		t.Fatalf("got %d lifecycle events, want queued/running/terminal for each task: %+v", len(events), events)
 	}
+	for _, event := range events {
+		if event.SessionID != "session" {
+			t.Fatalf("delegation event lost its session scope: %+v", event)
+		}
+	}
 }
 
 func TestPoolDelegatorClampsChildBudgetToParentDeadline(t *testing.T) {
@@ -149,6 +154,92 @@ func TestPoolDelegatorClampsChildBudgetToParentDeadline(t *testing.T) {
 	}
 	if got <= 0 || got > 2*time.Second {
 		t.Fatalf("child duration budget=%s, want positive and <= 2s", got)
+	}
+}
+
+func TestPoolDelegatorRunTaskSupportsGoalWithoutChangingBatchContract(t *testing.T) {
+	var seen WorkRef
+	runner := childRunnerFunc(func(_ context.Context, input ChildRunInput) ChildRunResult {
+		seen = input.Work
+		return ChildRunResult{Status: DelegationSucceeded, Summary: "goal inspected"}
+	})
+	d, err := NewPoolDelegator(DefaultDelegationLimits(), runner, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	parent := validParent()
+	parent.Work = WorkRef{Kind: WorkGoal, SessionID: "session", GoalID: "goal-1", WorkItemID: "item-2"}
+	result, err := d.RunTask(context.Background(), parent, DelegationTask{ID: "hook-1", Name: "inspect hook", Instruction: "inspect the goal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != DelegationSucceeded || result.Summary != "goal inspected" || seen != parent.Work {
+		t.Fatalf("result=%+v work=%+v, want successful goal child", result, seen)
+	}
+	if _, err = d.RunBatch(context.Background(), parent, tasks(1)); err == nil {
+		t.Fatal("RunBatch accepted Goal work; the batch contract must remain Session-only")
+	}
+}
+
+func TestPoolDelegatorRunTaskRejectsFullQueue(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runner := childRunnerFunc(func(ctx context.Context, _ ChildRunInput) ChildRunResult {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		select {
+		case <-release:
+			return ChildRunResult{Status: DelegationSucceeded}
+		case <-ctx.Done():
+			return ChildRunResult{Status: DelegationCanceled, Error: ctx.Err().Error()}
+		}
+	})
+	limits := DefaultDelegationLimits()
+	limits.Workers, limits.QueueCapacity = 1, 1
+	d, err := NewPoolDelegator(limits, runner, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	parent := validParent()
+	firstDone := make(chan struct{})
+	go func() {
+		_, _ = d.RunTask(context.Background(), parent, DelegationTask{ID: "one", Name: "one", Instruction: "one"})
+		close(firstDone)
+	}()
+	<-started
+	queuedDone := make(chan struct{})
+	go func() {
+		_, _ = d.RunTask(context.Background(), parent, DelegationTask{ID: "two", Name: "two", Instruction: "two"})
+		close(queuedDone)
+	}()
+	deadline := time.After(time.Second)
+	for len(d.queue) != 1 {
+		select {
+		case <-deadline:
+			t.Fatal("second task did not enter bounded queue")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	result, err := d.RunTask(context.Background(), parent, DelegationTask{ID: "three", Name: "three", Instruction: "three"})
+	if err != nil || result.Status != DelegationFailed || result.Error != "delegation queue is full" {
+		t.Fatalf("full queue result=%+v err=%v", result, err)
+	}
+	close(release)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first task did not finish")
+	}
+	select {
+	case <-queuedDone:
+	case <-time.After(time.Second):
+		t.Fatal("queued task did not finish")
 	}
 }
 

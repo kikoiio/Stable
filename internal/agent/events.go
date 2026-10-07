@@ -133,6 +133,7 @@ type Runner interface {
 // concise stage text only; model reasoning and raw child transcripts are not
 // represented by this type.
 type DelegationEvent struct {
+	SessionID string           `json:"session_id,omitempty"`
 	BatchID   string           `json:"batch_id"`
 	TaskID    string           `json:"task_id"`
 	TaskName  string           `json:"task_name"`

@@ -47,13 +47,16 @@ func TestFireRejectAndDisabledActions(t *testing.T) {
 	if !got.Success || !got.Rejected || got.Output != "blocked" {
 		t.Fatalf("unexpected rejection: %+v", got)
 	}
-	for _, typ := range []string{"http", "agent"} {
+	for _, typ := range []string{"http"} {
 		r := FireOne(Hook{ID: typ, Action: Action{Type: typ}}, Context{})
 		if r.Success || !strings.Contains(r.Output, "not enabled") || !r.Rejected == true { /* rejection is only on reject policy */
 		}
 		if r.Success || !strings.Contains(r.Output, "not enabled") {
 			t.Fatalf("unexpected %s result: %+v", typ, r)
 		}
+	}
+	if r := FireOne(Hook{ID: "agent", Action: Action{Type: "agent"}}, Context{}); r.Success || !strings.Contains(r.Output, "HookGate coordinator") {
+		t.Fatalf("agent action bypassed the HookGate coordinator: %+v", r)
 	}
 }
 

@@ -12,7 +12,7 @@ func TestHookEventsRoundTripAndProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = Append(root, s.ID, EventHookFired, HookFired{HookID: "a", Event: "run_start", Action: "prompt", Success: true, Output: "hi"}); err != nil {
+	if _, err = Append(root, s.ID, EventHookFired, HookFired{HookID: "a", Event: "run_start", Action: "agent", Success: true, Output: "hi", RunID: "parent-run", ChildRunID: "child-run"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = Append(root, s.ID, EventHookFired, HookFired{HookID: "b", Event: "run_end", Action: "prompt", Success: true, Output: "bye"}); err != nil {
@@ -34,7 +34,7 @@ func TestHookEventsRoundTripAndProjection(t *testing.T) {
 	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
 		t.Fatalf("kinds=%v", got)
 	}
-	if p.Items[0].HookFired == nil || p.Items[0].HookFired.HookID != "a" {
+	if p.Items[0].HookFired == nil || p.Items[0].HookFired.HookID != "a" || p.Items[0].HookFired.ChildRunID != "child-run" {
 		t.Fatalf("projection missing hook: %+v", p.Items[0])
 	}
 }
@@ -47,6 +47,19 @@ func TestHookFiredOutputLimit(t *testing.T) {
 	}
 	if _, err = Append(root, s.ID, EventHookFired, HookFired{HookID: "a", Event: "run_start", Action: "prompt", Output: strings.Repeat("x", MaxHookOutput+1)}); err == nil {
 		t.Fatal("oversize output accepted")
+	}
+}
+
+func TestHookFiredChildRunIDLimit(t *testing.T) {
+	root := t.TempDir()
+	s, err := Create(root, "hooks-child-id-limit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Append(root, s.ID, EventHookFired, HookFired{
+		HookID: "agent", Event: "run_start", Action: "agent", ChildRunID: strings.Repeat("x", 129),
+	}); err == nil {
+		t.Fatal("expected oversized child run ID to be rejected")
 	}
 }
 
