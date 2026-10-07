@@ -116,3 +116,50 @@ func TestWorktreeResolutionDialogSendsCompleteUserChoices(t *testing.T) {
 		t.Fatalf("resolution request=%+v", request)
 	}
 }
+
+func TestWorktreeDiscardDialogRequiresArmedUserConfirmation(t *testing.T) {
+	const sessionID = "0123456789abcdef0123456789abcdef"
+	const workspaceID = "1123456789abcdef0123456789abcdef"
+	preview := workspace.Snapshot{
+		ID: workspaceID, SessionID: sessionID, Generation: 9,
+		DiscardID: "2123456789abcdef0123456789abcdef", DiscardDigest: "discard-digest",
+		ChangedFiles: 2, DiscardPaths: []string{"README.md", "src/app.go"},
+	}
+	m := New("", t.TempDir())
+	m.ActiveSession = sessionID
+	m.Pending, m.ActiveRunID, m.LastCursor = true, "parent-run", 17
+	parentStream := &conversation.StreamClient{}
+	m.stream = parentStream
+	updated, _ := m.handleResult(resultMsg{op: "worktree_discard_preview", msgs: []conversation.ServerMsg{{Type: "worktree", Worktree: &preview}}})
+	got := updated.(Model)
+	if got.WorktreeDialog == nil || got.WorktreeDialog.Mode != "discard" {
+		t.Fatal("discard preview did not open its user decision dialog")
+	}
+
+	updated, command := got.handleWorktreeDecisionKey(tea.KeyMsg{Type: tea.KeyEnter})
+	got = updated.(Model)
+	if command != nil || got.WorktreeDialog == nil {
+		t.Fatal("discard was submitted without arming the explicit user confirmation")
+	}
+	updated, command = got.handleWorktreeDecisionKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	got = updated.(Model)
+	if command != nil || got.WorktreeDialog == nil || !got.WorktreeDialog.Armed {
+		t.Fatal("discard did not require a separate confirmation step")
+	}
+
+	socket, requests := agentSocketFixture(t, conversation.ServerMsg{Type: "done"})
+	got.Socket = socket
+	updated, command = got.handleWorktreeDecisionKey(tea.KeyMsg{Type: tea.KeyEnter})
+	got = updated.(Model)
+	if command == nil || got.WorktreeDialog != nil || !got.Pending || got.ActiveRunID != "parent-run" || got.LastCursor != 17 || got.stream != parentStream {
+		t.Fatalf("confirmed discard changed parent stream state: command=%v pending=%v run=%q cursor=%d", command != nil, got.Pending, got.ActiveRunID, got.LastCursor)
+	}
+	result := command().(resultMsg)
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	request := agentFixtureRequest(t, requests)
+	if request.Op != "worktree_discard" || request.SessionID != sessionID || request.ID != workspaceID || request.DecisionID != preview.DiscardID || request.PreviewDigest != preview.DiscardDigest || request.WorktreeGeneration != preview.Generation || request.RunID != "" {
+		t.Fatalf("discard request=%+v", request)
+	}
+}
