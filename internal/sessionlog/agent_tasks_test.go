@@ -331,3 +331,74 @@ func TestAgentTaskOriginCallSupportsLegacyToolOwner(t *testing.T) {
 		t.Fatalf("legacy call ownership was not inferred: %v", err)
 	}
 }
+
+func TestAgentTaskOriginCallCanReuseCompletedCallID(t *testing.T) {
+	for _, differentParent := range []bool{false, true} {
+		name := "same parent"
+		if differentParent {
+			name = "different parent"
+		}
+		t.Run(name, func(t *testing.T) {
+			root, session, start := newAgentTaskFixture(t, "session")
+			const reusedID = "reusable-call"
+			if _, err := Append(root, session, EventToolCall, ToolCall{RunID: "parent", CallID: reusedID, Name: "run_agent"}); err != nil {
+				t.Fatal(err)
+			}
+			start.OriginCallID = reusedID
+			if _, err := Append(root, session, EventRunStarted, start); err != nil {
+				t.Fatal(err)
+			}
+			appendAgentTaskEvent(t, root, session, 1, "delegation_event", agentTaskPayload("succeeded"))
+			appendAgentTaskEvent(t, root, session, 2, "terminal", map[string]string{"status": "completed"})
+			if _, err := Append(root, session, EventToolResult, ToolResult{CallID: reusedID, Result: "first task completed"}); err != nil {
+				t.Fatal(err)
+			}
+			owner := "parent"
+			if differentParent {
+				owner = "next-parent"
+				if _, err := Append(root, session, EventRunStarted, RunStarted{RunID: owner, WorkKind: "session", Intent: "next parent"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			call := ToolCall{RunID: owner, CallID: reusedID, Name: "run_agent"}
+			if _, err := Append(root, session, EventToolCall, call); err != nil {
+				t.Fatalf("completed call ID could not be reused: %v", err)
+			}
+			if _, err := Append(root, session, EventToolCall, call); err == nil {
+				t.Fatal("duplicate pending call was accepted")
+			}
+			second := start
+			second.RunID, second.AgentTaskID, second.OriginRunID = "second-agent-run", "second-task", owner
+			if _, err := Append(root, session, EventRunStarted, second); err != nil {
+				t.Fatalf("fresh reused call could not own a task: %v", err)
+			}
+			duplicate := second
+			duplicate.RunID, duplicate.AgentTaskID = "duplicate-agent-run", "duplicate-task"
+			if _, err := Append(root, session, EventRunStarted, duplicate); err == nil {
+				t.Fatal("one still-open call started a second task")
+			}
+			terminal := agentTaskPayload("succeeded")
+			terminal.TaskID = second.AgentTaskID
+			terminal.BatchID = "second-batch"
+			for _, event := range []RunEvent{
+				{ID: "second-child-terminal", RunID: second.RunID, SessionID: session, RunSeq: 1, At: time.Now().UTC(), Kind: "delegation_event", Payload: terminal},
+				{ID: "second-run-terminal", RunID: second.RunID, SessionID: session, RunSeq: 2, At: time.Now().UTC(), Kind: "terminal", Payload: map[string]string{"status": "completed"}},
+			} {
+				if _, err := Append(root, session, EventRunEvent, event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := Append(root, session, EventToolResult, ToolResult{CallID: reusedID, Result: "second task completed"}); err != nil {
+				t.Fatal(err)
+			}
+			transcript, err := Replay(root, session)
+			if err != nil {
+				t.Fatalf("reused call corrupted replay: %v", err)
+			}
+			tasks, err := AgentTasks(transcript)
+			if err != nil || len(tasks) != 2 || tasks[0].Started.OriginRunID != "parent" || tasks[1].Started.OriginRunID != owner || tasks[0].Started.OriginCallID != reusedID || tasks[1].Started.OriginCallID != reusedID || tasks[0].RunStatus != "completed" || tasks[1].RunStatus != "completed" {
+				t.Fatalf("reused call association projection=%+v, %v", tasks, err)
+			}
+		})
+	}
+}

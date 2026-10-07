@@ -297,6 +297,12 @@ func (st *agentTaskState) observe(sessionID string, e Event) error {
 			return errors.New("agent task tool call has invalid shape")
 		}
 		if call.CallID != "" {
+			if _, pending := st.openCalls[call.CallID]; pending {
+				return errors.New("duplicate pending tool call ID in agent task projection")
+			}
+			// Call IDs may be reused after the preceding call/result pair has
+			// closed. The new call instance owns its own single-task association.
+			delete(st.usedCalls, call.CallID)
 			if call.RunID == "" {
 				call.RunID = st.currentParent
 			}
