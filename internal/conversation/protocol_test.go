@@ -35,10 +35,11 @@ func TestCoordinatorModeProtocolIsSessionScopedAndOneShot(t *testing.T) {
 
 func TestWorktreeEnterExitExportProtocolShapes(t *testing.T) {
 	session := "0123456789abcdef0123456789abcdef"
+	workspaceID := "1123456789abcdef0123456789abcdef"
 	for _, valid := range []ClientMsg{
-		{Op: "worktree_enter", SessionID: session, ID: "workspace-1"},
+		{Op: "worktree_enter", SessionID: session, ID: workspaceID},
 		{Op: "worktree_exit", SessionID: session},
-		{Op: "worktree_export", SessionID: session, ID: "workspace-1"},
+		{Op: "worktree_export", SessionID: session, ID: workspaceID},
 	} {
 		if err := validateClient(valid); err != nil {
 			t.Fatalf("valid worktree request rejected: %+v: %v", valid, err)
