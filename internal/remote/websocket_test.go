@@ -15,7 +15,9 @@ import (
 	"stable/internal/agent"
 	"stable/internal/conversation"
 	"stable/internal/core"
+	"stable/internal/execution"
 	"stable/internal/llm"
+	"stable/internal/permission"
 	"stable/internal/platform/ipc"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
@@ -330,6 +332,152 @@ func TestRemoteConversationEndToEndWithLocalApprovalAndFakeProvider(t *testing.T
 	sessionID := created.Message.Session.ID
 	if got := receive(); got.Message.Type != "done" {
 		t.Fatalf("session create completion = %+v", got)
+	}
+
+	// Drive the same ask_user adapter used by tools, then answer its pending
+	// question through the remote conversation protocol.
+	if _, err := sessionlog.Append(projectRoot, sessionID, sessionlog.EventRunStarted, sessionlog.RunStarted{RunID: "remote-ask-run", WorkKind: "session", Intent: "ask user"}); err != nil {
+		t.Fatal(err)
+	}
+	askAdapter := conversation.NewAskAdapter(service)
+	askAdapter.PollEvery = 5 * time.Millisecond
+	askCtx, askCancel := context.WithCancel(wsCtx)
+	defer askCancel()
+	type askResult struct {
+		response execution.AskResponse
+		err      error
+	}
+	askDone := make(chan askResult, 1)
+	go func() {
+		response, askErr := askAdapter.Ask(askCtx, execution.AskRequest{
+			SessionID: sessionID,
+			RunID:     "remote-ask-run",
+			WorkRef:   "session:" + sessionID,
+			Questions: []execution.QuestionSpec{{Header: "Next step", Question: "Should I continue?"}},
+		})
+		askDone <- askResult{response: response, err: askErr}
+	}()
+	var pendingQuestion sessionlog.PendingQuestion
+	questionDeadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(questionDeadline) {
+		transcript, replayErr := sessionlog.Replay(projectRoot, sessionID)
+		if replayErr == nil {
+			for _, event := range transcript.Events {
+				if event.Type != sessionlog.EventQuestion {
+					continue
+				}
+				if data, marshalErr := json.Marshal(event.Data); marshalErr == nil {
+					_ = json.Unmarshal(data, &pendingQuestion)
+				}
+			}
+		}
+		if pendingQuestion.QuestionID != "" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if pendingQuestion.QuestionID == "" {
+		t.Fatal("ask_user did not publish a pending question")
+	}
+	send("questions", conversation.ClientMsg{Op: "question_list", SessionID: sessionID})
+	listedQuestions := receive()
+	if listedQuestions.ID != "questions" || listedQuestions.Message.Type != "questions" || len(listedQuestions.Message.Questions) != 1 || listedQuestions.Message.Questions[0].QuestionID != pendingQuestion.QuestionID {
+		t.Fatalf("remote question list = %+v", listedQuestions)
+	}
+	if got := receive(); got.Message.Type != "done" {
+		t.Fatalf("question list completion = %+v", got)
+	}
+	send("answer", conversation.ClientMsg{Op: "reply", SessionID: sessionID, QuestionID: pendingQuestion.QuestionID, Text: "yes"})
+	if answered, done := receive(), receive(); answered.ID != "answer" || answered.Message.Type != "reply" || answered.Message.Reply == nil || answered.Message.Reply.ReplyText != "yes" || done.Message.Type != "done" {
+		t.Fatalf("remote ask_user reply = %+v, %+v", answered, done)
+	}
+	select {
+	case result := <-askDone:
+		if result.err != nil || !result.response.FreeText || len(result.response.Answers) != 1 || len(result.response.Answers[0]) != 1 || result.response.Answers[0][0] != "yes" {
+			t.Fatalf("ask_user result = %+v, err %v", result.response, result.err)
+		}
+	case <-wsCtx.Done():
+		t.Fatal("ask_user did not resume after the remote answer")
+	}
+
+	planPath := filepath.Join(projectRoot, ".stable", "plans", sessionID+".md")
+	planApproval, err := service.SubmitPlanApproval(sessionID, "remote-plan-run", planPath)
+	if err != nil {
+		t.Fatalf("SubmitPlanApproval(): %v", err)
+	}
+	send("plan-approve", conversation.ClientMsg{Op: "plan_resolve", SessionID: sessionID, ApprovalChoice: conversation.PlanResolveAuto})
+	planState, planMessage, planDone := false, false, false
+	for !planDone {
+		response := receive()
+		if response.ID != "plan-approve" {
+			t.Fatalf("plan response ID = %q", response.ID)
+		}
+		switch response.Message.Type {
+		case "plan_state":
+			planState = response.Message.PlanState != nil && response.Message.PlanState.ExecutionMode == conversation.PlanExecutionAcceptEdits
+		case "message":
+			planMessage = response.Message.Message != nil && strings.Contains(response.Message.Message.Text, "计划已批准")
+		case "done":
+			planDone = true
+		case "error":
+			t.Fatalf("remote plan approval failed: %s", response.Message.Error)
+		}
+	}
+	if !planState || !planMessage {
+		t.Fatalf("plan approval round trip: state=%v message=%v", planState, planMessage)
+	}
+	if status, _, ok := service.PlanApprovalStatus(planApproval.ID); !ok || status != sessionlog.PlanApprovalApprovedAuto {
+		t.Fatalf("plan approval status = %q, present=%v", status, ok)
+	}
+
+	// A write-capable command asks for permission. The remote client can list
+	// the prompt and make an explicit allow/deny choice; bounds and parameters
+	// remain server-owned, and a denial leaves the operation denied.
+	for i, choice := range []permission.ApprovalChoice{permission.ChoiceDeny, permission.ChoiceAllowOnce} {
+		runID := "remote-permission-run-" + string(rune('a'+i))
+		candidateRoot := t.TempDir()
+		authority := permission.Authority{RunID: runID, SessionID: sessionID, AllowedRoot: projectRoot, CandidateRoot: candidateRoot, Mode: permission.ModeDefault}
+		operation := permission.Operation{ID: "remote-write", Kind: permission.OpWrite, Name: "write_file", Target: filepath.Join(candidateRoot, "private-file-"+string(rune('a'+i))), Parameters: json.RawMessage(`{"content":"private-file contents"}`)}
+		decision, authErr := service.AuthorizeOperation(wsCtx, authority, operation)
+		if authErr != nil || decision.Kind != permission.DecisionAsk {
+			t.Fatalf("unapproved command decision = %+v, err %v", decision, authErr)
+		}
+		send("approvals-"+runID, conversation.ClientMsg{Op: "approval_list", SessionID: sessionID})
+		listed := receive()
+		var requestFound bool
+		for _, prompt := range listed.Message.Approvals {
+			if prompt.ID == decision.ApprovalID {
+				requestFound = true
+				encoded, _ := json.Marshal(prompt)
+				if strings.Contains(string(encoded), "private-file contents") {
+					t.Fatal("permission prompt exposed raw operation parameters")
+				}
+			}
+		}
+		if listed.Message.Type != "approvals" || !requestFound {
+			t.Fatalf("remote approval list = %+v", listed)
+		}
+		if got := receive(); got.Message.Type != "done" {
+			t.Fatalf("approval list completion = %+v", got)
+		}
+		send("resolve-"+runID, conversation.ClientMsg{Op: "approval_resolve", SessionID: sessionID, ApprovalID: decision.ApprovalID, ApprovalChoice: string(choice)})
+		resolved, done := receive(), receive()
+		if resolved.Message.Type != "permission_decision" || resolved.Message.Decision == nil || done.Message.Type != "done" {
+			t.Fatalf("remote permission resolution = %+v, %+v", resolved, done)
+		}
+		want := permission.DecisionDeny
+		wantStatus := permission.ApprovalDenied
+		if choice == permission.ChoiceAllowOnce {
+			want = permission.DecisionAllow
+			wantStatus = permission.ApprovalAllowedOnce
+		}
+		if resolved.Message.Decision.Kind != want {
+			t.Fatalf("permission decision = %+v, want %s", resolved.Message.Decision, want)
+		}
+		stored, getErr := db.GetApproval(wsCtx, decision.ApprovalID)
+		if getErr != nil || stored.Status != wantStatus {
+			t.Fatalf("stored permission approval = %+v, err %v; want %s", stored, getErr, wantStatus)
+		}
 	}
 	send("list", conversation.ClientMsg{Op: "session_list", ProjectRoot: projectRoot})
 	listed := receive()

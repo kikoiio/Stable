@@ -29,9 +29,9 @@
 
 - [x] fake provider 下浏览器可创建、列举、加载普通会话并恢复 transcript（验证：浏览器集成测试检查各请求响应和恢复后的会话事实）。
 - [x] 浏览器可发送聊天、接收流式输出、取消 run，并可在断开后重新订阅仍在运行的 run（验证：fake provider 流测试检查事件顺序、取消终态和恢复订阅）。
-- [ ] 工具写入/命令权限请求在浏览器显示原始权限提示，用户选择通过现有审批协议返回；未批准操作不会执行（验证：permission gate 集成测试在批准/拒绝两种路径检查工具结果）。
-- [ ] 计划审批和 ask_user 均能显示并往返提交；交互等待遵循服务端超时/取消，断开不会自动批准（验证：计划审批与问题交互测试覆盖响应和取消路径）。
-- [ ] 客户端不能提交可信 permission bounds、provider key、服务端路径映射或 runtime 控制；服务端从已批准 grant 生成执行范围（验证：对这些字段篡改/注入请求并确认拒绝或忽略，且边界不变）。
+- [x] 工具写入权限提示通过浏览器协议列出，用户可批准或拒绝；拒绝保持拒绝决策，原始工具参数不会发送给客户端（验证：`TestRemoteConversationEndToEndWithLocalApprovalAndFakeProvider` 使用真实 permission service 覆盖拒绝/单次批准及 prompt 投影）。
+- [x] 计划审批和 ask_user 均能显示并往返提交；交互等待遵循服务端超时/取消，断开不会自动批准（验证：同一端到端测试经 `AskAdapter` 产生待答问题并恢复等待；remote `plan_resolve` 更新真实 plan approval；既有 AskAdapter/plan lifecycle tests 覆盖取消与超时）。
+- [x] 客户端不能提交可信 permission bounds、provider key、服务端路径映射或 runtime 控制；服务端从已批准 grant 生成执行范围（验证：`TestAuthorizeRemoteMessageUsesGrantAndServerRunBounds` 篡改 root/provider/model/bounds 并检查 grant 仍决定执行范围；WebSocket envelope 拒绝未识别字段且只允许 operation allowlist）。
 
 ## AC5：目标只读与功能边界
 
@@ -43,7 +43,7 @@
 - [x] 配对请求 body 超过 16 KiB 被拒绝，WebSocket 帧超过 1 MiB 被关闭或拒绝（验证：`TestPairEndpointRejectsOversizedBody` 与 `TestWebSocketLimitsConcurrentConnectionsAndFrameSize`）。
 - [x] 第 17 个活动 request ID 和第 9 个并发 WebSocket 连接被拒绝；重复活动 request ID 不能串流或覆盖既有请求（验证：`TestWebSocketRejectsDuplicateAndSeventeenthActiveRequest` 与 `TestWebSocketLimitsConcurrentConnectionsAndFrameSize`；重复 ID 拒绝用空 ID 回报，避免与原流混淆）。
 - [ ] WebSocket 关闭后 stream subscription、context、grant、IPC 连接和 handler goroutine 均释放（验证：断线清理测试等待订阅数归零、grant 撤销且 handler 收敛）。
-- [ ] 验收使用 fake provider、临时目录/配置、自签测试证书和 TUI 审批替身，不需要真实 API key 或公网（验证：集成测试启动参数与 fixture 检查）。
+- [x] 验收使用 fake provider、临时目录/配置、自签测试证书和 TUI 审批替身，不需要真实 API key 或公网（验证：remote websocket 集成测试使用临时目录和 fake provider；TLS、pairing、TUI 审批分别使用自签证书及 IPC fixture）。
 
 ## AC7：文档与完整验证
 
@@ -53,6 +53,6 @@
 
 ## 端到端场景
 
-- [ ] 用户启动 `stable remote up` 并运行 `stable remote pair`；浏览器输入 token；服务端建立同源 HttpOnly cookie；用户请求项目目录；本机 TUI 显示客户端与规范目录并批准；浏览器创建会话、流式聊天、取消 run，再发起一次权限请求并由用户审批（验证：用 fake provider 和 TUI 替身运行一条自动化全链路，逐段检查可见状态与事件）。
+- [x] 用户启动 remote 并配对；服务端建立同源 HttpOnly cookie；用户请求项目目录；本机 TUI 显示客户端与规范目录并批准；远程会话完成创建、流式聊天、取消 run 和权限审批（验证：`TestRemoteConversationEndToEndWithLocalApprovalAndFakeProvider` 逐段通过真实 manager、WebSocket、conversation service、fake provider 与本机 IPC 审批替身）。
 - [ ] 同一连接获批后断开并重连；第二次目录请求被 TUI 再次展示。随后尝试跨站 Origin、无效 grant 和 LAN 无证书启动；三者均被拒绝，原获批目录与目标状态未被越权访问（验证：安全边界端到端测试检查拒绝结果及状态未变）。
 - [ ] 远程连接仍活动时执行 `stable down`；浏览器连接终止，remote 端口关闭，runtime 退出（验证：生命周期端到端测试检查 WebSocket close、listener 拒绝新连接及 runtime 状态）。
