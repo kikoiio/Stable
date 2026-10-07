@@ -2,6 +2,8 @@ package conversation
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +41,15 @@ func (d reportingForkSkillFixtureDelegator) RunBatch(ctx context.Context, parent
 	}
 	return []agent.DelegationResult{{
 		TaskID: tasks[0].ID, ChildRunID: "child-run", Name: tasks[0].Name, Status: agent.DelegationSucceeded, Summary: "review complete",
+	}}, nil
+}
+
+type returningForkSkillFixtureDelegator struct{}
+
+func (returningForkSkillFixtureDelegator) RunBatch(_ context.Context, _ agent.ParentRun, tasks []agent.DelegationTask) ([]agent.DelegationResult, error) {
+	return []agent.DelegationResult{{
+		TaskID: tasks[0].ID, ChildRunID: "child-load-run", Name: tasks[0].Name,
+		Status: agent.DelegationSucceeded, Summary: "found three relevant files",
 	}}, nil
 }
 
@@ -133,5 +144,52 @@ completed:
 	infos, _ := gate.List(sessionID)
 	if len(infos) == 0 {
 		t.Fatal("fork skill should remain discoverable in the session")
+	}
+}
+
+func TestLoadSkillForkReturnsChildResultAndAudit(t *testing.T) {
+	svc, gate, root, sessionID, _, _ := newSkillFixture(t, nil, map[string]map[string]string{
+		"review": {"SKILL.md": "---\nname: review\nmode: fork\nfork_context: none\n---\n\nsecret skill body\n"},
+	})
+	svc.deps.Delegator = returningForkSkillFixtureDelegator{}
+	parent := agent.ParentRun{
+		RunID: "parent-run", Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: sessionID},
+		ProjectRoot: root, Provider: forkSkillFixtureProvider{}, ProviderName: "fixture", Model: "fixture",
+	}
+	ctx := agent.WithForkSkillParentRun(context.Background(), parent)
+	resultText, err := gate.LoadSkill(ctx, sessionID, "review", "inspect src/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result ForkSkillResult
+	if err = json.Unmarshal([]byte(resultText), &result); err != nil {
+		t.Fatalf("fork tool result is not JSON: %q: %v", resultText, err)
+	}
+	if result.ChildRunID != "child-load-run" || result.Status != agent.DelegationSucceeded || result.Summary != "found three relevant files" {
+		t.Fatalf("fork tool result = %+v", result)
+	}
+	if strings.Contains(resultText, "secret skill body") {
+		t.Fatal("fork skill body was returned to the parent tool result")
+	}
+	var invoked int
+	for _, event := range skillEvents(t, root, sessionID) {
+		if event.Type != sessionlog.EventSkillInvoked {
+			continue
+		}
+		var audit sessionlog.SkillInvoked
+		if err = decodeSessionData(event.Data, &audit); err != nil {
+			t.Fatal(err)
+		}
+		if audit.Name == "review" && audit.Entry == sessionlog.SkillEntryTool &&
+			audit.Mode == sessionlog.SkillModeFork && audit.RunID == parent.RunID {
+			invoked++
+		}
+	}
+	if invoked != 1 {
+		t.Fatalf("fork tool audit count = %d", invoked)
+	}
+	_, activated := gate.List(sessionID)
+	if len(activated) != 1 || activated[0] != "review" {
+		t.Fatalf("fork skill activation state = %v", activated)
 	}
 }
