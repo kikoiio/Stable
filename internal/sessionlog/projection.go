@@ -4,47 +4,51 @@ package sessionlog
 type ItemKind string
 
 const (
-	ItemMessage        ItemKind = "message"
-	ItemToolCall       ItemKind = "tool_call"
-	ItemToolResult     ItemKind = "tool_result"
-	ItemSummary        ItemKind = "summary"
-	ItemRunTerminal    ItemKind = "run_terminal"
-	ItemSnapshot       ItemKind = "snapshot"
-	ItemRewind         ItemKind = "rewind"
-	ItemQuestion       ItemKind = "question"
-	ItemReply          ItemKind = "reply"
-	ItemPlanMode       ItemKind = "plan_mode"
-	ItemPlanApproval   ItemKind = "plan_approval"
-	ItemTodo           ItemKind = "todo_update"
-	ItemSkillInventory ItemKind = "skill_inventory"
-	ItemSkillDelta     ItemKind = "skill_delta"
-	ItemSkillInvoked   ItemKind = "skill_invoked"
-	ItemHookFired      ItemKind = "hook_fired"
-	ItemHookReload     ItemKind = "hook_reload"
+	ItemMessage          ItemKind = "message"
+	ItemToolCall         ItemKind = "tool_call"
+	ItemToolResult       ItemKind = "tool_result"
+	ItemSummary          ItemKind = "summary"
+	ItemRunTerminal      ItemKind = "run_terminal"
+	ItemSnapshot         ItemKind = "snapshot"
+	ItemRewind           ItemKind = "rewind"
+	ItemQuestion         ItemKind = "question"
+	ItemReply            ItemKind = "reply"
+	ItemPlanMode         ItemKind = "plan_mode"
+	ItemPlanApproval     ItemKind = "plan_approval"
+	ItemTodo             ItemKind = "todo_update"
+	ItemSkillInventory   ItemKind = "skill_inventory"
+	ItemSkillDelta       ItemKind = "skill_delta"
+	ItemSkillInvoked     ItemKind = "skill_invoked"
+	ItemHookFired        ItemKind = "hook_fired"
+	ItemHookReload       ItemKind = "hook_reload"
+	ItemMemoryAction     ItemKind = "memory_action"
+	ItemMemoryBackground ItemKind = "memory_background"
 )
 
 // Item is one entry of the unified session projection. The pointer field
 // matching Kind is set; the rest are nil.
 type Item struct {
-	Seq            uint64
-	Kind           ItemKind
-	Message        *Message
-	Call           *ToolCall
-	Result         *ToolResult
-	Summary        *Boundary
-	Run            *RunEvent
-	Snapshot       *SnapshotRef
-	Rewind         *RewindRecord
-	Question       *PendingQuestion
-	Reply          *QuestionReply
-	PlanMode       *PlanMode
-	Approval       *PlanApprovalRecord
-	Todo           *TodoUpdate
-	SkillInventory *SkillInventory
-	SkillDelta     *SkillDelta
-	SkillInvoked   *SkillInvoked
-	HookFired      *HookFired
-	HookReload     *HookReload
+	Seq              uint64
+	Kind             ItemKind
+	Message          *Message
+	Call             *ToolCall
+	Result           *ToolResult
+	Summary          *Boundary
+	Run              *RunEvent
+	Snapshot         *SnapshotRef
+	Rewind           *RewindRecord
+	Question         *PendingQuestion
+	Reply            *QuestionReply
+	PlanMode         *PlanMode
+	Approval         *PlanApprovalRecord
+	Todo             *TodoUpdate
+	SkillInventory   *SkillInventory
+	SkillDelta       *SkillDelta
+	SkillInvoked     *SkillInvoked
+	HookFired        *HookFired
+	HookReload       *HookReload
+	MemoryAction     *MemoryActionRecord
+	MemoryBackground *MemoryBackgroundRecord
 	// Matched reports whether a tool call has its result inside the same
 	// projected tail. An unmatched call stays visible for audit but must
 	// not become the recoverable tail of a normal conversation.
@@ -191,6 +195,18 @@ func Project(t Transcript) Projection {
 			if decodeData(e.Data, &reload) == nil {
 				h := reload
 				out.Items = append(out.Items, Item{Seq: e.Seq, Kind: ItemHookReload, HookReload: &h, Matched: true})
+			}
+		case EventMemoryAction:
+			var action MemoryActionRecord
+			if decodeStrictData(e.Data, &action) == nil {
+				a := action
+				out.Items = append(out.Items, Item{Seq: e.Seq, Kind: ItemMemoryAction, MemoryAction: &a, Matched: true})
+			}
+		case EventMemoryBackground:
+			var background MemoryBackgroundRecord
+			if decodeStrictData(e.Data, &background) == nil {
+				b := background
+				out.Items = append(out.Items, Item{Seq: e.Seq, Kind: ItemMemoryBackground, MemoryBackground: &b, Matched: true})
 			}
 		}
 	}

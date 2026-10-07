@@ -68,29 +68,31 @@ type ToolResult struct {
 }
 
 const (
-	EventSessionCreated = "session_created"
-	EventActivity       = "activity"
-	EventMessage        = "message"
-	EventProposal       = "proposal_reference"
-	EventToolCall       = "tool_call"
-	EventToolResult     = "tool_result"
-	EventBoundary       = "compaction_boundary"
-	EventRunStarted     = "run_started"
-	EventRunEvent       = "run_event"
-	EventSnapshot       = "candidate_snapshot"
-	EventRewind         = "candidate_rewind"
-	EventQuestion       = "pending_question"
-	EventReply          = "question_reply"
-	EventPlanMode       = "plan_mode"
-	EventPlanApproval   = "plan_approval"
-	EventTodo           = "todo_update"
-	EventSkillInventory = "skill_inventory"
-	EventSkillDelta     = "skill_delta"
-	EventSkillInvoked   = "skill_invoked"
-	EventHookFired      = "hook_fired"
-	EventHookReload     = "hook_reload"
-	EventMCPReload      = "mcp_reload"
-	EventMCPServer      = "mcp_server"
+	EventSessionCreated   = "session_created"
+	EventActivity         = "activity"
+	EventMessage          = "message"
+	EventProposal         = "proposal_reference"
+	EventToolCall         = "tool_call"
+	EventToolResult       = "tool_result"
+	EventBoundary         = "compaction_boundary"
+	EventRunStarted       = "run_started"
+	EventRunEvent         = "run_event"
+	EventSnapshot         = "candidate_snapshot"
+	EventRewind           = "candidate_rewind"
+	EventQuestion         = "pending_question"
+	EventReply            = "question_reply"
+	EventPlanMode         = "plan_mode"
+	EventPlanApproval     = "plan_approval"
+	EventTodo             = "todo_update"
+	EventSkillInventory   = "skill_inventory"
+	EventSkillDelta       = "skill_delta"
+	EventSkillInvoked     = "skill_invoked"
+	EventHookFired        = "hook_fired"
+	EventHookReload       = "hook_reload"
+	EventMCPReload        = "mcp_reload"
+	EventMCPServer        = "mcp_server"
+	EventMemoryAction     = "memory_action"
+	EventMemoryBackground = "memory_background"
 )
 
 // SnapshotRef records a candidate file snapshot owned by this session.
@@ -292,6 +294,27 @@ type MCPServer struct {
 	State     string `json:"state"`
 	Error     string `json:"error,omitempty"`
 	ToolCount int    `json:"tool_count"`
+}
+
+const MaxMemoryEventText = 256
+
+// MemoryActionRecord contains only operation metadata, never memory text.
+type MemoryActionRecord struct {
+	Scope     string    `json:"scope"`
+	Entry     string    `json:"entry,omitempty"`
+	Operation string    `json:"operation"`
+	State     string    `json:"state"`
+	At        time.Time `json:"at"`
+}
+
+// MemoryBackgroundRecord records a bounded worker outcome without its model
+// input, response, or memory body.
+type MemoryBackgroundRecord struct {
+	Action string    `json:"action"`
+	State  string    `json:"state"`
+	Count  int       `json:"count"`
+	Reason string    `json:"reason,omitempty"`
+	At     time.Time `json:"at"`
 }
 
 type RunStarted struct {
