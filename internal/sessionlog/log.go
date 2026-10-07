@@ -253,7 +253,7 @@ func validateRunAppend(sessionID, typ string, data any, events []Event) error {
 	if starts[runEvent.RunID].RunID == "" {
 		return errors.New("run_event has no run_started event")
 	}
-	if terminal[runEvent.RunID] {
+	if terminal[runEvent.RunID] && runEvent.Kind != "delegation_event" {
 		return errors.New("run_event follows terminal event")
 	}
 	if runEvent.RunSeq != lastSeq[runEvent.RunID]+1 {
@@ -483,7 +483,7 @@ func replayFile(path, id string) (Transcript, error) {
 			if decodeData(e.Data, &runEvent) != nil || runEvent.ID == "" || runEvent.RunID == "" || runEvent.SessionID != id || runEvent.RunSeq == 0 || runEvent.Kind == "" || runEvent.At.IsZero() {
 				return out, fmt.Errorf("session log has invalid run_event at seq %d", e.Seq)
 			}
-			if runStarts[runEvent.RunID].RunID == "" || runTerminal[runEvent.RunID] || runEvent.RunSeq != runSeq[runEvent.RunID]+1 || runEventIDs[runEvent.ID] {
+			if runStarts[runEvent.RunID].RunID == "" || (runTerminal[runEvent.RunID] && runEvent.Kind != "delegation_event") || runEvent.RunSeq != runSeq[runEvent.RunID]+1 || runEventIDs[runEvent.ID] {
 				return out, fmt.Errorf("session log has invalid run event order at seq %d", e.Seq)
 			}
 			if runEvent.Kind == "terminal" {

@@ -42,6 +42,7 @@
 - 在 HookFired 中增加可选 child run ID，并扩展校验、投影和审计测试。
 - DelegationEvent 使用父 run ID 流关联 hook ID/task name；queued/running/terminal 状态可被现有游标订阅恢复。
 - DelegationEvent 保留所属 session ID，使 async run_end 的父 run 流在 run 已结束后仍可写入。
+- session log terminal 后只放行 `delegation_event`；普通 run event 和重复 terminal 仍拒绝。
 - 跟踪异步 action 的 task handle：父 run 取消时停止当时已排队/运行 child；post-terminal run_end hook 继续启动一次有界任务，由 service lifetime 管理。
 - 服务关闭或重启时中止未完成的 child，恢复投影为 `interrupted`，不自动重跑。
 - run_end 输出仍记录到原父 run 的 hook 事件并进入现有通知队列；TUI 展示 hook ID、状态、阶段摘要和终态，不展示思考流/child transcript。

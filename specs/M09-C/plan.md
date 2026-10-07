@@ -46,6 +46,7 @@ type Delegator interface {
 `RunTask` 支持 Session 与 Goal WorkRef；现有 `RunBatch` 仍保持 M09-A 的 Session-only 约束。两者复用同一服务级 FIFO worker/queue、child runner、进度 reporter、取消链和单项预算，不增加第二套池。
 
 `DelegationEvent` 携带所属 session ID，使服务在 run_end 子项继续运行、父 run 已退出活动表后仍能把协作事件写回原父 run 的持久事件流。
+Session log 保持终态不可变：父 run terminal 之后只允许追加 `delegation_event`，普通文本、工具和第二个 terminal 仍拒绝。
 
 ### 父 run 范围传递
 
@@ -107,6 +108,7 @@ internal/hooks/
 
 internal/sessionlog/
 ├── events.go                         — HookFired 子 run 关联字段
+├── log.go                            — terminal 后仅放行 delegation_event 延续
 ├── validate.go                       — 新字段校验
 └── hook_test.go                      — 持久化、投影与大小约束
 
@@ -137,6 +139,7 @@ specs/M09-C/
 | 父 run 取消 | 取消时停止已排队/运行 child；随后触发的 run_end agent hook 继续执行一次有界任务 | 保留 M07 run_end 对取消终态的触发语义；run_end 已是新的结束事件。 |
 | 服务重启 | 未终结 child 标记 `interrupted`，不自动重跑 | 与 M09-A/B 恢复策略一致，避免不确定任务重复执行。 |
 | 持久化 | 复用 DelegationEvent 父 run 流；HookFired 增加 child run ID | 状态可按游标恢复，结果可从 hook 审计定位至 child。 |
+| terminal 后事件 | Session log terminal 后仅接受关联父 run 的 delegation_event | 支持 run_end child 终态后继续持久化协作，同时保留普通 run 事件不可延续的规则。 |
 | 资源 | 3 worker、32 queue、8 rounds、3 分钟、50,000 字节工具输出、8 KiB 摘要、64 KiB 输入 | 与已批准 M09-A/B 资源上限保持一致。 |
 | 验证 | fake provider 覆盖 Session/Goal、权限、拒绝顺序、预算、取消和恢复；重型集成测试使用已授权 GitHub Actions | 避免真实 provider/外网依赖，并按用户资源偏好安排重型验证。 |
 
