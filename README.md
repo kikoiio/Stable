@@ -4,15 +4,20 @@
 
 ## 安装与运行
 
-发布包面向 Linux x86_64。运行时需要 Python 3、KiCad 9、Xvfb、`xvfb-run`、`xprop`、`xwininfo` 和 ImageMagick 的 `import`。
+发布包在 Ubuntu 26.04 x86_64 上构建和验收。运行时需要 Python 3、KiCad 9、Xvfb、`xvfb-run`、`xprop`、`xwininfo` 和 ImageMagick 的 `import`。macOS、Windows、其他 Linux 发行版和 ARM64 尚未完成真实环境验收。
+
+CI 成功运行会在 GitHub Actions 的 workflow artifacts 中提供版本化 tar.gz 与 SHA-256 文件；本仓库当前不通过 GitHub Releases 发布安装包。
 
 ```bash
 tar -xzf stable-0.1.0-linux-amd64.tar.gz
+sha256sum -c stable-0.1.0-linux-amd64.tar.gz.sha256
 ./stable-0.1.0-linux-amd64/install.sh
 export PATH="$HOME/.local/bin:$PATH"
 stable doctor
 stable config init
 ```
+
+将新版本归档解包并运行其 `install.sh` 可升级；旧版本目录会保留，重新运行旧包的 `install.sh` 可回退。运行 `stable-uninstall` 可移除 Stable 程序，配置和运行数据会保留。
 
 编辑 `~/.config/stable/config.json`，填写模型提供商、模型名和 API 密钥，然后运行 `stable config check`。也可通过 `STABLE_PROVIDER`、`STABLE_MODEL` 和对应提供商的密钥环境变量配置。运行 `stable help` 可查看命令。
 

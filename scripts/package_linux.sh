@@ -3,6 +3,7 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 version=$(tr -d '[:space:]' < "$root/VERSION")
 name=stable-${version}-linux-amd64
+if [[ ! $version =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then echo 'Invalid VERSION' >&2; exit 1; fi
 archive_name=temporal_cli_1.9.1_linux_amd64.tar.gz
 digest=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
 if [[ $(uname -s) != Linux || $(uname -m) != x86_64 ]]; then echo 'Linux x86_64 required' >&2; exit 1; fi
@@ -14,6 +15,7 @@ if [[ ! -f "$archive" ]]; then
   curl -fL --retry 2 -o "$archive" "https://github.com/temporalio/cli/releases/download/v1.9.1/$archive_name"
 fi
 printf '%s  %s\n' "$digest" "$archive" | sha256sum -c -
+rm -rf -- "$root/dist/$name"
 mkdir -p "$root/dist/$name"/{bin,libexec,share,licenses}
 pkg="$root/dist/$name"
 cd "$root"
@@ -32,8 +34,9 @@ cp schemas/next_action.schema.json schemas/criteria_proposal.schema.json "$pkg/s
 cp -a workers/kicad workers/computer "$pkg/share/workers/"
 rm -rf "$pkg/share/workers/kicad/__pycache__"
 install -m 755 scripts/install_linux.sh "$pkg/install.sh"
+install -m 755 scripts/uninstall_linux.sh "$pkg/uninstall.sh"
 install -m 644 "$root/VERSION" "$pkg/VERSION"
 install -m 644 README.md "$pkg/README.md"
 tar -C "$root/dist" -czf "$root/dist/$name.tar.gz" "$name"
-sha256sum "$root/dist/$name.tar.gz" > "$root/dist/$name.tar.gz.sha256"
+(cd "$root/dist" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
 printf 'Created %s\n' "$root/dist/$name.tar.gz"
