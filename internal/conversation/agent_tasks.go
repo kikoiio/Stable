@@ -125,6 +125,7 @@ func (c *AgentTaskCoordinator) run(ctx context.Context, parent agent.ParentRun, 
 		}
 	}
 	parent.ToolSchemas = schemas
+	parent.RoleInstruction = def.Instruction
 	parent.ExecutorFactory = roleExecutorFactory{inner: parent.ExecutorFactory, allowed: allowed}
 	base := ctx
 	background := req.Background || def.Background
@@ -227,7 +228,11 @@ func taskSnapshot(sessionID string, r sessionlog.AgentTaskRecord) agent.AgentTas
 			status = agent.DelegationSucceeded
 		}
 	}
-	return agent.AgentTaskSnapshot{ID: r.Started.AgentTaskID, RunID: r.Started.RunID, OriginRunID: r.Started.OriginRunID, SessionID: sessionID, AgentName: r.Started.AgentName, Name: r.Started.AgentName, Status: status, Stage: r.Delegation.Stage, Summary: r.Delegation.Summary, Error: r.Delegation.Error, Cursor: r.LastSeq}
+	reason := r.Delegation.Error
+	if reason == "" && r.RunStatus != "completed" {
+		reason = r.TerminalReason
+	}
+	return agent.AgentTaskSnapshot{ID: r.Started.AgentTaskID, RunID: r.Started.RunID, OriginRunID: r.Started.OriginRunID, SessionID: sessionID, AgentName: r.Started.AgentName, Name: r.Started.AgentName, Status: status, Stage: r.Delegation.Stage, Summary: r.Delegation.Summary, Error: reason, Cursor: r.LastSeq}
 }
 func (c *AgentTaskCoordinator) Output(ctx context.Context, parent agent.ParentRun, id string, wait time.Duration) (agent.AgentTaskSnapshot, error) {
 	s, err := c.host()
@@ -439,10 +444,7 @@ func (s *Service) findAgentRun(sessionID, runID string) (agent.AgentTaskSnapshot
 }
 
 func hideRoleBody(text, body string) string {
-	if body != "" {
-		return strings.ReplaceAll(text, body, "[agent role instructions omitted]")
-	}
-	return text
+	return agent.SanitizeRoleOutput(text, body)
 }
 func (c *AgentTaskCoordinator) sanitizeEvent(runID string, event agent.DelegationEvent) agent.DelegationEvent {
 	c.mu.Lock()

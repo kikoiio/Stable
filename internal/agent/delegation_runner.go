@@ -76,7 +76,7 @@ func (StreamingChildRunner) Run(ctx context.Context, input ChildRunInput) ChildR
 					stage = "tool_completed"
 				}
 				if input.Progress != nil {
-					input.Progress(stage, fmt.Sprintf("%s: %s", outcome.ToolName, stage))
+					input.Progress(stage, SanitizeRoleOutput(fmt.Sprintf("%s: %s", outcome.ToolName, stage), input.RoleInstruction))
 				}
 			}
 		case EventBudgetExhausted:
@@ -86,7 +86,7 @@ func (StreamingChildRunner) Run(ctx context.Context, input ChildRunInput) ChildR
 		}
 	}
 	outcome := <-handle.Done
-	text := strings.TrimSpace(summary.String())
+	text := SanitizeRoleOutput(strings.TrimSpace(summary.String()), input.RoleInstruction)
 	if summaryTruncated {
 		text = truncateUTF8(text, input.Budget.MaxSummaryBytes)
 	}
@@ -111,7 +111,7 @@ func (StreamingChildRunner) Run(ctx context.Context, input ChildRunInput) ChildR
 		if outcome.Error != nil && outcome.Error.Message != "" {
 			reason = outcome.Error.Message
 		}
-		return ChildRunResult{Status: DelegationFailed, Summary: truncateUTF8(text, input.Budget.MaxSummaryBytes), Error: reason}
+		return ChildRunResult{Status: DelegationFailed, Summary: truncateUTF8(text, input.Budget.MaxSummaryBytes), Error: SanitizeRoleOutput(reason, input.RoleInstruction)}
 	}
 }
 

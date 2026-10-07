@@ -149,7 +149,10 @@ func (s *Service) acceptLoop(ctx context.Context) {
 	for {
 		conn, err := s.ln.Accept()
 		if err != nil {
-			if ctx.Err() == nil {
+			s.mu.Lock()
+			closing := s.closing
+			s.mu.Unlock()
+			if ctx.Err() == nil && !closing {
 				continue
 			}
 			return

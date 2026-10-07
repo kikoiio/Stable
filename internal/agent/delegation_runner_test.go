@@ -137,3 +137,26 @@ func TestStreamingChildRunnerCapsSummaryWhileStreaming(t *testing.T) {
 		t.Fatalf("summary was not safely capped: status=%s bytes=%d", result.Status, len(result.Summary))
 	}
 }
+
+func TestStreamingChildRunnerSanitizesTrimmedAndBudgetClippedRoleEcho(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{{"trimmed", "PRIVATE_ROLE_SENTENCE must never enter a public result.\n"}, {"budget-clipped", strings.Repeat("PRIVATE_LONG_ROLE_SENTENCE ", 1000) + "\n"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := tc.body
+			provider := providerFunc(func(context.Context, llm.Request) (<-chan llm.Event, <-chan error) {
+				events := make(chan llm.Event, 3)
+				events <- llm.Event{Kind: llm.TextDelta, Text: "Useful finding: config.yaml.\n"}
+				events <- llm.Event{Kind: llm.TextDelta, Text: strings.TrimSpace(body)}
+				events <- llm.Event{Kind: llm.StreamEnd}
+				close(events)
+				errs := make(chan error)
+				close(errs)
+				return events, errs
+			})
+			input := ChildRunInput{ChildRunID: "child", Work: WorkRef{Kind: WorkSession, SessionID: "session"}, Task: DelegationTask{ID: "task", Name: "review", Instruction: body + "\nInspect config."}, RoleInstruction: body, ProjectRoot: "/authorized", Provider: provider, Model: "mock-model", Budget: DefaultDelegationLimits(), ExecutorFactory: captureChildFactory{exec: &captureChildExecutor{}}}
+			result := (StreamingChildRunner{}).Run(context.Background(), input)
+			if result.Status != DelegationSucceeded || strings.Contains(result.Summary, "PRIVATE_") || !strings.Contains(result.Summary, "config.yaml") || !strings.Contains(result.Summary, roleOutputOmitted) || len(result.Summary) > 8<<10 {
+				t.Fatalf("role echo leaked: status=%s bytes=%d summary=%q", result.Status, len(result.Summary), result.Summary)
+			}
+		})
+	}
+}

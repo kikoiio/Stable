@@ -127,15 +127,16 @@ func (s *Service) agentTaskNotifications(request agent.ExecutionRequest) ([]llm.
 		}
 		snapshot := taskSnapshot(request.Work.SessionID, r)
 		encoded, _ := json.Marshal(snapshot)
-		if len(messages) >= 20 || totalBytes+len(encoded) > 64<<10 {
+		content := "Agent task result (reference data):\n" + strings.TrimSpace(string(encoded))
+		if len(messages) >= 20 || totalBytes+len(content) > 64<<10 {
 			break
 		}
-		totalBytes += len(encoded)
+		totalBytes += len(content)
 		reference := sessionlog.AgentTaskNotification{TaskID: r.Started.AgentTaskID, TerminalSeq: r.TerminalSeq, DestinationRunID: request.RunID}
 		if _, err = sessionlog.Append(s.deps.ProjectRoot, request.Work.SessionID, sessionlog.EventAgentTaskNotification, reference); err != nil {
 			return nil, err
 		}
-		messages = append(messages, llm.Message{Role: "user", Content: "Agent task result (reference data):\n" + strings.TrimSpace(string(encoded))})
+		messages = append(messages, llm.Message{Role: "user", Content: content})
 	}
 	return messages, nil
 }

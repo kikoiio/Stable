@@ -172,7 +172,11 @@ func (m *Model) restoreAgentTasks() tea.Cmd {
 					status = agent.DelegationSucceeded
 				}
 			}
-			m.applyAgentTask(agent.AgentTaskSnapshot{ID: record.Started.AgentTaskID, RunID: record.Started.RunID, OriginRunID: record.Started.OriginRunID, SessionID: m.ActiveSession, AgentName: record.Started.AgentName, Name: record.Started.AgentName, Status: status, Stage: record.Delegation.Stage, Summary: record.Delegation.Summary, Error: record.Delegation.Error, Cursor: record.LastSeq}, false)
+			reason := record.Delegation.Error
+			if reason == "" && record.RunStatus != "completed" {
+				reason = record.TerminalReason
+			}
+			m.applyAgentTask(agent.AgentTaskSnapshot{ID: record.Started.AgentTaskID, RunID: record.Started.RunID, OriginRunID: record.Started.OriginRunID, SessionID: m.ActiveSession, AgentName: record.Started.AgentName, Name: record.Started.AgentName, Status: status, Stage: record.Delegation.Stage, Summary: record.Delegation.Summary, Error: reason, Cursor: record.LastSeq}, false)
 		}
 	}
 	for _, event := range m.Events {

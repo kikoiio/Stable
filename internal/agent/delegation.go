@@ -106,6 +106,7 @@ func (l DelegationLimits) narrowed(request DelegationLimits) DelegationLimits {
 }
 
 type ParentRun struct {
+	RoleInstruction  string
 	ToolCallID       string
 	RunID            string
 	Deadline         time.Time
@@ -141,6 +142,7 @@ var (
 )
 
 type ChildRunInput struct {
+	RoleInstruction  string
 	ParentRunID      string
 	ChildRunID       string
 	Work             WorkRef
@@ -537,7 +539,7 @@ func (d *PoolDelegator) runWork(work delegationWork) DelegationResult {
 		return d.terminal(work, DelegationFailed, "", "could not derive child permission bounds")
 	}
 	input := ChildRunInput{
-		ParentRunID: work.parent.RunID, ChildRunID: childID, Task: work.task,
+		ParentRunID: work.parent.RunID, ChildRunID: childID, Task: work.task, RoleInstruction: work.parent.RoleInstruction,
 		Work:        work.parent.Work,
 		ProjectRoot: work.parent.ProjectRoot, Provider: work.parent.Provider,
 		PermissionBounds: childBounds,
@@ -548,6 +550,7 @@ func (d *PoolDelegator) runWork(work delegationWork) DelegationResult {
 	var progressMu sync.Mutex
 	var progressErr error
 	input.Progress = func(stage, summary string) {
+		summary = SanitizeRoleOutput(summary, work.parent.RoleInstruction)
 		if len(summary) > budget.MaxSummaryBytes {
 			summary = truncateUTF8(summary, budget.MaxSummaryBytes)
 		}
@@ -591,7 +594,8 @@ func (d *PoolDelegator) runWork(work delegationWork) DelegationResult {
 }
 
 func (d *PoolDelegator) terminal(work delegationWork, status DelegationStatus, summary, errText string) DelegationResult {
-	summary = truncateUTF8(summary, d.limits.narrowed(work.parent.Budget).MaxSummaryBytes)
+	summary = truncateUTF8(SanitizeRoleOutput(summary, work.parent.RoleInstruction), d.limits.narrowed(work.parent.Budget).MaxSummaryBytes)
+	errText = SanitizeRoleOutput(errText, work.parent.RoleInstruction)
 	if !status.IsTerminal() {
 		status = DelegationFailed
 		if errText == "" {

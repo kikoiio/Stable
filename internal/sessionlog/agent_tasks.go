@@ -26,13 +26,14 @@ type AgentTaskDelegation struct {
 // TerminalSeq are session cursors, while LastRunSeq is the independent run
 // cursor. A task with only run_started is visible before its first queued event.
 type AgentTaskRecord struct {
-	Started     RunStarted
-	Delegation  AgentTaskDelegation
-	StartSeq    uint64
-	LastSeq     uint64
-	LastRunSeq  uint64
-	TerminalSeq uint64
-	RunStatus   string
+	Started        RunStarted
+	Delegation     AgentTaskDelegation
+	StartSeq       uint64
+	LastSeq        uint64
+	LastRunSeq     uint64
+	TerminalSeq    uint64
+	RunStatus      string
+	TerminalReason string
 }
 
 // AgentTasks folds the complete, uncompacted transcript. It rejects malformed
@@ -240,10 +241,15 @@ func (st *agentTaskState) checkRunEvent(sessionID string, run RunEvent) error {
 		}
 	case "terminal":
 		var terminal struct {
-			Status string `json:"status"`
+			Status  string `json:"status"`
+			Summary string `json:"summary,omitempty"`
+			Reason  string `json:"reason,omitempty"`
 		}
 		if decodeData(run.Payload, &terminal) != nil {
 			return errors.New("agent task run terminal has invalid shape")
+		}
+		if len(terminal.Summary) > 8<<10 || len(terminal.Reason) > 1024 || !utf8.ValidString(terminal.Summary+terminal.Reason) {
+			return errors.New("agent task run terminal text exceeds its bounds")
 		}
 		if task.Delegation.Status != "" && !agentTaskTerminal(task.Delegation.Status) {
 			return errors.New("agent task run terminal precedes child terminal")
@@ -346,9 +352,11 @@ func (st *agentTaskState) observe(sessionID string, e Event) error {
 		case "terminal":
 			var terminal struct {
 				Status string `json:"status"`
+				Reason string `json:"reason,omitempty"`
 			}
 			_ = decodeData(run.Payload, &terminal)
 			task.RunStatus = terminal.Status
+			task.TerminalReason = terminal.Reason
 		}
 		st.tasks[start.AgentTaskID] = task
 	case EventAgentTaskNotification:
