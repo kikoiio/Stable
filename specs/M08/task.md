@@ -2,7 +2,7 @@
 
 > 状态：已批准（2026-10-07）。依据已批准的 [spec.md](spec.md) 与 [plan.md](plan.md)；进入按依赖 DAG 实施阶段。
 > 执行约定：每个任务独立验证后再标记完成；共享文件按下方依赖串行修改。启动重型构建/全量测试前检查 `free -h`、`vmstat 1 5`、`cat /proc/pressure/memory`，由主 agent 协调并发；不终止其他任务进程。云端运行需先说明服务、用途和权限并取得许可。
-> 实施偏差：存储需要安全枚举记忆目录；plan 漏列了该能力，因此在 `secfile.Root` 增加 no-follow `ReadDir`，并复用同一根身份校验。该扩展只补齐文件安全接口，不扩大 M08 记忆范围。
+> 实施偏差：存储需要安全枚举记忆目录；plan 漏列了该能力，因此在 `secfile.Root` 增加 no-follow `ReadDir`，并复用同一根身份校验。实现还把 session ID 加入 `PrepareRun` 参数，以读取该 session 的提取游标，并在 worker state 中记录上次整理后的活动 session 集合供 F8 门槛使用。这些扩展只补足已批准行为所需数据，不扩大 M08 功能范围。
 
 ## 文件清单
 

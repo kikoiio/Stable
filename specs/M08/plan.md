@@ -123,6 +123,7 @@ type RunCompletion struct {
     WorkKind             string
     Messages             []ConversationText
     ThroughSeq           uint64
+    CompletedAt          time.Time
     MainAgentWroteMemory bool
 }
 ```
@@ -140,17 +141,21 @@ type ExtractionInput struct {
 
 type ConsolidationInput struct {
     ActiveSessions int
+    UserIndex      string
+    ProjectIndex   string
     UserEntries     []MemoryEntry
     ProjectEntries  []MemoryEntry
+    Truncated       bool
 }
 
 type WorkerState struct {
-    SessionCursors     map[string]uint64
-    LastConsolidatedAt time.Time
+    SessionCursors             map[string]uint64
+    LastConsolidatedAt          time.Time
+    SessionsSinceConsolidation map[string]bool
 }
 ```
 
-WorkerState 按规范项目根保存于私有 Stable StateDir；锁和状态不写入项目记忆目录。
+WorkerState 按规范项目根保存于私有 Stable StateDir；`SessionsSinceConsolidation` 只计数整理成功后有活动的不同 session，整理成功后清空。整理输入总体上限为 2 MiB，超出时标记截断；锁和状态不写入项目记忆目录。
 
 ## 核心接口
 
@@ -169,7 +174,7 @@ type Processor interface {
 }
 
 type Manager interface {
-    PrepareRun(ctx context.Context, projectRoot, workDir, query string) (RunMemoryContext, error)
+    PrepareRun(ctx context.Context, projectRoot, workDir, sessionID, query string) (RunMemoryContext, error)
     List(ctx context.Context, projectRoot string) ([]MemoryHeader, error)
     Read(ctx context.Context, projectRoot string, scope MemoryScope, filename string) (MemoryEntry, error)
     Save(ctx context.Context, projectRoot string, change MemoryChange) error

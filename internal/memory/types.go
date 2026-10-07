@@ -118,8 +118,11 @@ type ExtractionInput struct {
 
 type ConsolidationInput struct {
 	ActiveSessions int
+	UserIndex      string
+	ProjectIndex   string
 	UserEntries    []MemoryEntry
 	ProjectEntries []MemoryEntry
+	Truncated      bool
 }
 
 type WorkerState struct {
@@ -142,7 +145,7 @@ type Processor interface {
 }
 
 type Manager interface {
-	PrepareRun(ctx context.Context, projectRoot, workDir, query string) (RunMemoryContext, error)
+	PrepareRun(ctx context.Context, projectRoot, workDir, sessionID, query string) (RunMemoryContext, error)
 	List(ctx context.Context, projectRoot string) ([]MemoryHeader, error)
 	Read(ctx context.Context, projectRoot string, scope MemoryScope, filename string) (MemoryEntry, error)
 	Save(ctx context.Context, projectRoot string, change MemoryChange) error
