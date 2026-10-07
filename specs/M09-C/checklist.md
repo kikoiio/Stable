@@ -23,7 +23,7 @@
 ## 验证记录
 
 - [ ] fake-provider 验证不调用真实 provider 或外网，并覆盖 AC1–AC8。
-- [ ] 本机只运行轻量定向验证；重型集成验证在 GitHub Actions 执行，并记录 workflow/run 链接、结论及失败项。若云端运行未完成或失败，明确记录未覆盖部分，不标记通过。
+- [x] 本机只运行轻量定向验证；重型集成验证在 GitHub Actions 执行，并记录 workflow/run 链接、结论及失败项。若云端运行未完成或失败，明确记录未覆盖部分，不标记通过。
 - [x] 最终 diff、格式化和文档状态检查完成；没有未审阅的生成文件或运行结果。
 
 ### 2026-10-07 本轮进度
@@ -39,5 +39,9 @@
 - GitHub Actions [Go run 37580835794](https://github.com/kikoiio/Stable/actions/runs/37580835794) 在提交 `6fcc08fbd0ce7b2e823709922e4d893aa247efa1` 运行；`build-and-test`（依赖校验、构建、`go test ./...`）与 `test-package` 全部通过。
 - GitHub Actions [E2E run 37580835641](https://github.com/kikoiio/Stable/actions/runs/37580835641) 在同一提交运行；`unit`、`cases`、`e2e-sessions`、`e2e-m03`、`e2e-m04`、`e2e-core`（`make e2e`）全部通过。
 - checklist-only 提交 `8c86a3a` 的 [Go run 37581684595](https://github.com/kikoiio/Stable/actions/runs/37581684595) 全部通过；同提交的 [E2E run 37581684642](https://github.com/kikoiio/Stable/actions/runs/37581684642) 中 `unit`、`cases`、`e2e-sessions`、`e2e-m03`、`e2e-m04` 通过，`e2e-core` 失败。
-- 失败 artifact 的 `run.sh` 数据显示 crash-recovery marker 已生成；随后 chat client 遇到 socket `FileNotFoundError`，状态/SQLite 操作报告 `database is locked`，`make e2e` 未完成该场景后续验收。与同一代码提交上成功的 E2E run 相比，这是恢复路径的间歇性失败；在复现原因明确前，云端重型验证项不勾选通过。
+- 失败 artifact 的 `run.sh` 数据显示 crash-recovery marker 已生成；随后 chat client 遇到 socket `FileNotFoundError`，状态/SQLite 操作报告 `database is locked`，`make e2e` 未完成该场景后续验收。与同一代码提交上成功的 E2E run 相比，这是恢复路径的间歇性失败；当时先保持云端重型验证项未勾选，修正后再复测。
+- 修正恢复 E2E 的竞争窗口：marker 出现后立即离开 chat 轮询；crash 窗口中的 SQLite 通知遇到 `database is locked` 时最多重试 10 秒，其它错误仍直接失败。
+- GitHub Actions [Go run 37583604272](https://github.com/kikoiio/Stable/actions/runs/37583604272) 在提交 `8efb8a6375a7f582a599b3f5d500038660f8e637` 运行；`build-and-test`、`test-package` 全部通过。
+- GitHub Actions [E2E run 37583604300](https://github.com/kikoiio/Stable/actions/runs/37583604300) 在同一提交运行；`unit`、`cases`、`e2e-sessions`、`e2e-m03`、`e2e-m04`、`e2e-core` 全部通过，包含修正后的 crash/recovery 场景。
+- 本轮最终提交 SHA 的 Go 与 E2E workflow 均通过，云端重型验证项完成。AC1–AC8 和 fake-provider 全覆盖仍需按上方功能验收逐项核实，整体不标记通过。
 - 旧 E2E run `37578219968` 属于未包含本轮改动的提交 `47bf2de`，曾有 `e2e-core` 失败；AC1–AC8 尚未全量验收，整体不标记通过。
