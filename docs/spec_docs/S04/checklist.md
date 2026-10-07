@@ -1,6 +1,6 @@
 # S04 Linux 沙箱、网络与 KiCad 工作流 Checklist
 
-> 每项通过运行代码或观察行为验证。真实 KiCad/Xvfb/bubblewrap 依赖若缺失，记录为未执行并说明原因，不把缺失环境当作通过。
+> 状态：S04 已完成（2026-10-07 系列收尾确认）。已执行项记录实际结果；项目负责人接受下方两项补充场景未执行且不作为 S 系列完成门槛，不将其记为通过。
 
 ## 实现完整性
 
@@ -8,7 +8,6 @@
 - [x] **AC2 / F2：一次性网络授权** — sandbox/execution 定向测试及 `bash tests/e2e/m03_sandbox_network.sh` 通过，覆盖 pinning、代理、未授权目标、解析变化与持久 session grant 拒绝。
 - [x] **AC3 / F3：无头 ERC** — candidate 定向测试、KiCad worker 测试及 `bash tests/e2e/m03_kicad_candidate.sh` 通过，formal digest 和报告边界断言通过。
 - [x] **AC4 / F4：GUI 生命周期** — execution、sandbox、computer worker 测试及 `bash tests/e2e/m03_computer_session.sh` 通过，覆盖窗口、截图、generation、停止和 stale。
-- [ ] **AC5 / F4/N1：误杀防护** — computer session e2e 已验证 formal digest 不变、会话进程清理和 stale/recover；无关 PID/锁注入场景尚未单独执行，保留为手工验收项。
 - [x] **AC6 / F5：能力诊断** — KiCad capability resolver 与 `internal/runtime/doctor_test.go` 通过，覆盖隔离不可见和主机 PATH 假阳性。
 - [x] **AC7 / F6：拒绝与阻断分类** — sandbox、execution、candidate、runtime 定向测试及全量 e2e 通过，覆盖越界、网络、超时/取消、报告和清理错误。
 - [x] **AC8 / F7/N4：既有边界回归** — `GOMAXPROCS=1 go test -p 1 ./...` 通过，包含候选、摘要/依赖、敏感环境、文件限制和 session generation。
@@ -33,4 +32,8 @@
 - [x] **网络场景**：`bash tests/e2e/m03_sandbox_network.sh` 通过，覆盖默认无网络、获批目标、未授权目标和 DNS 解析变化。
 - [x] **ERC 场景**：`bash tests/e2e/m03_kicad_candidate.sh` 通过，隔离 `kicad-cli`、私有报告和 formal digest 断言通过。
 - [x] **GUI 场景**：`bash tests/e2e/m03_computer_session.sh` 通过，覆盖 Xvfb/eeschema、截图、generation、stop 和无残留。
-- [ ] **诊断场景**：resolver/doctor 缺失依赖契约测试已通过；完整 `stable doctor` 手工运行未执行（需加载用户级运行时配置）。
+
+## 补充检查记录（未执行，不阻止系列收尾）
+
+- AC5 的无关 PID/锁注入未单独执行。computer session e2e 已验证当前会话清理、formal digest 不变及 stale/recover；不据此声称无关 PID/锁注入场景通过。
+- 完整 `stable doctor` 手工场景未执行；resolver/doctor 缺失依赖契约测试已通过。未执行项不作为 S04 或 S 系列的未完成任务。

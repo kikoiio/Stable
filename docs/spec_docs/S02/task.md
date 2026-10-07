@@ -1,6 +1,6 @@
 # S02 目录、身份、IPC 与运行时生命周期(阶段 2)Tasks
 
-> 状态:已批准(2026-10-06)。依据已批准的 spec.md 与 plan.md(docs/spec_docs/S02/)。
+> 状态:已完成（2026-10-07 系列收尾确认）。依据已批准的 spec.md 与 plan.md(docs/spec_docs/S02/)。
 > 执行约定:并行子代理须遵守文件所有权边界(不同任务不同文件);启动批量编译/全量测试等重型操作前检查内存(`free -h`、/proc/pressure/memory)并与主代理协调;每个任务完成即运行其验证,先有证据再标记完成;每组逻辑相关任务完成后提交一次。
 
 ## 文件清单
@@ -31,7 +31,7 @@
 | 修改 | `scripts/check-platform.sh` | 门禁扩展 |
 | 修改 | `go.mod`、`go.sum` | go-winio 依赖 |
 | 修改 | `docs/spec_docs/S00/platform-capability-matrix.md` | C01–C05 状态更新 |
-| 新建 | `docs/spec_docs/S02/real-os-acceptance.md` | 真实 OS 待验清单 |
+| 新建 | `docs/spec_docs/S02/real-os-acceptance.md` | 条件性真实 OS 参考检查 |
 
 ## T1: paths.Resolve 签名变更与调用方适配
 
@@ -292,19 +292,19 @@
 **文件:** `docs/spec_docs/S00/platform-capability-matrix.md`
 **依赖:** T2–T25 完成
 **步骤:**
-1. 第 2 节矩阵 C01–C05 的 macOS/Windows 状态由「未评估(计划评估)」更新为实际结果(支持/支持(降级)/待真实环境验证),注明「开发构建级,真实 OS 验收待阶段 5」。
+1. 根据 S02 实际实现和验证证据更新第 2 节矩阵 C01–C05 的 macOS/Windows 状态；区分源码实现/编译与契约验证，注明「真实 OS 行为未由本系列验证，不构成支持承诺」。
 2. 第 3 节 C01–C05 各行末尾追加 S02 简短状态与证据位置(新包文件路径、契约测试名);不重写历史结论。
 3. 追加「第 8 节 S02 位置更新」表(类似第 7 节,记录新位置:owner 检查→secfile、路径→paths/user、flock→lock_unix、/proc→proc_unix 等)。
 
 **验证:** `git diff docs/spec_docs/S00/` 确认 C06–C10 与历史小节未改动。
 
-## T27: 真实 OS 待验清单
+## T27: 记录条件性真实 OS 参考检查
 
 **文件:** 新建 `docs/spec_docs/S02/real-os-acceptance.md`
 **依赖:** T26
 **步骤:**
 1. 列出只能在真实 Windows/macOS 验证的项:三平台 CLI/TUI 启动、重启/崩溃恢复、命名管道连通与 ACL 拒绝、LockFileEx 独占、Job Object 级联回收、ACL 私密文件生效、darwin 组停止、doctor 输出;每项写「操作→期望」。
-2. 标注执行时机(阶段 5 CI/用户机器)与负责人占位。
+2. 标注为仅在未来单独决定支持相应平台时执行的可选检查；不设本系列执行日期或负责人。
 
 **验证:** `git ls-files docs/spec_docs/S02/` 输出五份文档。
 

@@ -1,6 +1,6 @@
 # Stable Linux CLI
 
-发布包的目标环境为 Ubuntu 26.04 x86_64。包由 GitHub Actions 在成功的 workflow 中构建并验收，归档与 SHA-256 文件可从该 workflow run 的 Artifacts 下载；当前不发布到 GitHub Releases。它包含应用、Temporal CLI 本地开发服务和固定 KiCad 实验资源。Temporal 开发服务仅用于单机 MVP。macOS、Windows、其他 Linux 发行版和 ARM64 尚未完成真实环境验收。
+发布包的目标环境为 Ubuntu 26.04 x86_64。包由 GitHub Actions 在成功的 workflow 中构建并验收，归档与 SHA-256 文件可从该 workflow run 的 Artifacts 下载；当前不发布到 GitHub Releases。它包含应用、Temporal CLI 本地开发服务和固定 KiCad 实验资源。Temporal 开发服务仅用于单机 MVP。S00–S05 解耦系列已完成；本系列没有声明 macOS、Windows、其他 Linux 发行版或 ARM64 受支持。未来若要提供这些平台的产品支持，需另行确定范围并验收。
 
 ## 系统依赖
 

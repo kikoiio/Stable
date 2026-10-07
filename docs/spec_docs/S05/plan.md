@@ -1,6 +1,6 @@
 # S05 Linux 发布与支持声明 Plan
 
-> 状态：已批准（2026-10-07）。基于已批准的 [spec.md](spec.md)。S05 仅覆盖 Ubuntu 26.04 x86_64 的 Linux 发布切片。
+> 状态：已完成（2026-10-07）。基于已批准的 [spec.md](spec.md)。S05 覆盖 Ubuntu 26.04 x86_64 的 Linux 发布切片，并完成 S00–S05 解耦系列收尾。
 
 ## 架构概览
 
@@ -8,7 +8,7 @@
 2. **安装生命周期层**：扩展用户级安装脚本，校验包内容后复制到版本化 staging 目录，再切换 `$HOME/.local/bin` 中 Stable 命令入口；版本目录并存以支持回退。提供对应卸载入口，只删除 Stable 管理的应用目录和命令入口。
 3. **包验收层**：扩展 `tests/package`，在隔离 HOME 下覆盖首装、重装、升级、失败保持旧入口、回退、卸载、数据保留和包完整性；沿用现有安装后 CLI/runtime/e2e/restart 验收。
 4. **CI 交付层**：调整现有 GitHub Actions `build-and-test` 与 `test-package` jobs 使用 `ubuntu-26.04`；在同一 `test-package` job 内构建并验收包，仅成功后上传验收过的 tar.gz 和 SHA-256 workflow artifact，不添加公开发布步骤。
-5. **文档与状态层**：更新 README、Linux 安装说明和 S00 能力矩阵，记录 Ubuntu 26.04 x86_64 包目标、安装生命周期与实际 runner 证据；macOS/Windows 实机验收继续标为待完成。
+5. **文档与状态层**：更新 README、Linux 安装说明和 S00 能力矩阵，记录 Ubuntu 26.04 x86_64 包目标、安装生命周期与实际 runner 证据；macOS/Windows 保持未验证且无支持承诺；相关工作不属于本系列后续任务。
 
 ## 核心数据结构与接口
 
@@ -72,7 +72,7 @@
 
 **文件：** `README.md`、`docs/install-linux.md`、`docs/spec_docs/S00/platform-capability-matrix.md`
 
-**职责：** 说明 Ubuntu 26.04 x86_64 的包目标、运行依赖、安装/升级/回退/卸载；补记 S05 的 Linux runner 证据，并保留 macOS/Windows 待真实验收状态。
+**职责：** 说明 Ubuntu 26.04 x86_64 的包目标、运行依赖、安装/升级/回退/卸载；补记 S05 的 Linux runner 证据，并说明 macOS/Windows 未验证且不属于本系列支持目标。
 
 **依赖：** S05 实际 CI 和包验收结果；文档证据只记录真正运行过的检查。
 

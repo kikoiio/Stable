@@ -1,6 +1,6 @@
 # S04 Linux 沙箱、网络与 KiCad 工作流 Tasks
 
-> 基于已批准的 [spec.md](spec.md) 与 [plan.md](plan.md)。任务按依赖 DAG 执行，未完成本文件和 checklist 审批前不进入实现。
+> 状态：已完成（2026-10-07 系列收尾确认）。基于已批准的 [spec.md](spec.md) 与 [plan.md](plan.md)。
 
 ## 文件清单
 

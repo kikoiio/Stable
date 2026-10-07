@@ -1,6 +1,6 @@
 # S01 平台边界抽取(阶段 1)Spec
 
-> 状态:已批准(2026-10-06)。S01 = 平台可移植性路线图「阶段 1:抽取边界,保留 Linux 行为」(依据 docs/platform-portability-roadmap.md 与 docs/spec_docs/S00/platform-capability-matrix.md)。用户已确认:阶段 1 四项工作全量纳入本里程碑;SQLite 采用平台 stub 方案(linux 保留 mattn/go-sqlite3,非 Linux 编译通过但打开 store 返回明确 unsupported,驱动选型留阶段 5);编译门槛为 GOOS=windows/darwin 下 `go build ./...` 全绿(非测试代码),测试文件编译问题清单化不阻塞;架构形态为 internal/platform 六域子包。
+> 状态:已完成（2026-10-07 系列收尾确认）。S01 = 平台可移植性路线图「阶段 1:抽取边界,保留 Linux 行为」(依据 docs/platform-portability-roadmap.md 与 docs/spec_docs/S00/platform-capability-matrix.md)。用户已确认:阶段 1 四项工作全量纳入本里程碑;SQLite 采用平台 stub 方案(linux 保留 mattn/go-sqlite3,非 Linux 编译通过但打开 store 返回明确 unsupported,非 Linux 驱动只在未来单独决定支持该平台时再评估);编译门槛为 GOOS=windows/darwin 下 `go build ./...` 全绿(非测试代码),测试文件编译问题清单化不阻塞;架构形态为 internal/platform 六域子包。
 
 ## 背景
 
@@ -12,7 +12,7 @@ S00 能力表已建立回归基线:Linux 10 项能力全部「支持」,26 条�
 - **组合根集中**:全部平台依赖由 cmd/*(stable、agentworker、chatserve dev 入口)构造注入,业务包零平台依赖(grep 门禁可执行)。
 - **编译清单关闭**:GOOS=windows 与 darwin 下 `go build ./...` 全绿(非测试代码);问题清单逐项记录处置方式。
 - **resolver 统一**:布局推导单轨化,`.exe` 后缀、libexec 子程序、share 资源、dev-install 候选集中处理。
-- **SQLite 平台 stub**:linux 沿用 mattn/go-sqlite3;非 Linux 编译通过、打开 store 返回明确 unsupported(驱动选型留阶段 5)。
+- **SQLite 平台 stub**:linux 沿用 mattn/go-sqlite3;非 Linux 编译通过、打开 store 返回明确 unsupported(非 Linux 驱动只在未来单独决定支持该平台时再评估)。
 - **Linux 行为保持**:S00 的 26 条可运行验证重放全过、`make test` 全过——搬移而非重写。
 
 ## 功能需求
@@ -40,7 +40,7 @@ S00 能力表已建立回归基线:Linux 10 项能力全部「支持」,26 条�
 - 不做 macOS/Windows 的真实实现与适配设计(路径策略、ACL、Job Object、命名管道等属阶段 2+;S00 状态维持「未评估」)。
 - 不统一 TUI commands 目录的 XDG 来源、不替代 XDG-only 默认值(阶段 2 第 1 项)。
 - 不改 doctor 的探测清单与口径(doctor 平台化探测属阶段 2 第 5 项)。
-- 不构建跨平台 CI、发布包、安装脚本,不切换 SQLite 驱动选型(阶段 5)。
+- 不构建跨平台 CI、发布包或安装脚本；Linux 打包由 S05 单独完成。非 Linux SQLite 驱动不属于本系列目标。
 - 不改造 tests/e2e 的 bash 套件与测试文件的平台化(测试编译问题清单化、不阻塞)。
 - 不修订 S00 能力表已有结论(仅按 N4 追加位置更新)。
 

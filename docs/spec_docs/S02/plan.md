@@ -1,6 +1,6 @@
 # S02 目录、身份、IPC 与运行时生命周期(阶段 2)Plan
 
-> 状态:已批准(2026-10-06)。依据已批准的 spec.md(docs/spec_docs/S02/spec.md)。方案:扩展 S01 建立的 internal/platform 六域包,不新增顶层组件。
+> 状态:已完成（2026-10-07 系列收尾确认）。依据已批准的 spec.md(docs/spec_docs/S02/spec.md)。方案:扩展 S01 建立的 internal/platform 六域包,不新增顶层组件。
 
 ## 架构概览
 
@@ -136,7 +136,7 @@ cmd/stable → appconfig.Load()
 ```
 docs/spec_docs/S02/
 ├── spec.md / plan.md / task.md / checklist.md
-└── real-os-acceptance.md   (第 5 份文档:真实 OS 待验清单,AC8 要求)
+└── real-os-acceptance.md   (第 5 份文档:未来平台支持时的条件性参考检查,AC8 要求)
 
 internal/platform/paths/
 ├── paths.go                — Resolve(stateDir) 签名变更;Paths 结构不变
@@ -209,4 +209,4 @@ docs/spec_docs/S00/platform-capability-matrix.md — C01–C05 状态更新 + �
 | Cmdline 非 Linux 实现 | darwin=sysctl;windows=PEB 读取;受阻则降级 unsupported 并记矩阵 | 纯 Go(CGO_ENABLED=0 门槛);实际调用方仅 Linux GUI 清理路径 |
 | 私密文件 API 宿主 | secfile 包 | 对应 S00 矩阵 C05 行;不新增顶层包 |
 | 门禁 chmod 规则 | 业务包禁 os.Chmod/.Chmod( 直调(含 0444 只读标记) | 规则简单防回归;所有权限收紧走同一接口 |
-| 真实 OS 验收 | real-os-acceptance.md 单列清单 | N3/AC8:不冒充已验证,留阶段 5 执行 |
+| 真实 OS 验收 | real-os-acceptance.md 单列清单 | N3/AC8:不冒充已验证,作为未来平台支持的可选检查，不属于本系列完成门槛 |

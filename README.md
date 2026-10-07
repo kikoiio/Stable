@@ -4,7 +4,7 @@
 
 ## 安装与运行
 
-发布包在 Ubuntu 26.04 x86_64 上构建和验收。运行时需要 Python 3、KiCad 9、Xvfb、`xvfb-run`、`xprop`、`xwininfo` 和 ImageMagick 的 `import`。macOS、Windows、其他 Linux 发行版和 ARM64 尚未完成真实环境验收。
+本仓库当前交付 Linux CLI；发布包仅在 Ubuntu 26.04 x86_64 上构建和验收。运行时需要 Python 3、KiCad 9、Xvfb、`xvfb-run`、`xprop`、`xwininfo` 和 ImageMagick 的 `import`。S00–S05 已完成操作系统机制与功能逻辑解耦；本系列没有声明 macOS、Windows、其他 Linux 发行版或 ARM64 受支持。未来若要提供这些平台的产品支持，需另行确定范围并验收。
 
 CI 成功运行会在 GitHub Actions 的 workflow artifacts 中提供版本化 tar.gz 与 SHA-256 文件；本仓库当前不通过 GitHub Releases 发布安装包。
 

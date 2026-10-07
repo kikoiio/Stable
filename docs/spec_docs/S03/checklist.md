@@ -1,13 +1,13 @@
 # S03 安全文件访问与候选验收事务 Checklist
 
-> 每项通过运行代码或观察行为来验证。S03 的 Windows/macOS 主机行为不在本机验收范围，相关项目必须标记为阶段 5 待验，不能以目标平台编译代替真实 OS 证据。
+> 状态：S03 已完成（2026-10-07 系列收尾确认）。Windows/macOS 主机行为不在本系列范围；目标平台编译仅证明代码可构建，不代表真实 OS 支持。
 
 ## 实现完整性
 
 - [x] **AC1 / F1：根目录边界** — 对正式根、候选根、manifest 和 ERC 报告运行绝对路径、`..`、根外符号链接/reparse point、目录替代文件和特殊文件 fixture；每次越界都被拒绝，根外文件无读取或修改（验证：`go test ./internal/platform/secfile ./internal/candidate -run 'Test.*(Unsafe|Path|Symlink|Reparse)' -count=1`）。
 - [x] **AC2 / F2：统一安全读取** — 候选创建、manifest、review diff、snapshot materialize 和 ERC 报告读取都经过同一安全边界；注入链接替换、根目录替换或文件身份变化后操作失败且已有数据不变（验证：定向 candidate 测试 + 受影响包测试）。
 - [x] **AC3 / F3：摘要与并发校验** — 在 acceptance 前修改、删除或替换正式/候选条目，验收返回摘要/版本冲突，不写 receipt，不将决策标记为 applied（验证：`go test ./internal/candidate ./internal/store -run 'Test.*(Stale|Drift|Concurrent|Acceptance)' -count=1`）。
-- [x] **AC4 / F4：平台事务语义** — Linux 使用原子目录交换并保持现有结果；macOS/Windows 契约覆盖 `prepared`、中间 phase、回滚、跨卷和能力不足；跨卷或不可证明安全时拒绝且无无保护覆盖（验证：candidate transaction 测试 + 三平台目标编译；真实 OS 留阶段 5）。
+- [x] **AC4 / F4：平台事务语义** — Linux 使用原子目录交换并保持现有结果；macOS/Windows 契约覆盖 `prepared`、中间 phase、回滚、跨卷和能力不足；跨卷或不可证明安全时拒绝且无无保护覆盖（验证：candidate transaction 测试 + 三平台目标编译；真实 OS 支持不在本系列范围）。
 - [x] **AC5 / F5：Rewind 事务** — 回退快照在链接、根目录替换、并发、跨卷和失败场景下遵守安全边界；成功得到完整目标快照，失败时正式工程和候选工程都完整可识别（验证：`go test ./internal/candidate ./internal/conversation ./internal/store -run 'Test.*Rewind' -count=1`）。
 - [x] **AC6 / F6：崩溃恢复** — 在准备、保存旧根、安装新根、服务目录迁移、交换和 finalize 边界注入终止；重启后得到完整旧版本、完整新版本或 blocked，第二次恢复不改变结果（验证：故障注入与 recovery 测试）。
 - [x] **AC7 / F7：拒绝可诊断** — 分别触发路径越界、链接拒绝、并发冲突、跨卷、能力不可用和 journal 不一致；日志、状态或错误能区分原因并指出对象/phase（验证：错误断言 + journal reason 查询）。
@@ -34,7 +34,9 @@
 - [x] **E1：Acceptance 并发变更与重启** — 候选完成 review 后修改正式工程，验收被拒且无 receipt；在 prepared/交换后模拟进程终止并重启，系统恢复到完整旧/新版本或 blocked，重复 reconcile 幂等（验证：`go test ./tests/e2e -run 'Test(M03|S03).*Accept' -count=1 -v`）。
 - [x] **E2：Rewind 快照恢复与越界拒绝** — session 创建候选快照后发生候选变化，rewind 恢复完整目标快照；对根外链接、跨卷 staging 和中间 phase 注入失败，正式工程不变且 journal 可恢复或明确 blocked（验证：`go test ./tests/e2e -run 'Test(M05|S03).*Rewind' -count=1 -v`）。
 
-## 阶段 5 待验
+## 未来单独决定平台支持时可参考的检查（非 S 系列任务）
 
-- [ ] **P1：Windows 真实文件系统行为** — 在 Windows 主机验证 reparse point、卷/文件身份、分阶段移动、崩溃恢复和访问边界；证据补回 C06/C07。
-- [ ] **P2：macOS 真实文件系统行为** — 在 macOS 主机验证目录句柄、符号链接、同卷移动、崩溃恢复和访问边界；证据补回 C06/C07。
+- Windows 真实文件系统行为：若未来立项，在 Windows 主机评估 reparse point、卷/文件身份、分阶段移动、崩溃恢复和访问边界。
+- macOS 真实文件系统行为：若未来立项，在 macOS 主机评估目录句柄、符号链接、同卷移动、崩溃恢复和访问边界。
+
+上述项目未执行、未标记通过，也不阻止 S 系列收尾。

@@ -10,7 +10,7 @@
 - [x] **AC4 / F3：卸载与数据保留** — 卸载删除 Stable 版本目录与受管入口，保留配置、凭证、运行数据库、目标数据和无关文件（验证：workflow lifecycle 日志 `LIFECYCLE uninstall and data preservation PASS`，覆盖 config、credentials、state.db、目标文件及外部 symlink 哨兵）。
 - [x] **AC5 / F4/F5：目标 CI 与 artifact** — `build-and-test`、`test-package` 都在 `ubuntu-26.04` 成功；artifact 含被验收的 tar.gz 和配套 SHA-256，下载后校验通过；workflow 不发布 GitHub Release（验证：Go run 37568537248 两 job 成功；artifact 下载校验通过；workflow 无 Release 步骤）。
 - [x] **AC6 / F6：使用文档** — README 和 Linux 安装说明写清 Ubuntu 26.04 x86_64 目标、依赖、安装/升级/回退/卸载与数据保留方式（验证：对照 README、Linux 安装文档与脚本命令；Actions 包验收通过）。
-- [x] **AC7 / N1/N5：支持边界与证据** — S00 能力矩阵记录本轮真实 Linux runner 结果；macOS、Windows、其他发行版和 ARM64 保持未验/未声明支持（验证：S00 §1、§9 记录 runner 日志与 run 链接，其他平台仍为待验）。
+- [x] **AC7 / N1/N5：支持边界与证据** — S00 能力矩阵记录本轮真实 Linux runner 结果；macOS、Windows、其他发行版和 ARM64 保持未验/未声明支持，且不属于 S00–S05 遗留任务（验证：S00 §1、§9 记录 runner 日志与 run 链接，其他平台明确标为无支持承诺）。
 
 ## 集成
 
