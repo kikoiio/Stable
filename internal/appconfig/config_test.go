@@ -75,6 +75,34 @@ func TestUserSkillsDirFallsBackToHome(t *testing.T) {
 	}
 }
 
+func TestUserMemoryDirUsesXDGConfigHome(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, "xdg")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("STABLE_CONFIG", filepath.Join(home, "elsewhere", "config.json"))
+	dir, err := UserMemoryDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(xdg, "stable", "memory"); dir != want {
+		t.Fatalf("UserMemoryDir with XDG_CONFIG_HOME = %q, want %q", dir, want)
+	}
+}
+
+func TestUserMemoryDirFallsBackToHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	dir, err := UserMemoryDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, ".config", "stable", "memory"); dir != want {
+		t.Fatalf("UserMemoryDir without XDG_CONFIG_HOME = %q, want %q", dir, want)
+	}
+}
+
 func TestUserHooksPathUsesXDGConfigHome(t *testing.T) {
 	home := t.TempDir()
 	xdg := filepath.Join(home, "xdg")
