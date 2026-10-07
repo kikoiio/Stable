@@ -569,6 +569,18 @@ func (d *PoolDelegator) worker() {
 func (d *PoolDelegator) runWork(work delegationWork) DelegationResult {
 	ctx := work.parentContext
 	budget := d.limits.narrowed(work.parent.Budget)
+	// Record and pass the child budget already narrowed to the caller's
+	// remaining deadline, so the runner cannot observe a larger allowance.
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 && remaining < budget.MaxDuration {
+			budget.MaxDuration = remaining
+		}
+	}
+	if !work.parent.Deadline.IsZero() {
+		if remaining := time.Until(work.parent.Deadline); remaining > 0 && remaining < budget.MaxDuration {
+			budget.MaxDuration = remaining
+		}
+	}
 	if work.childRunID == "" {
 		var err error
 		work.childRunID, err = d.newID()

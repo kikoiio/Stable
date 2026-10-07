@@ -62,10 +62,10 @@ func TestLifecycleServiceCreatesOwnedPrivateGitWorkspace(t *testing.T) {
 	}
 	planScope := scope
 	planScope.Authority.Mode = permission.ModePlan
-	if _, err := service.AcquireWriter(context.Background(), planScope, snapshot.ID, scope.Authority.RunID); !errors.Is(err, ErrOwnership) {
+	if _, err := service.AcquireWriter(context.Background(), planScope, snapshot.ID, "writer-run"); !errors.Is(err, ErrOwnership) {
 		t.Fatalf("plan authority acquired a writer: %v", err)
 	}
-	if _, err := service.AcquireWriter(context.Background(), scope, snapshot.ID, scope.Authority.RunID); err != nil {
+	if _, err := service.AcquireWriter(context.Background(), scope, snapshot.ID, "writer-run"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.StopWriter(context.Background(), scope, snapshot.ID); !errors.Is(err, ErrUnavailable) {

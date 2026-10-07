@@ -165,6 +165,22 @@ func (s *LifecycleService) reconcileUsage(ctx context.Context, records []Record)
 				continue
 			}
 		}
+		if record.Snapshot.State == StateInterrupted {
+			incomplete := false
+			for _, child := range []string{paths.Baseline, paths.Repository, paths.Checkout} {
+				if _, err := os.Lstat(child); errors.Is(err, os.ErrNotExist) {
+					incomplete = true
+					break
+				} else if err != nil {
+					s.markBlocked(record.Scope, record, fmt.Errorf("workspace startup child identity failed: %w", err))
+					incomplete = true
+					break
+				}
+			}
+			if incomplete {
+				continue
+			}
+		}
 		used, err := DiskUsage(ctx, paths.Root, s.limits)
 		if err == nil {
 			var manifest, baseline Manifest
