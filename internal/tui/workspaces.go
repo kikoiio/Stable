@@ -36,7 +36,7 @@ func registerWorkspaceCommands(host *commandHost, registry *commands.Registry) {
 				return
 			}
 			request.Op, request.RunID, request.Text = "worktree_create", m.ActiveRunID, label
-		case "get", "keep", "remove":
+		case "get", "enter", "keep", "export", "remove":
 			if len(fields) != 2 || !workspace.ValidID(fields[1]) {
 				m.Status = workspaceUsage()
 				return
@@ -45,11 +45,21 @@ func registerWorkspaceCommands(host *commandHost, registry *commands.Registry) {
 			switch fields[0] {
 			case "get":
 				request.Op = "worktree_get"
+			case "enter":
+				request.Op = "worktree_enter"
 			case "keep":
 				request.Op = "worktree_keep"
+			case "export":
+				request.Op = "worktree_export"
 			case "remove":
 				request.Op = "worktree_remove"
 			}
+		case "exit":
+			if len(fields) != 1 {
+				m.Status = workspaceUsage()
+				return
+			}
+			request.Op = "worktree_exit"
 		default:
 			m.Status = workspaceUsage()
 			return
@@ -63,7 +73,7 @@ func registerWorkspaceCommands(host *commandHost, registry *commands.Registry) {
 }
 
 func workspaceUsage() string {
-	return "用法：/worktrees list | create <标签> | get <ID> | keep <ID> | remove <ID>（remove 仅在内容与基线一致时成功）"
+	return "用法：/worktrees list | create <标签> | get <ID> | enter <ID> | exit | keep <ID> | export <ID> | remove <ID>（remove 仅在内容与基线一致时成功）"
 }
 
 func formatWorktreeMessages(messages []conversation.ServerMsg) string {
@@ -122,6 +132,8 @@ func applyWorktreeMessages(m *Model, op string, messages []conversation.ServerMs
 		m.Status = "隔离工作树已创建。"
 	case "worktree_remove":
 		m.Status = "干净工作树已删除。"
+	case "worktree_export":
+		m.Status = "工作树变更已导出为候选；请通过 review_get 检查并单独接受。"
 	default:
 		m.Status = "工作树状态已更新。"
 	}

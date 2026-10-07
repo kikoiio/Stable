@@ -85,7 +85,7 @@ func (l *Layout) Paths(id string) (Paths, error) {
 		return Paths{}, err
 	}
 	root := filepath.Join(l.projectRoot(), id)
-	return Paths{Root: root, Baseline: filepath.Join(root, "baseline"), Repository: filepath.Join(root, "repo.git"), Checkout: filepath.Join(root, "checkout"), Run: filepath.Join(root, "run"), Journal: filepath.Join(l.projectRoot(), ".journals", id+".json")}, nil
+	return Paths{Root: root, FormalRoot: l.formalRoot, Baseline: filepath.Join(root, "baseline"), Repository: filepath.Join(root, "repo.git"), Checkout: filepath.Join(root, "checkout"), Run: filepath.Join(root, "run"), Journal: filepath.Join(l.projectRoot(), ".journals", id+".json")}, nil
 }
 
 func (l *Layout) projectRoot() string { return filepath.Join(l.stateRoot, l.projectID) }

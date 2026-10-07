@@ -128,7 +128,7 @@ type Snapshot struct {
 // Paths are derived internally from random workspace IDs. They are never
 // serialized into a public snapshot or supplied as a protocol argument.
 type Paths struct {
-	Root, Baseline, Repository, Checkout, Run, Journal string
+	Root, FormalRoot, Baseline, Repository, Checkout, Run, Journal string
 }
 
 type WriterLease struct {

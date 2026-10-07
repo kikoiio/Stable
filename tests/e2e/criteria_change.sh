@@ -28,7 +28,7 @@ source "$project_root/tests/e2e/mock_model_env.sh"
 source "$project_root/tests/e2e/candidate_accept.sh"
 # chatserve binds the repo as its trusted project root; session traffic must
 # address the same root (see trustedSessionRoot).
-E2E_SESSION_ROOT="$project_root"
+export E2E_SESSION_ROOT="$project_root"
 
 # Build the same dev-install layout the runtime supervisor expects: it derives
 # libexec/share from its own executable location, so stable must live in

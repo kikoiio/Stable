@@ -191,7 +191,7 @@ type SkillReport struct {
 
 func validOp(op string) bool {
 	switch op {
-	case "agent_list", "agent_reload", "agent_task_start", "agent_task_list", "agent_task_get", "agent_task_cancel", "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list", "hooks_list", "hooks_reload", "mcp_list", "mcp_reload", "team_create", "team_list", "team_get", "team_close", "team_coordinator", "team_member_spawn", "team_member_resume", "team_member_stop", "team_send", "team_messages", "team_request_list", "team_request_respond", "team_shutdown_request", "team_task_create", "team_task_get", "team_task_list", "team_task_update", "worktree_create", "worktree_list", "worktree_get", "worktree_keep", "worktree_remove":
+	case "agent_list", "agent_reload", "agent_task_start", "agent_task_list", "agent_task_get", "agent_task_cancel", "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list", "hooks_list", "hooks_reload", "mcp_list", "mcp_reload", "team_create", "team_list", "team_get", "team_close", "team_coordinator", "team_member_spawn", "team_member_resume", "team_member_stop", "team_send", "team_messages", "team_request_list", "team_request_respond", "team_shutdown_request", "team_task_create", "team_task_get", "team_task_list", "team_task_update", "worktree_create", "worktree_list", "worktree_get", "worktree_enter", "worktree_exit", "worktree_keep", "worktree_export", "worktree_remove":
 		return true
 	}
 	return false
@@ -296,7 +296,7 @@ func validateClient(m ClientMsg) error {
 		if sessionlog.ValidateID(m.SessionID) != nil || m.Run != nil || m.RunID != "" || m.ProjectRoot != "" {
 			return fmt.Errorf("team_coordinator requires only a valid session scope")
 		}
-	case "worktree_create", "worktree_list", "worktree_get", "worktree_keep", "worktree_remove":
+	case "worktree_create", "worktree_list", "worktree_get", "worktree_enter", "worktree_exit", "worktree_keep", "worktree_export", "worktree_remove":
 		if sessionlog.ValidateID(m.SessionID) != nil || m.Run != nil || m.ProjectRoot != "" || m.RunID != "" && sessionlog.ValidateID(m.RunID) != nil {
 			return fmt.Errorf("op %s requires a valid session scope and server-owned project root", m.Op)
 		}
@@ -310,7 +310,7 @@ func validateClient(m ClientMsg) error {
 			if m.RunID == "" || strings.TrimSpace(m.Text) == "" || m.ID != "" {
 				return fmt.Errorf("worktree_create requires active run_id and label in text")
 			}
-		} else if m.Op == "worktree_list" {
+		} else if m.Op == "worktree_list" || m.Op == "worktree_exit" {
 			if m.ID != "" || m.Text != "" || m.Limit < 0 || m.Limit > 100 {
 				return fmt.Errorf("invalid worktree_list request")
 			}

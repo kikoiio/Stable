@@ -289,7 +289,7 @@ func (s *Service) readLoop(ctx context.Context, conn net.Conn, updates chan Serv
 			}
 			updates <- ServerMsg{Type: "done"}
 			continue
-		case "worktree_create", "worktree_list", "worktree_get", "worktree_keep", "worktree_remove":
+		case "worktree_create", "worktree_list", "worktree_get", "worktree_enter", "worktree_exit", "worktree_keep", "worktree_export", "worktree_remove":
 			msg, err := s.handleWorkspaceRequest(ctx, c)
 			if err != nil {
 				updates <- ServerMsg{Type: "error", Error: err.Error()}

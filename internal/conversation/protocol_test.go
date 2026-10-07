@@ -32,3 +32,25 @@ func TestCoordinatorModeProtocolIsSessionScopedAndOneShot(t *testing.T) {
 		}
 	}
 }
+
+func TestWorktreeEnterExitExportProtocolShapes(t *testing.T) {
+	session := "0123456789abcdef0123456789abcdef"
+	for _, valid := range []ClientMsg{
+		{Op: "worktree_enter", SessionID: session, ID: "workspace-1"},
+		{Op: "worktree_exit", SessionID: session},
+		{Op: "worktree_export", SessionID: session, ID: "workspace-1"},
+	} {
+		if err := validateClient(valid); err != nil {
+			t.Fatalf("valid worktree request rejected: %+v: %v", valid, err)
+		}
+	}
+	for _, invalid := range []ClientMsg{
+		{Op: "worktree_enter", SessionID: session},
+		{Op: "worktree_exit", SessionID: session, ID: "workspace-1"},
+		{Op: "worktree_export", SessionID: session, ID: "../candidate"},
+	} {
+		if err := validateClient(invalid); err == nil {
+			t.Fatalf("invalid worktree request accepted: %+v", invalid)
+		}
+	}
+}

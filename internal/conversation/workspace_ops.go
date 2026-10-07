@@ -14,6 +14,37 @@ import (
 	"stable/internal/workspace"
 )
 
+// CanSwitchWorkspace keeps persisted workspace bindings stable while any run
+// from the owning session may still be using its authority. Switching a
+// binding never changes process cwd or rewrites an already-created authority.
+func (s *Service) CanSwitchWorkspace(ctx context.Context, scope workspace.Scope) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	for runID, sessionID := range s.activeRuns {
+		if sessionID == scope.SessionID {
+			s.mu.Unlock()
+			return workspace.ErrUnavailable
+		}
+		if request, ok := s.activeRequests[runID]; ok && request.Work == scope.Work {
+			s.mu.Unlock()
+			return workspace.ErrUnavailable
+		}
+	}
+	s.mu.Unlock()
+	if tasks := s.deps.AgentTasks; tasks != nil {
+		tasks.mu.Lock()
+		defer tasks.mu.Unlock()
+		for _, task := range tasks.active {
+			if task.work.SessionID == scope.SessionID {
+				return workspace.ErrUnavailable
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Service) workspaceService(formalRoot string) (*workspace.LifecycleService, error) {
 	if s.deps.WorkspaceStateRoot == "" {
 		return nil, workspace.ErrUnavailable
@@ -37,7 +68,7 @@ func (s *Service) workspaceService(formalRoot string) (*workspace.LifecycleServi
 	if err != nil {
 		return nil, err
 	}
-	manager, err := workspace.NewService(layout, workspace.DefaultLimits(), workspace.ServiceDependencies{})
+	manager, err := workspace.NewService(layout, workspace.DefaultLimits(), workspace.ServiceDependencies{IdleGuard: s, Exporter: workspaceCandidateExporter{service: s}})
 	if err != nil {
 		return nil, err
 	}
@@ -104,6 +135,12 @@ func (s *Service) handleWorkspaceRequest(ctx context.Context, msg ClientMsg) (Se
 		return ServerMsg{Type: "worktree_list", Worktrees: snapshots, Cursor: msg.AfterSeq + uint64(len(snapshots))}, nil
 	case "worktree_get":
 		snapshot, err = manager.Get(ctx, scope, msg.ID)
+	case "worktree_enter":
+		snapshot, err = manager.Enter(ctx, scope, msg.ID)
+	case "worktree_exit":
+		snapshot, err = manager.Exit(ctx, scope)
+	case "worktree_export":
+		snapshot, err = manager.Export(ctx, scope, msg.ID)
 	case "worktree_keep":
 		snapshot, err = manager.Keep(ctx, scope, msg.ID)
 	case "worktree_remove":
