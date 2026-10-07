@@ -72,6 +72,22 @@ class Handler(BaseHTTPRequestHandler):
         messages = request.get('messages') or []
         if not messages:
             return None
+        for message in messages:
+            content = message.get('content')
+            if message.get('role') != 'user' or not isinstance(content, str):
+                continue
+            prefix = 'Work on this Stable goal item. Summarize useful next work from the current facts; do not claim execution or verification.\n'
+            if not content.startswith(prefix):
+                continue
+            try:
+                context = json.loads(content[len(prefix):])
+            except (TypeError, ValueError):
+                break
+            observation = context.get('observation') or {}
+            design = observation.get('design') or {}
+            if design.get('sensor.connection_present') is True:
+                return None
+            break
         edit_call = dict(id='mock-edit-1', name='edit_file', arguments=json.dumps({
             'file_path': 'sensor.kicad_sch',
             'old_string': '\\t(wire (pts (xy 114.3 105.41) (xy 114.3 102.87))\\n        (stroke (width 0) (type solid)) (uuid "ddd57af5-2125-566a-bcf5-c11ca6ff8a52"))',
