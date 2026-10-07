@@ -308,6 +308,33 @@ func rootRemoveFile(root, rel string) error {
 	return unix.Fsync(parentFD)
 }
 
+func rootReadDir(root, rel string) ([]os.DirEntry, error) {
+	parts, err := validateDarwinRelative(rel)
+	if err != nil {
+		return nil, err
+	}
+	fd, err := openDarwinRootDir(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, part := range parts {
+		next, openErr := unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if openErr != nil {
+			_ = unix.Close(fd)
+			return nil, mapDarwinPathError(openErr)
+		}
+		_ = unix.Close(fd)
+		fd = next
+	}
+	file := os.NewFile(uintptr(fd), rel)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("secfile: unable to wrap directory handle")
+	}
+	defer file.Close()
+	return file.ReadDir(-1)
+}
+
 func openDarwinRootDir(root string) (int, error) {
 	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {

@@ -33,4 +33,6 @@ func rootWriteFileAtomic(string, string, []byte, os.FileMode) error { return Err
 
 func rootRemoveFile(string, string) error { return ErrUnsupported }
 
+func rootReadDir(string, string) ([]os.DirEntry, error) { return nil, ErrUnsupported }
+
 func transactionMode() string { return "unsupported" }

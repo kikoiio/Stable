@@ -115,6 +115,26 @@ func (r Root) Stat(rel string) (os.FileInfo, error) {
 	return f.Stat()
 }
 
+// ReadDir reads one directory relative to the validated root without
+// traversing symlinks. Returned entries are names only; callers must use Root
+// methods to open entries they intend to read.
+func (r Root) ReadDir(rel string) ([]os.DirEntry, error) {
+	if r.path == "" || rel == "" {
+		return nil, ErrUnsafePath
+	}
+	if err := r.Revalidate(); err != nil {
+		return nil, err
+	}
+	entries, err := rootReadDir(r.path, rel)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.Revalidate(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
 // Revalidate confirms that the root still refers to the same directory.
 func (r Root) Revalidate() error {
 	if r.path == "" || r.identity.empty() {

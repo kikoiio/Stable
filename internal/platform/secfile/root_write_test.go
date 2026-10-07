@@ -24,6 +24,10 @@ func TestRootMkdirAllWriteFileAtomicAndRemove(t *testing.T) {
 	if err := root.WriteFileAtomic("stable/memory/a.md", []byte("second"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	entries, err := root.ReadDir("stable/memory")
+	if err != nil || len(entries) != 1 || entries[0].Name() != "a.md" {
+		t.Fatalf("ReadDir entries = %v, %v", entries, err)
+	}
 	got, err := os.ReadFile(filepath.Join(rootPath, "stable", "memory", "a.md"))
 	if err != nil || string(got) != "second" {
 		t.Fatalf("read replaced file = %q, %v", got, err)

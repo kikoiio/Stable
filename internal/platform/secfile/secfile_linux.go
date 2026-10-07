@@ -230,6 +230,27 @@ func rootRemoveFile(root, rel string) error {
 	return unix.Fsync(parentFD)
 }
 
+func rootReadDir(root, rel string) ([]os.DirEntry, error) {
+	if err := validateLinuxRelative(rel); err != nil {
+		return nil, err
+	}
+	rootFD, err := openLinuxRootDir(root)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(rootFD)
+	fd, err := unix.Openat2(rootFD, rel, &unix.OpenHow{
+		Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS,
+	})
+	if err != nil {
+		return nil, mapLinuxPathError(err)
+	}
+	file := os.NewFile(uintptr(fd), rel)
+	defer file.Close()
+	return file.ReadDir(-1)
+}
+
 func openLinuxRootDir(root string) (int, error) {
 	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {

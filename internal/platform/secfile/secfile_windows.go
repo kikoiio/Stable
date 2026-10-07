@@ -462,6 +462,42 @@ func rootRemoveFile(root, rel string) error {
 	return windowsSetDelete(target)
 }
 
+func rootReadDir(root, rel string) ([]os.DirEntry, error) {
+	parts, err := validateWindowsRelative(rel)
+	if err != nil {
+		return nil, err
+	}
+	current, info, err := openWindowsRootWrite(root)
+	if err != nil {
+		return nil, err
+	}
+	if info.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		_ = windows.CloseHandle(current)
+		return nil, ErrUnsafePath
+	}
+	for _, part := range parts {
+		next, nextInfo, openErr := createWindowsRelative(current, part, true, windows.FILE_OPEN)
+		if openErr != nil {
+			_ = windows.CloseHandle(current)
+			return nil, mapWindowsPathError(openErr)
+		}
+		if nextInfo.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || nextInfo.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+			_ = windows.CloseHandle(next)
+			_ = windows.CloseHandle(current)
+			return nil, ErrUnsafePath
+		}
+		_ = windows.CloseHandle(current)
+		current = next
+	}
+	file := os.NewFile(uintptr(current), rel)
+	if file == nil {
+		_ = windows.CloseHandle(current)
+		return nil, errors.New("secfile: unable to wrap directory handle")
+	}
+	defer file.Close()
+	return file.ReadDir(-1)
+}
+
 func openWindowsParent(root, rel string) (windows.Handle, string, error) {
 	parts, err := validateWindowsRelative(rel)
 	if err != nil {
