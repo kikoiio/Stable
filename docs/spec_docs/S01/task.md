@@ -1,6 +1,6 @@
 # S01 平台边界抽取(阶段 1)Tasks
 
-> 状态:已批准(2026-10-06)。依据已批准的 spec.md 与 plan.md(docs/spec_docs/S01/)。
+> 状态:已完成（2026-10-07 系列收尾确认）。依据已批准的 spec.md 与 plan.md(docs/spec_docs/S01/)。
 
 ## 文件清单
 

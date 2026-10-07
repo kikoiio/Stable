@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-e2e-deps
@@ -32,10 +32,10 @@ jobs:
       - name: Run unit tests
         run: go test ./...
 
-  # 安装后验收（install / cli / e2e / restart）。四个脚本占用固定端口
+  # 安装后验收（install / lifecycle / cli / e2e / restart）。固定端口场景
   # 17387-17389，必须串行，放在同一 job 内由 make 顺序执行。
   test-package:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -46,3 +46,18 @@ jobs:
           cache-dependency-path: go.sum
       - name: Build release package and run package acceptance
         run: make test-package
+      - name: Resolve verified package paths
+        id: package-files
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          echo "archive=dist/stable-${version}-linux-amd64.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum=dist/stable-${version}-linux-amd64.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+      - name: Upload verified Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-linux-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.package-files.outputs.archive }}
+            ${{ steps.package-files.outputs.checksum }}
+          if-no-files-found: error
+          compression-level: 0

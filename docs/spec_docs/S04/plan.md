@@ -1,6 +1,6 @@
 # S04 Linux 沙箱、网络与 KiCad 工作流 Plan
 
-> 基于已批准的 [spec.md](spec.md)。本计划只交付 Linux x86_64；非 Linux 保留可编译 stub 和明确 unsupported 结果。
+> 状态：已完成（2026-10-07 系列收尾确认）。基于已批准的 [spec.md](spec.md)。本计划只交付 Linux x86_64；非 Linux 保留可编译 stub 和明确 unsupported 结果。
 
 ## 架构概览
 

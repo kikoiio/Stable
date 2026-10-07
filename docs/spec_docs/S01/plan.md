@@ -1,6 +1,6 @@
 # S01 平台边界抽取(阶段 1)Plan
 
-> 状态:已批准(2026-10-06)。依据已批准的 spec.md(docs/spec_docs/S01/spec.md)与 S00 能力表(docs/spec_docs/S00/platform-capability-matrix.md)。
+> 状态:已完成（2026-10-07 系列收尾确认）。依据已批准的 spec.md(docs/spec_docs/S01/spec.md)与 S00 能力表(docs/spec_docs/S00/platform-capability-matrix.md)。
 
 ## 架构概览
 
@@ -180,7 +180,7 @@ scripts/check-platform.sh + Makefile 目标 platform-check — grep 门禁 + GOO
 | sandbox 包去留 | 整体迁 internal/platform/sandbox | 已批准 spec F1;既有中立接口是资产,迁移后六域结构统一 |
 | stub 粒度 | 每域 !linux stub 文件,运行即报 unsupported | 非 Linux 不可用是 S00 既定状态;编译通过即可满足阶段 1 完成标志 |
 | lock 接口形态 | TryAcquire + 调用方保留重试循环 | 重试/幂等语义是 supervisor 业务编排,抽走会改变行为;只抽 flock 原语 |
-| chmod 时序 | 保持 listen 后 chmod 原样 | S00 D12 记录的 umask 窗口是已知现状,修复属行为变更,不做(留阶段 2) |
+| chmod 时序 | 保持 listen 后 chmod 原样 | S00 D12 记录的 umask 窗口是已知现状；修复属于行为变更，不在 S01/S00–S05 范围内 |
 | waitPort/waitReady 归属 | 留 runtime | 纯 net+文件逻辑,非平台依赖 |
 | exeSuffix 实现 | paths_linux/other.go 提供 const | 编译期确定,无运行时分支 |
 | Up() 的 bin/stable 拼接 | 改用 p.Bin | 行为等价的最小修正,进清单记录 |

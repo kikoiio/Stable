@@ -20,3 +20,5 @@ __pycache__/
 !/docs/spec_docs/S02/**
 !/docs/spec_docs/S03/
 !/docs/spec_docs/S03/**
+!/docs/spec_docs/S05/
+!/docs/spec_docs/S05/**

@@ -6,9 +6,11 @@
 
 ## 1. 支持范围声明
 
-**当前受支持的平台:Linux(x86_64,CLI/TUI)。** 本表对 Linux 列给出的是经代码审计与可运行验证确认的当前真实行为,作为后续所有阶段的回归基线。
+**当前受支持的平台:Linux(x86_64,CLI/TUI)。** 本表对 Linux 列给出的是经代码审计与可运行验证确认的当前真实行为。S00–S05 解耦系列已结束；矩阵中的非 Linux 状态用于说明实现与证据边界，不代表后续必须实现或支持这些平台。
 
-**macOS 与 Windows:未评估(计划评估)。** 本表不为其承诺支持状态、版本、架构与时限;平台优先顺序在阶段 2 开始前再行决定。两平台的等价机制线索仅为后续评估起点,均未经验证,不构成承诺。
+**S05 Linux 发布包基线**:版本化 tar.gz 仅在 Ubuntu 26.04 x86_64 runner 上构建和包级验收。本轮证据不声明其他 Linux 发行版/架构的发布包支持；macOS/Windows 仍未做真实环境验收，但这不构成本系列待办或支持承诺。
+
+**macOS 与 Windows:未评估(无支持承诺)。** 本系列不要求其后端实现、实机验收或支持声明。矩阵中的等价机制线索只解释平台差异，不构成排期或产品承诺。
 
 **「支持」的判定依据**:某平台对某能力行声明「支持」,必须满足该行验收条件的全部条目;声明「降级」必须满足标注〔降级〕的条目子集,且不得静默降低安全语义。平台整体声明「支持」还必须通过第 4 节发布门槛清单。KiCad 规则:无头 ERC 检查是任何平台声明「支持」的前提;交互式 GUI 会话允许以「降级」状态存在。
 
@@ -23,9 +25,9 @@
 | C05 私密文件与安全存储 | 支持 | 待真实环境验证 | 待真实环境验证 |
 | C06 安全根目录访问 | 支持 | 契约已实现(待真实环境验证) | 契约已实现(待真实环境验证) |
 | C07 候选目录事务(原子验收) | 支持 | journaled-move 契约已实现(待真实环境验证) | journaled-move 契约已实现(待真实环境验证) |
-| C08 网络隔离(沙箱执行与网络授权) | 支持 | 未评估(计划评估) | 未评估(计划评估) |
-| C09 无头 KiCad 检查 | 支持 | 未评估(计划评估) | 未评估(计划评估) |
-| C10 交互式 GUI 会话 | 支持(可降级) | 未评估(计划评估) | 未评估(计划评估) |
+| C08 网络隔离(沙箱执行与网络授权) | 支持 | 未评估(无支持承诺) | 未评估(无支持承诺) |
+| C09 无头 KiCad 检查 | 支持 | 未评估(无支持承诺) | 未评估(无支持承诺) |
+| C10 交互式 GUI 会话 | 支持(可降级) | 未评估(无支持承诺) | 未评估(无支持承诺) |
 
 「支持」指当前真实行为已实现且有证据;各行的已知缺口、现状缺失与接线问题如实记录于对应小节与第 6 节,不因「支持」状态而隐去。
 
@@ -33,7 +35,7 @@
 
 每行小节统一字段:范围界定 / Linux 状态与证据 / macOS、Windows 状态 / 等价机制线索 / 安全不变量 / 能力不可用行为 / 验收条件 / 边界与矩阵外备注。
 
-状态取值:`支持 / 降级 / 不支持 / 未评估(计划评估)`;Linux 列不使用「未评估」。
+状态取值:`支持 / 降级 / 不支持 / 未评估(无支持承诺)`;Linux 列不使用「未评估」。
 证据类型:`可运行验证`(附命令,2026-10-06 本机已执行)/ `仅代码审阅`(附原因)。
 验收条件编号:`AC-<域>-<序号>`;域缩写:C01=PATH、C02=IPC、C03=LOCK、C04=PROC、C05=SECRET、C06=ROOT、C07=CAND、C08=NET、C09=KCAD、C10=GUI。编号一经使用不重命名。声明「支持」须满足该行全部条目;声明「降级」须满足标注〔降级〕的子集。
 
@@ -52,7 +54,7 @@
 
 **证据类型与已执行验证**:可运行验证——`go test ./internal/appconfig/...`(ok,覆盖 XDG 默认/回退/STABLE_* 覆盖/TestUserSkillsDir* 三条链)、`go test ./internal/runtime/...`(ok)。仅代码审阅——`runtime.Resolve` 布局推导本身无 paths_test.go,可运行性由 doctor/install 间接覆盖;`make install-dev` 布局验收为手工条目(会覆盖本机安装,不自动执行)。
 
-**macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
+**macOS 状态**:未评估(无支持承诺)。**Windows 状态**:未评估(无支持承诺)。
 
 **等价机制线索**(未经验证,不构成承诺):macOS——惯例基线为 `~/Library/Application Support`、`~/Library/Caches`、`~/Library/Logs`,.app bundle 下布局为 Contents/MacOS、Contents/Resources,布局推导需换锚点;Unix 技术手段(os.Executable/EvalSymlinks)可用。Windows——应改用 os.UserConfigDir(%AppData%)/os.UserCacheDir(%LocalAppData%),点目录非标准;bin/libexec/share 无惯例,需安装器自定义。
 
@@ -90,7 +92,7 @@
 
 **证据类型与已执行验证**:可运行验证——`go test ./internal/conversation/ -run 'TestSessionProtocolClientLifecycle|TestConcurrentSessionRunsKeepSessionAndRunOwnership' -count=1`(ok,真实 UDS 全链路)、`go test ./internal/sandbox/ -count=1`(ok,含 TestNetworkProxyHTTPConnectAndSOCKS5,未授权目标 403)。仅代码审阅/手工——socket 权限位 ls -l 目检与跨用户 connect 抽验需运行时环境(涉及加载用户配置,不自动执行)。
 
-**macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
+**macOS 状态**:未评估(无支持承诺)。**Windows 状态**:未评估(无支持承诺)。
 
 **等价机制线索**(未经验证,不构成承诺):Windows——命名管道 + 当前用户 SID ACL(路线图已点名;Win10+ 有 AF_UNIX 但权限模型不同);macOS——UDS + 0600/0700 语义与 POSIX 相近,可考虑 launchd socket activation;macOS sun_path 为 104 字节,session.go 短路径假设需复核。
 
@@ -125,7 +127,7 @@
 
 **证据类型与已执行验证**:仅代码审阅——Supervise 依赖完整运行环境(libexec/temporal、agentworker),单元测试无法轻量承载,锁逻辑无独立抽象可注入;手工验证序列(两次 up 幂等、kill -9 后 up、down 后 up、ls -l 锁文件)需运行时且涉及加载用户配置,不自动执行。
 
-**macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
+**macOS 状态**:未评估(无支持承诺)。**Windows 状态**:未评估(无支持承诺)。
 
 **等价机制线索**(未经验证,不构成承诺):Windows——命名 mutex(CreateMutex,进程死亡自动 abandoned)或 LockFileEx;macOS——Darwin 亦有 flock/LOCK_EX,语义相近可沿用,未验证。
 
@@ -160,7 +162,7 @@
 
 **证据类型与已执行验证**:可运行验证——`go test ./internal/sandbox/ -count=1`(ok,bwrap 实跑,含 TestRunProcessGroupStopsDescendantsOnContextCancellation 组级终止)、`go test ./internal/runtime/...`(ok);`go test ./internal/runtime -run '^TestStopSessionProcessesIgnoresUnrelatedPID$' -count=1`(2026-10-07 PASS,伪造 SQLite runtime_handle 指向无关 sleep 进程后未发送信号)、`python3 -m unittest workers/computer/test_candidate.py`(2026-10-07 PASS,7 项，含进程身份不匹配及非自有锁保护);M03 computer session e2e(2026-10-06 PASS)覆盖真实会话清理、stale 与 formal digest 不变。原“误杀防护无自动测试”缺口已关闭。
 
-**macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
+**macOS 状态**:未评估(无支持承诺)。**Windows 状态**:未评估(无支持承诺)。
 
 **等价机制线索**(未经验证,不构成承诺):macOS——无 /proc,判活用 kill(pid,0) 或 libproc;killpg 可用但无 Pdeathsig,父死联动需 kqueue(EV_PROCID)或看门狗;僵尸判定改 waitpid/WNOHANG。Windows——Job Object(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE+TerminateJobObject)同时覆盖 Pdeathsig 缺位;健康检查用 OpenProcess+GetExitCodeProcess;cmdline 前缀校验改 QueryFullProcessImageName。
 
@@ -197,7 +199,7 @@
 
 **证据类型与已执行验证**:可运行验证——`go test ./internal/appconfig/ -count=1`(ok,覆盖 0600 通过/0644 拒绝/Summary 脱敏)、`go test ./internal/redact/`(ok)、`go test ./internal/conversation/`(IPC 子集 ok;redact 相关断言含于包测试)。仅代码审阅/手工——`stable config init` 权限目检(隔离 XDG_CONFIG_HOME 下执行)涉及配置命令,按用户级安全边界留待人工。
 
-**macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
+**macOS 状态**:未评估(无支持承诺)。**Windows 状态**:未评估(无支持承诺)。
 
 **等价机制线索**(未经验证,不构成承诺):macOS——POSIX 权限位与 Stat_t 归属语义与 Linux 相同,owner_unix.go 预期可复用;可选迁 Keychain。Windows——用户 profile 继承 ACL 默认排除其他本机用户;凭证可迁 Credential Manager/DPAPI;归属判定需 SID/ACL 检查替代 Stat_t.Uid(现文件在 Windows 无法编译,天然阻止静默弱化)。
 
@@ -224,7 +226,7 @@
 
 **Linux 状态:支持**——根内读取统一经 CleanRelative 词法拒绝 + openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS)+O_NOFOLLOW+fstat 常规文件校验,关键节点(冻结/评审/验收/ERC 前后)有摘要复核,openat2 不可用时错误上抛无静默回退(前提:Linux 内核 ≥ 5.6)。已澄清:openat2 仅存在于 workspace.go secureOpen;ERC 报告读取用末组件 O_NOFOLLOW+fstat+8MB 上限(报告路径服务自建);设备号检查仅承担同文件系统前置判断,防替换由逐次 openat2+摘要复核承担。
 
-**S03 更新(2026-10-06)**：`internal/platform/secfile` 已提供跨平台 `Root`、根身份重新验证、同卷检查和普通文件读取契约。Linux 继续使用 openat2；Darwin 使用逐组件 openat/O_NOFOLLOW；Windows 使用句柄级 reparse point 与卷/文件身份检查。review、snapshot、ERC 报告读取均已接入该边界；Darwin/Windows 真实主机行为留阶段 5 验证。
+**S03 更新(2026-10-06)**：`internal/platform/secfile` 已提供跨平台 `Root`、根身份重新验证、同卷检查和普通文件读取契约。Linux 继续使用 openat2；Darwin 使用逐组件 openat/O_NOFOLLOW；Windows 使用句柄级 reparse point 与卷/文件身份检查。review、snapshot、ERC 报告读取均已接入该边界；Darwin/Windows 真实主机行为未由本系列验证；本系列不承诺其支持。
 
 **证据**:
 - `internal/candidate/workspace.go` `secureOpen`(213–238)— 根 fd(O_PATH|O_DIRECTORY)后 unix.Openat2(OpenHow{O_RDONLY|O_CLOEXEC|O_NOFOLLOW, RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS}),fstat 要求常规文件;RESOLVE_BENEATH 拒绝绝对路径与向上穿越,RESOLVE_NO_SYMLINKS 拒绝任何一级符号链接(含父目录替换与 /proc 魔法链接),O_NOFOLLOW 纵深防御;未用 RESOLVE_NO_XDEV(根内挂载点可跨设备,已知边界)。
@@ -238,7 +240,7 @@
 
 **证据类型与已执行验证**:可运行验证——`go test ./internal/candidate/... -count=1`(ok,含 TestManifestPath 词法穿越、TestManifestRejectsSymlink 根内符号链接、TestMaterializeRejectsTraversalEntry 快照穿越、TestGuardRewindTargetRejectsFormalRoot、TestAcceptRejectsStalePreview、TestCandidateReviewRejectsWritesDuringChecker)。仅代码审阅——openat2 内核层语义无直接命中用例(现有测试在 WalkDir 层即拒绝符号链接;建议补 openat2 层逃逸用例,对应 AC-ROOT-3)。
 
-**macOS 状态**:契约已实现，目标编译与 Linux 契约测试通过；真实文件系统行为留阶段 5。**Windows 状态**:契约已实现，目标编译与 Linux 契约测试通过；真实文件系统行为留阶段 5。
+**macOS 状态**:契约已实现，目标编译与 Linux 契约测试通过；真实文件系统行为未由本系列验证；不构成支持承诺。**Windows 状态**:契约已实现，目标编译与 Linux 契约测试通过；真实文件系统行为未由本系列验证；不构成支持承诺。
 
 **等价机制线索**(未经验证,不构成承诺):macOS——无 openat2;逐组件 openat+O_NOFOLLOW+每级 fstat(dev/ino) 复核的 safe-open 循环;根身份用 st_dev/st_ino 比对。Windows——CreateFileW+FILE_FLAG_OPEN_REPARSE_POINT 拒绝 reparse point;GetFileInformationByHandle 比对卷序列号+File ID;路径规范化后前缀包含校验。旧内核(<5.6)——openat 逐目录下探+每级 fstat+O_NOFOLLOW 模拟。
 
@@ -264,7 +266,7 @@
 
 **Linux 状态:支持**——验收交换主线(原子 RENAME_EXCHANGE + 交换前持久化 journal + 基于 manifest digest 的崩溃分类恢复 + 冲突即 blocked)在代码与测试中完整闭环,无任何普通覆盖/复制降级路径。S03 将 rewind 同步流程接入同一事务 coordinator，并把 `.stable` 服务目录恢复纳入 acceptance 完成与恢复路径。
 
-**S03 更新(2026-10-06)**：事务 coordinator 已统一 acceptance/rewind 调用链。Linux 使用 `atomic-exchange`；Darwin/Windows 明确使用带 rollback 路径和 `old_saved`/`target_installed` phase 的 `journaled-move`，能力不足、跨卷或摘要不一致时 fail-closed。journal schema 已迁移到 v12；真实 Darwin/Windows 崩溃恢复仍留阶段 5。
+**S03 更新(2026-10-06)**：事务 coordinator 已统一 acceptance/rewind 调用链。Linux 使用 `atomic-exchange`；Darwin/Windows 明确使用带 rollback 路径和 `old_saved`/`target_installed` phase 的 `journaled-move`，能力不足、跨卷或摘要不一致时 fail-closed。journal schema 已迁移到 v12；真实 Darwin/Windows 崩溃恢复未由本系列验证；不构成支持承诺。
 
 **证据**:
 - `internal/candidate/accept.go` — ExchangeProjectDir 对两根 Lstat(拒绝非目录/符号链接)+unix.Stat 同设备号检查后,以 unix.Renameat2(AT_FDCWD,…,RENAME_EXCHANGE) 单次原子交换;AcceptCandidate 流程:journal 幂等检查 → validateAcceptance(状态 reviewed/frozen、决策身份与 digest 匹配、review digest 重算、normal/force 门禁)→ journal 落盘 → 交换前二次 manifest 复核(防 TOCTOU)→ 交换 → `.stable` 回移 → prepared→swapped → FinalizeAcceptance(receipt+状态机一个 SQLite 事务)。
@@ -278,7 +280,7 @@
 
 **证据类型与已执行验证**:可运行验证——`go test ./internal/candidate/... -count=1`(ok)、`go test ./internal/store/ -run 'TestReconcile' -count=1`(10/10 PASS,含交换前/交换后/冲突三类崩溃结局与 rewind 四用例)。仅代码审阅/未执行——tests/e2e 的 m03 验收与重启恢复 e2e(重,含真实沙箱与 SQLite 重开)未在本阶段执行。
 
-**macOS 状态**:journaled-move 契约已实现，目标编译与 Linux 状态机测试通过；真实主机崩溃恢复留阶段 5。**Windows 状态**:journaled-move 契约已实现，目标编译与 Linux 状态机测试通过；真实主机崩溃恢复留阶段 5。
+**macOS 状态**:journaled-move 契约已实现，目标编译与 Linux 状态机测试通过；真实主机崩溃恢复未由本系列验证；不构成支持承诺。**Windows 状态**:journaled-move 契约已实现，目标编译与 Linux 状态机测试通过；真实主机崩溃恢复未由本系列验证；不构成支持承诺。
 
 **等价机制线索**(未经验证,不构成承诺):macOS——无 renameat2(RENAME_EXCHANGE) 等价 syscall,方向为「journal + 两次 rename(formal→备份、staging→formal)+ 重启按 journal 收尾」的分阶段提交;Windows 10+ NT 内核支持 POSIX 语义重命名(FILE_RENAME_FLAG_POSIX_SEMANTICS)可替换目录但无 exchange 语义,大概率同需分阶段提交;两平台均须保留「磁盘 digest 对照 journal 分类结局」恢复模型;均须通过 AC-CAND-7 故障注入后才能声明等价。
 
@@ -319,7 +321,7 @@
 
 **证据类型与已执行验证**:可运行验证——`go test ./internal/sandbox/ -count=1`(ok,bwrap 实跑,含 namespace/profile、网络 pinning、代理重验、session grant 拒绝与清理断言);`go test ./internal/execution/ -run 'Test.*(Command|Helper|Network|Isolation|PythonBridge|Session)' -count=1`(ok);`bash tests/e2e/m03_sandbox_network.sh` 与 `bash tests/e2e/m03_sandbox_secrets.sh`(均 PASS,默认断网/获批目标/未授权目标/DNS 变化及敏感标记扫描)。跨平台编译探针(2026-10-06 实测)——`CGO_ENABLED=0 GOOS=darwin go build ./...`、`CGO_ENABLED=0 GOOS=windows go build ./...`通过;运行时能力仍由非 Linux stub 明确返回 unsupported,本阶段不声明 macOS/Windows 支持。仅代码审阅/未执行——细粒度挂载白名单无独立测试,行为由 profile 契约测试与代码推断。
 
-**macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
+**macOS 状态**:未评估(无支持承诺)。**Windows 状态**:未评估(无支持承诺)。
 
 **等价机制线索**(未经验证,不构成承诺):macOS——Seatbelt/sandbox-exec profile 拒绝 network\*、Endpoint Security 拦截审计;无 namespace 等价物,隔离强度须单独证明。Windows——AppContainer/受限 token + Job Object,WFP 按进程阻断网络;授权代理协议可复用(改命名管道传输)。「授权目标 pinning+每次拨号重验」语义平台无关(NetworkProxy 已平台中立,仅 enableLoopback 与 bwrap 依赖平台)。
 
@@ -358,7 +360,7 @@
 
 **证据类型与已执行验证**:可运行验证——`go test ./internal/candidate/... -count=1`(ok,含 ERC pass/fail、报告边界和候选写入失效断言);`python3 -m unittest discover -s workers/kicad`(OK);`bash tests/e2e/m03_kicad_candidate.sh`(TestM03KicadRepairRunsOnlyAgainstCandidateInLinuxSandbox,PASS);`go test ./internal/runtime -run 'Test.*Doctor|Test.*Missing' -count=1`(PASS)。另于 2026-10-07 以当前源码构建完整 CLI/helper 并在 `/tmp` 组装 fixtures/schemas/workers，使用临时 HOME/XDG 与空配置运行 `stable doctor`，退出码 0；隔离 sandbox、KiCad CLI/GUI、窗口/截图、模板及全部安装资源均逐项 OK，未读取用户配置。`make cases` 仍未执行,不作为本阶段通过证据。
 
-**macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
+**macOS 状态**:未评估(无支持承诺)。**Windows 状态**:未评估(无支持承诺)。
 
 **等价机制线索**(未经验证,不构成承诺):macOS——KiCad .app 内 kicad-cli(/Applications/KiCad/KiCad.app/Contents/MacOS/),沙箱等价物 sandbox-exec/Seatbelt(无 bwrap);库表模板在 .app Resources,/usr/share/kicad/template 需按平台解析。Windows——`C:\Program Files\KiCad\<ver>\bin\kicad-cli.exe`,隔离可考虑 AppContainer/Windows Sandbox,需 .exe 解析与路径 resolver。
 
@@ -399,7 +401,7 @@
 
 **证据类型与已执行验证**:可运行验证——`go test ./internal/execution/ -run 'TestComputerBridgeUsesPersistentCandidateBoundSession|TestBridgeFailsClosedWithoutSandbox' -count=1`(ok);`python3 -m unittest discover -s workers/computer`(OK,含进程身份不匹配和非自有锁保护);`go test ./internal/runtime -run '^TestStopSessionProcessesIgnoresUnrelatedPID$' -count=1`(PASS,无关 PID 未收到信号);`go test ./internal/sandbox/ -count=1`(ok,含 session control/generation);`bash tests/e2e/m03_computer_session.sh`(TestM03ComputerIsolatedSessionLifecycle,PASS,开窗/截图/generation/stop 无残留)。AC-GUI-3 import 缺失降级路径仍无独立自动化。
 
-**macOS 状态**:未评估(计划评估)。**Windows 状态**:未评估(计划评估)。
+**macOS 状态**:未评估(无支持承诺)。**Windows 状态**:未评估(无支持承诺)。
 
 **等价机制线索**(未经验证,不构成承诺):macOS——无 Xvfb 官方构建,可考虑 XQuartz 或原生窗口+screencapture;进程清理以 NSRunningProcess/terminate 替代 /proc+SIGTERM;libXtst 键击注入无直接等价物。Windows——VcXsrv 类 X server 或原生 UI 自动化+PrintWindow 截图;Job Object 替代进程组清理。
 
@@ -431,7 +433,7 @@
 - **G6 IPC 访问边界**:与 Linux 相同的当前用户访问边界;不可使用无认证的本机 TCP 作为等价替代(AC-IPC 全部条目)。
 - **G7 KiCad 规则**:无头 ERC 检查必须可用(AC-KCAD 全部条目)是平台声明「支持」的前提;交互式 GUI 会话允许以「降级」状态存在(满足 AC-GUI 〔降级〕子集并如实标注)。
 - **G8 不可用可解释**:能力不可用时 doctor/UI 必须说明原因与受限功能(fail closed + 用户说明);本表各行「现状缺失」中列出的说明类缺口,在对应平台声明「支持」前必须补齐。
-- **G9 顺序决策**:macOS/Windows 的评估顺序与目标版本在阶段 2 开始前由用户决定;在此之前两平台维持「未评估(计划评估)」。
+- **G9 未来平台决策**:本系列不安排 macOS/Windows 产品支持评估。若未来另行决定支持，须重新确定目标版本、实施范围和逐平台验收门槛；当前两平台维持「未评估(无支持承诺)」。
 
 ## 5. 完成标志对照
 
@@ -439,7 +441,7 @@
 
 | 完成标志 | 达成位置与证据 |
 |----------|----------------|
-| 每项功能对每个平台都有「支持/不支持/降级」的明确状态和可执行验收条件 | 第 2 节矩阵总览:10 行 × 3 平台状态齐全(Linux 全部「支持」,macOS/Windows 统一「未评估(计划评估)」);第 3 节每行验收条件共 54 条(AC-PATH-1…AC-GUI-5),每条「运行 X → 期望 Y」,已执行项均有本机实测结果,未执行项明确保留原因 |
+| 每项功能对每个平台都有「支持/不支持/降级」的明确状态和可执行验收条件 | 第 2 节矩阵总览:10 行 × 3 平台状态齐全(Linux 全部「支持」,macOS/Windows 统一「未评估(无支持承诺)」);第 3 节每行验收条件共 54 条(AC-PATH-1…AC-GUI-5),每条「运行 X → 期望 Y」,已执行项均有本机实测结果,未执行项明确保留原因 |
 | Linux 当前行为作为回归基线 | 第 3 节每行「Linux 状态」记录的是当前真实行为并区分可运行验证与代码审阅;受影响包、Linux e2e 和跨目标构建命令均记录实际结果,可随时重放 |
 
 ## 6. 审计差异记录
@@ -480,7 +482,7 @@ S01 把操作系统依赖抽到 `internal/platform/{paths,ipc,lock,proc,secfile,
 
 ## 8. S02 位置更新（保留 S00/S01 历史结论）
 
-S02 将 C01–C05 的跨平台实现接入 `internal/platform`，并完成 Linux 回归与三向编译。macOS/Windows 的真实 ACL、命名管道、锁、进程托管和启动恢复仍待真实平台验收，逐项操作记录于 `docs/spec_docs/S02/real-os-acceptance.md`。
+S02 将 C01–C05 的跨平台实现接入 `internal/platform`，并完成 Linux 回归与三向编译。macOS/Windows 的真实 ACL、命名管道、锁、进程托管和启动恢复尚无真实平台证据；可参考 `docs/spec_docs/S02/real-os-acceptance.md` 中的可选检查，但该清单不是本系列待办。
 
 | 能力 | S02 实现位置 | 本机证据 |
 | --- | --- | --- |
@@ -491,3 +493,27 @@ S02 将 C01–C05 的跨平台实现接入 `internal/platform`，并完成 Linux
 | C05 私密文件 | `internal/platform/secfile/private_{unix,windows}.go`、业务调用点 | secfile 权限单测、门禁、三向编译 |
 
 可运行验证路径同步：`go test ./internal/sandbox/...` 现为 `go test ./internal/platform/sandbox/...`。S01 回放（2026-10-06）：appconfig TestLoadAndValidate、store TestReconcile、platform/sandbox Bubblewrap/进程组/网络代理/Probe、conversation TestSessionProtocolClientLifecycle、candidate 全包、execution computer bridge、redact、workers/kicad 与 workers/computer unittest 均通过。`make platform-check` 与 `CGO_ENABLED=0 GOOS=windows/darwin go build ./...` 退出码 0。
+
+## 9. S05 Linux 发布验收更新（2026-10-07）
+
+本节记录 S05 Linux 发布验收证据。S00–S05 解耦系列现已完成；这不构成 macOS/Windows 支持声明。
+
+| 项目 | 实际结果 |
+| --- | --- |
+| 提交 | `31993ea`（推送分支 `s05`） |
+| runner | GitHub Actions `ubuntu-26.04`；workflow 日志记录 `Image: ubuntu-26.04`。包名与 Linux x86_64 守卫均通过，产物为 `linux-amd64` |
+| 源码 job | `build-and-test` 成功：`go mod verify`、`go build ./cmd/...`、`go test ./...` |
+| 包 job | `test-package` 成功：`make test-package` 构建包并顺序通过 install、lifecycle、CLI、runtime/e2e、restart；生命周期日志包含首装/重装、升级/回退、无效包保护、入口切换回滚、卸载与数据保留 PASS |
+| workflow run | [Go run 37568537248](https://github.com/kikoiio/Stable/actions/runs/37568537248)；`build-and-test` job 112621724440，`test-package` job 112621724171 |
+| workflow artifact | `stable-linux-amd64-37568537248-1`，含版本化 tar.gz 和 `.sha256`；下载后 `sha256sum -c` 通过。归档 SHA-256：`f7b2453df8fe2a4b0b10396b162c98b39a658dadd40c1575fdf95fa598b58cf7` |
+| 包版本/依赖 | 包级 `AC1 manifest PASS` 验证 Stable 版本 `0.1.0`、Temporal CLI `1.9.1`、包清单与 CLI；包名为 `stable-0.1.0-linux-amd64.tar.gz` |
+| 发布渠道 | 未创建 GitHub Release；产物仅作为 workflow artifact 保存 |
+
+因此，S05 的发布包验收范围是 Ubuntu 26.04 x86_64。其他 Linux 发行版/架构、macOS 与 Windows 未由本系列验收，也不是本系列未完成项；未来若需支持，应另行立项。
+
+
+## 10. S 系列解耦工作收尾（2026-10-07）
+
+S00–S05 已完成。完成定义是：OS 相关路径、IPC、锁、进程托管、安全文件、沙箱/KiCad 能力和发布机制经平台边界组织；Linux 实现与发布切片完成验收；未实现的平台能力明确不可用。该定义不要求所有平台都有后端，也不把 macOS/Windows 实机验收作为系列退出门槛。
+
+矩阵中 macOS/Windows 的「未评估」「契约已实现」等状态仍应按各行证据理解，不表示支持或已承诺后续交付。其他 Linux 发行版与架构同样没有本系列的支持声明。

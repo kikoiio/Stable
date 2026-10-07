@@ -29,7 +29,7 @@ pkg="$test_root/$pkg_name"
 # --- AC1/F1 release package complete: manifest, binary versions, pinned Temporal, sha256 ---
 (cd "$project_root/dist" && sha256sum -c "$pkg_name.tar.gz.sha256" >/dev/null)
 for f in bin/stable libexec/agentctl libexec/agentworker libexec/temporal \
-  install.sh README.md licenses/temporal-LICENSE share/fixtures/sensor_board/sensor.kicad_sch \
+  install.sh uninstall.sh README.md licenses/temporal-LICENSE share/fixtures/sensor_board/sensor.kicad_sch \
   share/fixtures/sensor_board/sensor.kicad_pro share/schemas/next_action.schema.json \
   share/schemas/criteria_proposal.schema.json \
   share/workers/kicad/bridge.py share/workers/computer/bridge.py; do

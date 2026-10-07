@@ -37,8 +37,9 @@ cases: ## 场景用例（tests/cases，需要 kicad-cli）
 package: ## 构建 dist/ 发布包
 	bash scripts/package_linux.sh
 
-test-package: package ## 安装后 CLI 验收（install / cli / e2e / restart）
+test-package: package ## 安装包验收（install / lifecycle / cli / e2e / restart）
 	bash tests/package/install.sh
+	bash tests/package/lifecycle.sh
 	bash tests/package/cli.sh
 	bash tests/package/e2e.sh
 	bash tests/package/restart.sh

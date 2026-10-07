@@ -1,6 +1,6 @@
 # S01 平台边界抽取(阶段 1)Checklist
 
-> 状态:已验收(2026-10-06)。每一项通过运行代码或观察行为验证,先有证据再下结论。验证环境:Ubuntu linux/amd64,go1.26.0。
+> 状态:已验收(2026-10-06)，并纳入 S00–S05 系列收尾(2026-10-07)。每一项通过运行代码或观察行为验证,先有证据再下结论。验证环境:Ubuntu linux/amd64,go1.26.0。
 
 ## 实现完整性
 - [x] 六域包均含 中立入口 + linux 实现 + other stub(验证:文件盘点 + GOOS=linux/windows/darwin 三向编译探针;`make platform-check` 双 GOOS 退出码 0)

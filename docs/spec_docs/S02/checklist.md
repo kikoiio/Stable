@@ -1,6 +1,6 @@
 # S02 目录、身份、IPC 与运行时生命周期(阶段 2)Checklist
 
-> 状态:Linux 与交叉编译验收已完成；真实 Windows/macOS 行为按 real-os-acceptance.md 待阶段 5 验收。每一项通过运行代码或观察行为验证,先有证据再下结论。真实 OS(Windows/macOS)行为验证不在本机执行——按 real-os-acceptance.md 留阶段 5,不得在本清单冒充通过。执行环境:Ubuntu linux/amd64,go1.26.0;并行/重型操作遵守 AGENTS.md 内存规则。
+> 状态:S02 已完成；Linux 与交叉编译验收已完成；Windows/macOS 行为未在本系列真实系统验证，也不是本系列待办。每一项通过运行代码或观察行为验证,先有证据再下结论。相关真实 OS 检查保留为未来另行立项时的可选参考，不在本清单冒充通过或作为 S 系列门槛。执行环境:Ubuntu linux/amd64,go1.26.0;并行/重型操作遵守 AGENTS.md 内存规则。
 
 ## 实现完整性
 
