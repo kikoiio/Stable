@@ -191,6 +191,67 @@ func TestWorkspaceScopeMustMatchRunWorkIdentity(t *testing.T) {
 	}
 }
 
+func TestUserDiscardRequiresCurrentPreviewDigestAndGeneration(t *testing.T) {
+	parent := t.TempDir()
+	formal := filepath.Join(parent, "formal")
+	if err := os.Mkdir(formal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formal, "base.txt"), []byte("baseline"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	layout, err := NewLayout(filepath.Join(parent, "state"), formal, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := testScope()
+	scope.Authority = permission.Authority{RunID: "lead-run", SessionID: scope.SessionID, AllowedRoot: formal, FormalRoot: formal, CandidateRoot: filepath.Join(parent, "candidate")}
+	service, err := NewService(layout, Limits{}, ServiceDependencies{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close(context.Background())
+	created, err := service.Create(context.Background(), scope, "user discard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := layout.Paths(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirtyPath := filepath.Join(paths.Checkout, "dirty.txt")
+	if err := os.WriteFile(dirtyPath, []byte("uncommitted work"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := service.PreviewDiscardUser(context.Background(), scope, created.ID, "user-a")
+	if err != nil || preview.DiscardID == "" || preview.DiscardDigest == "" || preview.ChangedFiles == 0 || preview.Generation != created.Generation {
+		t.Fatalf("discard preview=%+v err=%v", preview, err)
+	}
+	if _, err := service.RemoveDiscardUser(context.Background(), scope, created.ID, "user-b", preview.DiscardID, preview.DiscardDigest, preview.Generation); !errors.Is(err, ErrOwnership) {
+		t.Fatalf("another user reused discard preview: %v", err)
+	}
+	if _, err := service.RemoveDiscardUser(context.Background(), scope, created.ID, "user-a", preview.DiscardID, "stale-digest", preview.Generation); !errors.Is(err, ErrOwnership) {
+		t.Fatalf("discard accepted a different digest: %v", err)
+	}
+	if err := os.WriteFile(dirtyPath, []byte("changed after preview"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RemoveDiscardUser(context.Background(), scope, created.ID, "user-a", preview.DiscardID, preview.DiscardDigest, preview.Generation); !errors.Is(err, ErrSourceChanged) {
+		t.Fatalf("discard accepted content changed after preview: %v", err)
+	}
+	current, err := service.PreviewDiscardUser(context.Background(), scope, created.ID, "user-a")
+	if err != nil || current.DiscardID == preview.DiscardID || current.DiscardDigest == preview.DiscardDigest {
+		t.Fatalf("changed content did not produce a fresh discard decision: %+v err=%v", current, err)
+	}
+	removed, err := service.RemoveDiscardUser(context.Background(), scope, created.ID, "user-a", current.DiscardID, current.DiscardDigest, current.Generation)
+	if err != nil || removed.State != StateRemoved {
+		t.Fatalf("current user discard result=%+v err=%v", removed, err)
+	}
+	if _, err := os.Stat(paths.Root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("confirmed discard retained workspace root: %v", err)
+	}
+}
+
 func TestLifecycleServiceRecoversInterruptedJournalOperationsConservatively(t *testing.T) {
 	parent := t.TempDir()
 	formal := filepath.Join(parent, "formal")
