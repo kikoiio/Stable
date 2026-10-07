@@ -89,6 +89,19 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 			skillPrefix = append(skillPrefix, llm.Message{Role: "user", Content: deltaText})
 		}
 	}
+	var memoryPrefix []llm.Message
+	memoryCursor := uint64(0)
+	if s.memory != nil {
+		memoryContext, memoryErr := s.memory.manager.PrepareRun(ctx, s.memory.root, authority.AllowedRoot, msg.SessionID, memoryQuery(request))
+		if memoryErr != nil {
+			memoryPrefix = append(memoryPrefix, llm.Message{Role: "user", Content: "Memory context warning: " + redactRunCredential(memoryErr.Error(), s.deps.ProviderCredential)})
+		} else {
+			memoryCursor = memoryContext.ExtractedThrough
+			if text := renderMemoryContext(memoryContext); text != "" {
+				memoryPrefix = append(memoryPrefix, llm.Message{Role: "user", Content: text})
+			}
+		}
+	}
 	var mcpPrefix []llm.Message
 	if request.Work.Kind == agent.WorkSession && s.mcp != nil {
 		if instructions := s.mcp.Instructions(); instructions != "" {
@@ -115,6 +128,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		// the stable snapshot sits at a fixed offset) and is deliberately not
 		// appended to the session log — the skill events keep it auditable.
 		prefix = append(prefix, skillPrefix...)
+		prefix = append(prefix, memoryPrefix...)
 		prefix = append(prefix, mcpPrefix...)
 		prefix = append(prefix, hookPrefix...)
 		if plan.Mode == sessionlog.PlanModePlan && plan.PlanPath != "" {
@@ -151,6 +165,9 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 				}
 			}
 		}
+	}
+	if request.Work.Kind != agent.WorkSession && len(memoryPrefix) > 0 {
+		request.Messages = append(memoryPrefix, request.Messages...)
 	}
 	if _, err := sessionlog.Append(s.deps.ProjectRoot, msg.SessionID, sessionlog.EventRunStarted, work); err != nil {
 		s.eventMu.Unlock()
@@ -190,7 +207,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	s.activeRuns[request.RunID] = request.Work.SessionID
 	s.mu.Unlock()
 	s.broadcastRun(ServerMsg{Type: "run_started", RunID: request.RunID}, msg.SessionID, request.RunID, 0)
-	go s.consumeRun(request, handle)
+	go s.consumeRun(request, handle, memoryCursor)
 	return nil
 }
 
@@ -293,7 +310,7 @@ func sessionConversationMessages(root, sessionID string) []llm.Message {
 	return messages
 }
 
-func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHandle) {
+func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHandle, memoryCursor uint64) {
 	var textOut strings.Builder
 	for event := range handle.Events {
 		if event.Kind == agent.EventTextDelta {
@@ -370,6 +387,9 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 		s.broadcastRun(ServerMsg{Type: "error", RunID: request.RunID, Error: "could not finalize candidate: " + err.Error()}, request.Work.SessionID, request.RunID, 0)
 	}
 	s.broadcastRun(ServerMsg{Type: "run_outcome", RunID: request.RunID, Outcome: &outcome}, request.Work.SessionID, request.RunID, 0)
+	if s.memory != nil {
+		s.completeMemoryRun(request, memoryCursor)
+	}
 	s.mu.Lock()
 	delete(s.activeRuns, request.RunID)
 	s.mu.Unlock()

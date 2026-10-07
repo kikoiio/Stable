@@ -282,6 +282,32 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 				part.text.WriteString("：" + server.Error)
 			}
 			blocks = append(blocks, part)
+		case sessionlog.EventMemoryAction:
+			var action sessionlog.MemoryActionRecord
+			if decodeEventData(e.Data, &action) != nil {
+				continue
+			}
+			part := &block{role: "记忆操作"}
+			mark := "✓"
+			if action.State == "failure" {
+				mark = "✗"
+			}
+			fmt.Fprintf(&part.text, "%s %s/%s", mark, action.Scope, action.Operation)
+			if action.Entry != "" {
+				part.text.WriteString(" " + action.Entry)
+			}
+			blocks = append(blocks, part)
+		case sessionlog.EventMemoryBackground:
+			var event sessionlog.MemoryBackgroundRecord
+			if decodeEventData(e.Data, &event) != nil {
+				continue
+			}
+			part := &block{role: "记忆后台"}
+			fmt.Fprintf(&part.text, "%s %s（%d 项）", event.Action, event.State, event.Count)
+			if event.Reason != "" {
+				part.text.WriteString("：" + event.Reason)
+			}
+			blocks = append(blocks, part)
 		case sessionlog.EventRunEvent:
 			var run sessionlog.RunEvent
 			if decodeEventData(e.Data, &run) != nil {

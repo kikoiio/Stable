@@ -98,6 +98,17 @@ func UserSkillsDir() (string, error) {
 	return filepath.Join(base, "stable", "skills"), nil
 }
 
+// UserMemoryDir returns the user-level persistent memory directory. Like
+// UserSkillsDir, it follows the XDG configuration base and is independent of
+// STABLE_CONFIG, which only relocates the main config file.
+func UserMemoryDir() (string, error) {
+	base, err := paths.UserConfigHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "stable", "memory"), nil
+}
+
 // UserHooksPath returns the user-level hooks file in the same configuration
 // directory tree as UserSkillsDir.
 func UserHooksPath() (string, error) {

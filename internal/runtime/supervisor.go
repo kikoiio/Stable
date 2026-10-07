@@ -25,6 +25,7 @@ import (
 	"stable/internal/execution"
 	"stable/internal/llm"
 	"stable/internal/mcp"
+	"stable/internal/memory"
 	"stable/internal/permission"
 	"stable/internal/platform/ipc"
 	"stable/internal/platform/lock"
@@ -202,7 +203,8 @@ func Supervise(c appconfig.AppConfig, p paths.Paths, sbx sandbox.SandboxManager)
 	if err = waitReady(p.WorkerLog, worker, 15*time.Second); err != nil {
 		return fmt.Errorf("Worker startup: %w; see %s", err, p.WorkerLog)
 	}
-	chatDone := startChatService(c, p, address, sbx)
+	chatDone, chatCancel := startChatService(c, p, address, sbx)
+	defer chatCancel()
 	if err := waitChatSocket(p.ChatSocket, chatDone, 10*time.Second); err != nil {
 		return fmt.Errorf("Chat startup: %w; see %s", err, p.ChatLog)
 	}
@@ -282,11 +284,15 @@ func runtimeToolSchemas(callers ...execution.MCPCaller) []llm.ToolSchema {
 		"task_list":      "task_list",
 		"task_update":    "task_update",
 		"load_skill":     "load_skill",
+		"memory_list":    "memory_list",
+		"memory_read":    "memory_read",
+		"memory_save":    "memory_save",
+		"memory_delete":  "memory_delete",
 	}
 	registry := tools.CreateDefaultTools().Registry
 	// M06/M07 tools live outside the default registry; the copy keeps append
 	// from aliasing the registry slice.
-	sources := append(append(append([]map[string]any{}, registry.GetAllSchemas()...), execution.M06ToolSchemas()...), execution.SkillToolSchemas()...)
+	sources := append(append(append(append([]map[string]any{}, registry.GetAllSchemas()...), execution.M06ToolSchemas()...), execution.SkillToolSchemas()...), execution.MemoryToolSchemas()...)
 	schemas := make([]llm.ToolSchema, 0, len(nameMap)+1)
 	for _, schema := range sources {
 		internalName, _ := schema["name"].(string)
@@ -340,21 +346,22 @@ func userSkillsDir() string {
 
 // startChatService runs the persistent conversation service inside the
 // supervisor process. It returns a channel that closes when the service stops.
-func startChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sandbox.SandboxManager) <-chan struct{} {
+func startChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sandbox.SandboxManager) (<-chan struct{}, context.CancelFunc) {
 	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		defer close(done)
-		if err := runChatService(c, p, address, sbx); err != nil {
+		if err := runChatService(ctx, c, p, address, sbx); err != nil {
 			if f, ferr := secfile.OpenFilePrivate(p.ChatLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); ferr == nil {
 				fmt.Fprintf(f, "%s chat session service: %v\n", time.Now().UTC().Format(time.RFC3339), err)
 				f.Close()
 			}
 		}
 	}()
-	return done
+	return done, cancel
 }
 
-func runChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sandbox.SandboxManager) error {
+func runChatService(ctx context.Context, c appconfig.AppConfig, p paths.Paths, address string, sbx sandbox.SandboxManager) error {
 	s, err := store.Open(p.Database)
 	if err != nil {
 		return err
@@ -366,12 +373,39 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sa
 		provider = model.(decision.StructuredProvider)
 		chatProvider = model.(decision.ChatProvider)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	refresher, err := dependency.NewKiCadRefresher(s, p.Goals, p.Share, address, sbx)
 	if err != nil {
 		return err
 	}
+	userMemoryDir, err := appconfig.UserMemoryDir()
+	if err != nil {
+		return err
+	}
+	var memoryGate *conversation.MemoryGate
+	memoryManager, err := memory.NewManager(memory.Options{
+		ProjectRoot:   p.Share,
+		UserConfigDir: filepath.Dir(filepath.Dir(userMemoryDir)),
+		StateDir:      p.State,
+		Model:         chatProvider,
+		OnEvent: func(root string, event memory.BackgroundEvent) {
+			if memoryGate != nil {
+				memoryGate.RecordBackground(root, event)
+			} else {
+				conversation.AppendMemoryBackgroundEvent(root, event)
+			}
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("memory manager: %w", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+		defer cancel()
+		if closeErr := memoryManager.Close(closeCtx); closeErr != nil {
+			log.Printf("memory manager shutdown: %v", closeErr)
+		}
+	}()
+	memoryGate = conversation.NewMemoryGate(memoryManager, p.Share)
 	var runner agent.Runner
 	var runnerError string
 	var executorFactory agent.ExecutorFactory
@@ -411,7 +445,7 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sa
 			Snapshots:          snapshotStore,
 			QuestionSink:       askSink,
 			TodoProvider:       todoProvider,
-		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate), execution.WithMCPCaller(mcpManager))
+		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate), execution.WithMCPCaller(mcpManager), execution.WithMemoryProvider(memoryGate))
 		toolSchemas = runtimeToolSchemas(mcpManager)
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, chatProvider)
 		if fellBack {
@@ -431,6 +465,7 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sa
 		Skills:              skillGate,
 		Hooks:               hookGate,
 		MCP:                 mcpManager,
+		Memory:              memoryGate,
 	})
 	if err != nil {
 		return err
@@ -439,7 +474,8 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sa
 	todoProvider.Bind(svc)
 	planSink.Bind(svc)
 	defer svc.Close()
-	select {}
+	<-ctx.Done()
+	return nil
 }
 
 func waitChatSocket(path string, done <-chan struct{}, limit time.Duration) error {

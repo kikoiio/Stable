@@ -3,11 +3,14 @@
 package secfile
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -357,3 +360,296 @@ func mapWindowsPathError(err error) error {
 	}
 	return err
 }
+
+func rootMkdirAll(root, rel string, perm os.FileMode) error {
+	parts, err := validateWindowsRelative(rel)
+	if err != nil {
+		return err
+	}
+	rootHandle, info, err := openWindowsRootWrite(root)
+	if err != nil {
+		return mapWindowsPathError(err)
+	}
+	if info.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		_ = windows.CloseHandle(rootHandle)
+		return ErrUnsafePath
+	}
+	current := rootHandle
+	defer func() { _ = windows.CloseHandle(current) }()
+	for _, part := range parts {
+		next, nextInfo, openErr := createWindowsRelative(current, part, true, windows.FILE_OPEN_IF)
+		if openErr != nil {
+			return mapWindowsPathError(openErr)
+		}
+		if nextInfo.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || nextInfo.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+			_ = windows.CloseHandle(next)
+			return ErrUnsafePath
+		}
+		if perm&0077 == 0 {
+			if err := setWindowsHandlePrivate(next); err != nil {
+				_ = windows.CloseHandle(next)
+				return err
+			}
+		}
+		_ = windows.CloseHandle(current)
+		current = next
+	}
+	return nil
+}
+
+func rootWriteFileAtomic(root, rel string, data []byte, perm os.FileMode) error {
+	parent, base, err := openWindowsParent(root, rel)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(parent)
+	var nonce [12]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
+	}
+	tmp := ".stable-tmp-" + hex.EncodeToString(nonce[:])
+	tmpHandle, _, err := createWindowsRelative(parent, tmp, false, windows.FILE_CREATE)
+	if err != nil {
+		return mapWindowsPathError(err)
+	}
+	keep := false
+	file := os.NewFile(uintptr(tmpHandle), tmp)
+	if file == nil {
+		_ = windows.CloseHandle(tmpHandle)
+		return errors.New("secfile: unable to wrap temporary file handle")
+	}
+	defer func() {
+		if !keep {
+			_ = windowsSetDelete(tmpHandle)
+		}
+		_ = file.Close()
+	}()
+	if perm&0077 == 0 {
+		if err := setWindowsHandlePrivate(tmpHandle); err != nil {
+			return err
+		}
+	}
+	if _, err := file.Write(data); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := ensureWindowsRegularTarget(parent, base); err != nil {
+		return err
+	}
+	if err := windowsRenameRelative(tmpHandle, parent, base); err != nil {
+		return mapWindowsPathError(err)
+	}
+	keep = true
+	return nil
+}
+
+func rootRemoveFile(root, rel string) error {
+	parent, base, err := openWindowsParent(root, rel)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(parent)
+	target, info, err := createWindowsRelative(parent, base, false, windows.FILE_OPEN)
+	if err != nil {
+		return mapWindowsPathError(err)
+	}
+	defer windows.CloseHandle(target)
+	if info.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		return ErrUnsafePath
+	}
+	return windowsSetDelete(target)
+}
+
+func rootReadDir(root, rel string) ([]os.DirEntry, error) {
+	parts, err := validateWindowsRelative(rel)
+	if err != nil {
+		return nil, err
+	}
+	current, info, err := openWindowsRootWrite(root)
+	if err != nil {
+		return nil, err
+	}
+	if info.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		_ = windows.CloseHandle(current)
+		return nil, ErrUnsafePath
+	}
+	for _, part := range parts {
+		next, nextInfo, openErr := createWindowsRelative(current, part, true, windows.FILE_OPEN)
+		if openErr != nil {
+			_ = windows.CloseHandle(current)
+			return nil, mapWindowsPathError(openErr)
+		}
+		if nextInfo.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || nextInfo.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+			_ = windows.CloseHandle(next)
+			_ = windows.CloseHandle(current)
+			return nil, ErrUnsafePath
+		}
+		_ = windows.CloseHandle(current)
+		current = next
+	}
+	file := os.NewFile(uintptr(current), rel)
+	if file == nil {
+		_ = windows.CloseHandle(current)
+		return nil, errors.New("secfile: unable to wrap directory handle")
+	}
+	defer file.Close()
+	return file.ReadDir(-1)
+}
+
+func openWindowsParent(root, rel string) (windows.Handle, string, error) {
+	parts, err := validateWindowsRelative(rel)
+	if err != nil {
+		return windows.InvalidHandle, "", err
+	}
+	rootHandle, info, err := openWindowsRootWrite(root)
+	if err != nil {
+		return windows.InvalidHandle, "", mapWindowsPathError(err)
+	}
+	if info.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		_ = windows.CloseHandle(rootHandle)
+		return windows.InvalidHandle, "", ErrUnsafePath
+	}
+	current := rootHandle
+	for _, part := range parts[:len(parts)-1] {
+		next, nextInfo, openErr := createWindowsRelative(current, part, true, windows.FILE_OPEN)
+		if openErr != nil {
+			_ = windows.CloseHandle(current)
+			return windows.InvalidHandle, "", mapWindowsPathError(openErr)
+		}
+		if nextInfo.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || nextInfo.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+			_ = windows.CloseHandle(next)
+			_ = windows.CloseHandle(current)
+			return windows.InvalidHandle, "", ErrUnsafePath
+		}
+		_ = windows.CloseHandle(current)
+		current = next
+	}
+	return current, parts[len(parts)-1], nil
+}
+
+func createWindowsRelative(parent windows.Handle, name string, directory bool, disposition uint32) (windows.Handle, windowsHandleInfo, error) {
+	name16, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return windows.InvalidHandle, windowsHandleInfo{}, err
+	}
+	attrs := &windows.OBJECT_ATTRIBUTES{
+		RootDirectory: parent,
+		ObjectName:    name16,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+	}
+	attrs.Length = uint32(unsafe.Sizeof(*attrs))
+	var iosb windows.IO_STATUS_BLOCK
+	var allocation int64
+	access := uint32(windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE | windows.DELETE | windows.SYNCHRONIZE)
+	options := uint32(windows.FILE_OPEN_REPARSE_POINT | windows.FILE_SYNCHRONOUS_IO_NONALERT)
+	if directory {
+		options |= windows.FILE_DIRECTORY_FILE
+	} else {
+		options |= windows.FILE_NON_DIRECTORY_FILE
+	}
+	if disposition != windows.FILE_OPEN {
+		access |= windows.FILE_GENERIC_WRITE | windows.DELETE
+	}
+	var handle windows.Handle
+	err = windows.NtCreateFile(&handle, access, attrs, &iosb, &allocation, windows.FILE_ATTRIBUTE_NORMAL,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, disposition, options, 0, 0)
+	if err != nil {
+		return windows.InvalidHandle, windowsHandleInfo{}, err
+	}
+	info, err := windowsHandleInfoFor(handle)
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		return windows.InvalidHandle, windowsHandleInfo{}, err
+	}
+	return handle, info, nil
+}
+
+func openWindowsRootWrite(root string) (windows.Handle, windowsHandleInfo, error) {
+	if err := ensureWindowsParentsNoReparse(root); err != nil {
+		return windows.InvalidHandle, windowsHandleInfo{}, err
+	}
+	ptr, err := windows.UTF16PtrFromString(filepath.Clean(root))
+	if err != nil {
+		return windows.InvalidHandle, windowsHandleInfo{}, err
+	}
+	h, err := windows.CreateFile(ptr, windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return windows.InvalidHandle, windowsHandleInfo{}, mapWindowsPathError(err)
+	}
+	info, err := windowsHandleInfoFor(h)
+	if err != nil {
+		_ = windows.CloseHandle(h)
+		return windows.InvalidHandle, windowsHandleInfo{}, err
+	}
+	return h, info, nil
+}
+
+func ensureWindowsRegularTarget(parent windows.Handle, name string) error {
+	h, info, err := createWindowsRelative(parent, name, false, windows.FILE_OPEN)
+	if errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND) || errors.Is(err, windows.STATUS_OBJECT_PATH_NOT_FOUND) {
+		return nil
+	}
+	if err != nil {
+		return mapWindowsPathError(err)
+	}
+	defer windows.CloseHandle(h)
+	if info.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		return ErrUnsafePath
+	}
+	return nil
+}
+
+func windowsRenameRelative(source, parent windows.Handle, name string) error {
+	name16, err := windows.UTF16FromString(name)
+	if err != nil {
+		return err
+	}
+	fileNameBytes := (len(name16) - 1) * 2
+	var layout windowsRenameInformation
+	buffer := make([]byte, int(unsafe.Offsetof(layout.FileName))+fileNameBytes)
+	info := (*windowsRenameInformation)(unsafe.Pointer(&buffer[0]))
+	info.ReplaceIfExists = 1
+	info.RootDirectory = parent
+	info.FileNameLength = uint32(fileNameBytes)
+	copy((*[windows.MAX_LONG_PATH]uint16)(unsafe.Pointer(&info.FileName[0]))[:fileNameBytes/2:fileNameBytes/2], name16)
+	var iosb windows.IO_STATUS_BLOCK
+	return windows.NtSetInformationFile(source, &iosb, &buffer[0], uint32(len(buffer)), windows.FileRenameInformation)
+}
+
+func windowsSetDelete(handle windows.Handle) error {
+	var info windowsDispositionInformation
+	info.DeleteFile = 1
+	var iosb windows.IO_STATUS_BLOCK
+	return windows.NtSetInformationFile(handle, &iosb, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), windows.FileDispositionInformation)
+}
+
+func setWindowsHandlePrivate(handle windows.Handle) error {
+	sid, err := currentTokenSID()
+	if err != nil {
+		return err
+	}
+	sd, err := windows.SecurityDescriptorFromString(currentUserSDDL(sid.String()))
+	if err != nil {
+		return err
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return err
+	}
+	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil)
+}
+
+type windowsRenameInformation struct {
+	ReplaceIfExists uint8
+	RootDirectory   windows.Handle
+	FileNameLength  uint32
+	FileName        [1]uint16
+}
+
+type windowsDispositionInformation struct{ DeleteFile uint8 }

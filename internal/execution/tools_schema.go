@@ -215,3 +215,56 @@ func SkillToolSchemas() []map[string]any {
 func MCPToolSchemas() []map[string]any {
 	return []map[string]any{MCPCallSchema, ToolSearchSchema}
 }
+
+// MemoryToolSchemas returns the scoped host memory tools. Their inputs never
+// contain filesystem paths; the host provider owns the project and user roots.
+func MemoryToolSchemas() []map[string]any {
+	return []map[string]any{MemoryListSchema, MemoryReadSchema, MemorySaveSchema, MemoryDeleteSchema}
+}
+
+var (
+	MemoryListSchema = map[string]any{
+		"name":         "memory_list",
+		"description":  "List saved memory entries by scope, name, type, and description. Entry bodies are not included.",
+		"input_schema": map[string]any{"type": "object", "properties": map[string]any{}},
+	}
+	MemoryReadSchema = map[string]any{
+		"name":        "memory_read",
+		"description": "Read one saved memory entry by scope and filename.",
+		"input_schema": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"scope":    map[string]any{"type": "string", "enum": []string{"user", "project"}},
+				"filename": map[string]any{"type": "string", "maxLength": 128},
+			},
+			"required": []string{"scope", "filename"},
+		},
+	}
+	MemorySaveSchema = map[string]any{
+		"name":        "memory_save",
+		"description": "Save or update one user preference, feedback, project background, or reference memory. Do not save goals, success criteria, evidence, or acceptance conclusions.",
+		"input_schema": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"scope":       map[string]any{"type": "string", "enum": []string{"user", "project"}},
+				"type":        map[string]any{"type": "string", "enum": []string{"user", "feedback", "project", "reference"}},
+				"name":        map[string]any{"type": "string", "maxLength": 128},
+				"description": map[string]any{"type": "string", "maxLength": 512},
+				"body":        map[string]any{"type": "string", "maxLength": 65536},
+			},
+			"required": []string{"scope", "type", "name", "description", "body"},
+		},
+	}
+	MemoryDeleteSchema = map[string]any{
+		"name":        "memory_delete",
+		"description": "Delete one saved memory entry by scope and filename.",
+		"input_schema": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"scope":    map[string]any{"type": "string", "enum": []string{"user", "project"}},
+				"filename": map[string]any{"type": "string", "maxLength": 128},
+			},
+			"required": []string{"scope", "filename"},
+		},
+	}
+)

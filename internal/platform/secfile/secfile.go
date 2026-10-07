@@ -60,6 +60,51 @@ func (r Root) Open(rel string) (*os.File, error) {
 	return SecureOpen(r.path, rel)
 }
 
+// MkdirAll creates rel and any missing parents below the validated root.
+// The operation refuses symlinks and verifies the root identity before and
+// after creation. Permission bits are applied by the platform adapter.
+func (r Root) MkdirAll(rel string, perm os.FileMode) error {
+	if r.path == "" || rel == "" || perm&^os.ModePerm != 0 {
+		return ErrUnsafePath
+	}
+	if err := r.Revalidate(); err != nil {
+		return err
+	}
+	if err := rootMkdirAll(r.path, rel, perm.Perm()); err != nil {
+		return err
+	}
+	return r.Revalidate()
+}
+
+// WriteFileAtomic writes a regular file below the root through a temporary
+// sibling and atomically replaces the destination. It never follows a link.
+func (r Root) WriteFileAtomic(rel string, data []byte, perm os.FileMode) error {
+	if r.path == "" || rel == "" || perm&^os.ModePerm != 0 {
+		return ErrUnsafePath
+	}
+	if err := r.Revalidate(); err != nil {
+		return err
+	}
+	if err := rootWriteFileAtomic(r.path, rel, data, perm.Perm()); err != nil {
+		return err
+	}
+	return r.Revalidate()
+}
+
+// RemoveFile removes a regular file below the root without following links.
+func (r Root) RemoveFile(rel string) error {
+	if r.path == "" || rel == "" {
+		return ErrUnsafePath
+	}
+	if err := r.Revalidate(); err != nil {
+		return err
+	}
+	if err := rootRemoveFile(r.path, rel); err != nil {
+		return err
+	}
+	return r.Revalidate()
+}
+
 // Stat opens and stats a regular file relative to the validated root.
 func (r Root) Stat(rel string) (os.FileInfo, error) {
 	f, err := r.Open(rel)
@@ -68,6 +113,26 @@ func (r Root) Stat(rel string) (os.FileInfo, error) {
 	}
 	defer f.Close()
 	return f.Stat()
+}
+
+// ReadDir reads one directory relative to the validated root without
+// traversing symlinks. Returned entries are names only; callers must use Root
+// methods to open entries they intend to read.
+func (r Root) ReadDir(rel string) ([]os.DirEntry, error) {
+	if r.path == "" || rel == "" {
+		return nil, ErrUnsafePath
+	}
+	if err := r.Revalidate(); err != nil {
+		return nil, err
+	}
+	entries, err := rootReadDir(r.path, rel)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.Revalidate(); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 // Revalidate confirms that the root still refers to the same directory.

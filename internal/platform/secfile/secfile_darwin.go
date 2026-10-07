@@ -3,6 +3,8 @@
 package secfile
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -207,4 +209,171 @@ func mapDarwinPathError(err error) error {
 		return ErrDifferentDevice
 	}
 	return err
+}
+
+func rootMkdirAll(root, rel string, perm os.FileMode) error {
+	parts, err := validateDarwinRelative(rel)
+	if err != nil {
+		return err
+	}
+	fd, err := openDarwinRootDir(root)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	for _, part := range parts {
+		created := true
+		if err := unix.Mkdirat(fd, part, uint32(perm)); err != nil {
+			if !errors.Is(err, unix.EEXIST) {
+				return mapDarwinPathError(err)
+			}
+			created = false
+		}
+		next, openErr := unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if openErr != nil {
+			return mapDarwinPathError(openErr)
+		}
+		if created {
+			if err := unix.Fchmod(next, uint32(perm)); err != nil {
+				_ = unix.Close(next)
+				return err
+			}
+		}
+		_ = unix.Close(fd)
+		fd = next
+	}
+	return nil
+}
+
+func rootWriteFileAtomic(root, rel string, data []byte, perm os.FileMode) error {
+	parentFD, base, err := openDarwinParent(root, rel)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(parentFD)
+	var nonce [12]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
+	}
+	tmp := ".stable-tmp-" + hex.EncodeToString(nonce[:])
+	fd, err := unix.Openat(parentFD, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, uint32(perm))
+	if err != nil {
+		return mapDarwinPathError(err)
+	}
+	keep := false
+	defer func() {
+		_ = unix.Close(fd)
+		if !keep {
+			_ = unix.Unlinkat(parentFD, tmp, 0)
+		}
+	}()
+	if err := unix.Fchmod(fd, uint32(perm)); err != nil {
+		return err
+	}
+	for len(data) > 0 {
+		n, writeErr := unix.Write(fd, data)
+		if writeErr != nil {
+			return writeErr
+		}
+		if n == 0 {
+			return errors.New("secfile: short write")
+		}
+		data = data[n:]
+	}
+	if err := unix.Fsync(fd); err != nil {
+		return err
+	}
+	if err := ensureDarwinRegularTarget(parentFD, base); err != nil {
+		return err
+	}
+	if err := unix.Renameat(parentFD, tmp, parentFD, base); err != nil {
+		return mapDarwinPathError(err)
+	}
+	keep = true
+	return unix.Fsync(parentFD)
+}
+
+func rootRemoveFile(root, rel string) error {
+	parentFD, base, err := openDarwinParent(root, rel)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(parentFD)
+	if err := ensureDarwinRegularTarget(parentFD, base); err != nil {
+		return err
+	}
+	if err := unix.Unlinkat(parentFD, base, 0); err != nil {
+		return mapDarwinPathError(err)
+	}
+	return unix.Fsync(parentFD)
+}
+
+func rootReadDir(root, rel string) ([]os.DirEntry, error) {
+	parts, err := validateDarwinRelative(rel)
+	if err != nil {
+		return nil, err
+	}
+	fd, err := openDarwinRootDir(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, part := range parts {
+		next, openErr := unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if openErr != nil {
+			_ = unix.Close(fd)
+			return nil, mapDarwinPathError(openErr)
+		}
+		_ = unix.Close(fd)
+		fd = next
+	}
+	file := os.NewFile(uintptr(fd), rel)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("secfile: unable to wrap directory handle")
+	}
+	defer file.Close()
+	return file.ReadDir(-1)
+}
+
+func openDarwinRootDir(root string) (int, error) {
+	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return -1, mapDarwinPathError(err)
+	}
+	return fd, nil
+}
+
+func openDarwinParent(root, rel string) (int, string, error) {
+	parts, err := validateDarwinRelative(rel)
+	if err != nil {
+		return -1, "", err
+	}
+	fd, err := openDarwinRootDir(root)
+	if err != nil {
+		return -1, "", err
+	}
+	for _, part := range parts[:len(parts)-1] {
+		next, openErr := unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if openErr != nil {
+			_ = unix.Close(fd)
+			return -1, "", mapDarwinPathError(openErr)
+		}
+		_ = unix.Close(fd)
+		fd = next
+	}
+	return fd, parts[len(parts)-1], nil
+}
+
+func ensureDarwinRegularTarget(parentFD int, name string) error {
+	var st unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return mapDarwinPathError(err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return ErrUnsafePath
+	}
+	return nil
 }

@@ -3,6 +3,8 @@
 package secfile
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -125,8 +127,182 @@ func validateLinuxRelative(rel string) error {
 }
 
 func mapLinuxPathError(err error) error {
-	if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EXDEV) {
+	if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EXDEV) || errors.Is(err, unix.ENOTDIR) {
 		return ErrUnsafePath
 	}
 	return err
+}
+
+func rootMkdirAll(root, rel string, perm os.FileMode) error {
+	parts, err := validateLinuxRelativeParts(rel)
+	if err != nil {
+		return err
+	}
+	fd, err := openLinuxRootDir(root)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	for _, part := range parts {
+		created := true
+		if err := unix.Mkdirat(fd, part, uint32(perm)); err != nil {
+			if !errors.Is(err, unix.EEXIST) {
+				return mapLinuxPathError(err)
+			}
+			created = false
+		}
+		next, openErr := unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if openErr != nil {
+			return mapLinuxPathError(openErr)
+		}
+		if created {
+			if err := unix.Fchmod(next, uint32(perm)); err != nil {
+				_ = unix.Close(next)
+				return err
+			}
+		}
+		_ = unix.Close(fd)
+		fd = next
+	}
+	return nil
+}
+
+func rootWriteFileAtomic(root, rel string, data []byte, perm os.FileMode) error {
+	parentFD, base, err := openLinuxParent(root, rel)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(parentFD)
+	var nonce [12]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
+	}
+	tmp := ".stable-tmp-" + hex.EncodeToString(nonce[:])
+	fd, err := unix.Openat(parentFD, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, uint32(perm))
+	if err != nil {
+		return mapLinuxPathError(err)
+	}
+	keep := false
+	defer func() {
+		_ = unix.Close(fd)
+		if !keep {
+			_ = unix.Unlinkat(parentFD, tmp, 0)
+		}
+	}()
+	if err := unix.Fchmod(fd, uint32(perm)); err != nil {
+		return err
+	}
+	for len(data) > 0 {
+		n, writeErr := unix.Write(fd, data)
+		if writeErr != nil {
+			return writeErr
+		}
+		if n == 0 {
+			return errors.New("secfile: short write")
+		}
+		data = data[n:]
+	}
+	if err := unix.Fsync(fd); err != nil {
+		return err
+	}
+	if err := ensureLinuxRegularTarget(parentFD, base); err != nil {
+		return err
+	}
+	if err := unix.Renameat(parentFD, tmp, parentFD, base); err != nil {
+		return mapLinuxPathError(err)
+	}
+	keep = true
+	return unix.Fsync(parentFD)
+}
+
+func rootRemoveFile(root, rel string) error {
+	parentFD, base, err := openLinuxParent(root, rel)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(parentFD)
+	if err := ensureLinuxRegularTarget(parentFD, base); err != nil {
+		return err
+	}
+	if err := unix.Unlinkat(parentFD, base, 0); err != nil {
+		return mapLinuxPathError(err)
+	}
+	return unix.Fsync(parentFD)
+}
+
+func rootReadDir(root, rel string) ([]os.DirEntry, error) {
+	if err := validateLinuxRelative(rel); err != nil {
+		return nil, err
+	}
+	rootFD, err := openLinuxRootDir(root)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(rootFD)
+	fd, err := unix.Openat2(rootFD, rel, &unix.OpenHow{
+		Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS,
+	})
+	if err != nil {
+		return nil, mapLinuxPathError(err)
+	}
+	file := os.NewFile(uintptr(fd), rel)
+	defer file.Close()
+	return file.ReadDir(-1)
+}
+
+func openLinuxRootDir(root string) (int, error) {
+	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return -1, mapLinuxPathError(err)
+	}
+	return fd, nil
+}
+
+func validateLinuxRelativeParts(rel string) ([]string, error) {
+	if err := validateLinuxRelative(rel); err != nil {
+		return nil, err
+	}
+	parts := strings.Split(rel, "/")
+	for _, part := range parts {
+		if part == "" || part == "." {
+			return nil, ErrUnsafePath
+		}
+	}
+	return parts, nil
+}
+
+func openLinuxParent(root, rel string) (int, string, error) {
+	parts, err := validateLinuxRelativeParts(rel)
+	if err != nil {
+		return -1, "", err
+	}
+	fd, err := openLinuxRootDir(root)
+	if err != nil {
+		return -1, "", err
+	}
+	for _, part := range parts[:len(parts)-1] {
+		next, openErr := unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if openErr != nil {
+			_ = unix.Close(fd)
+			return -1, "", mapLinuxPathError(openErr)
+		}
+		_ = unix.Close(fd)
+		fd = next
+	}
+	return fd, parts[len(parts)-1], nil
+}
+
+func ensureLinuxRegularTarget(parentFD int, name string) error {
+	var st unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return mapLinuxPathError(err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return ErrUnsafePath
+	}
+	return nil
 }

@@ -1,8 +1,11 @@
 package sessionlog
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // scanState summarizes validated history so a newly observed event can be
@@ -401,6 +404,18 @@ func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSe
 			return errors.New("mcp server event has invalid shape")
 		}
 		return checkMCPServer(s)
+	case EventMemoryAction:
+		var action MemoryActionRecord
+		if err := decodeStrictData(data, &action); err != nil {
+			return errors.New("memory action event has invalid shape")
+		}
+		return checkMemoryAction(action)
+	case EventMemoryBackground:
+		var background MemoryBackgroundRecord
+		if err := decodeStrictData(data, &background); err != nil {
+			return errors.New("memory background event has invalid shape")
+		}
+		return checkMemoryBackground(background)
 	}
 	return nil
 }
@@ -453,6 +468,65 @@ func checkMCPServer(s MCPServer) error {
 	}
 	if len(s.Error) > MaxMCPOutput {
 		return fmt.Errorf("mcp error exceeds %d bytes", MaxMCPOutput)
+	}
+	return nil
+}
+
+func decodeStrictData(data any, target any) error {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func checkMemoryAction(action MemoryActionRecord) error {
+	if action.At.IsZero() || action.Entry != "" && len(action.Entry) > MaxMemoryEventText {
+		return errors.New("memory action has invalid time or entry")
+	}
+	switch action.Scope {
+	case "user", "project", "both", "all":
+	default:
+		return fmt.Errorf("memory action has invalid scope %q", action.Scope)
+	}
+	switch action.Operation {
+	case "list", "read", "save", "delete", "clear":
+	default:
+		return fmt.Errorf("memory action has invalid operation %q", action.Operation)
+	}
+	switch action.State {
+	case "success", "failure":
+	default:
+		return fmt.Errorf("memory action has invalid state %q", action.State)
+	}
+	return nil
+}
+
+func checkMemoryBackground(event MemoryBackgroundRecord) error {
+	if event.At.IsZero() || event.Count < 0 || len(event.Reason) > MaxMemoryEventText {
+		return errors.New("memory background event has invalid time, count, or reason")
+	}
+	switch event.Action {
+	case "extract", "consolidate":
+	default:
+		return fmt.Errorf("memory background event has invalid action %q", event.Action)
+	}
+	switch event.State {
+	case "success", "skipped", "failed":
+	default:
+		return fmt.Errorf("memory background event has invalid state %q", event.State)
 	}
 	return nil
 }

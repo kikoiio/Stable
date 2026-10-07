@@ -11,6 +11,7 @@ import (
 	"stable/internal/candidate"
 	"stable/internal/core"
 	"stable/internal/mcp"
+	"stable/internal/memory"
 	"stable/internal/permission"
 	"stable/internal/sessionlog"
 )
@@ -40,6 +41,8 @@ type ClientMsg struct {
 	SkillName       string                  `json:"skill_name,omitempty"`
 	SkillArgs       string                  `json:"skill_args,omitempty"`
 	Limit           int                     `json:"limit,omitempty"`
+	MemoryScope     string                  `json:"memory_scope,omitempty"`
+	MemoryEntry     string                  `json:"memory_entry,omitempty"`
 }
 
 // ServerMsg is one line of JSON pushed from the session service to clients.
@@ -84,12 +87,15 @@ type ServerMsg struct {
 	SkillReport *SkillReport `json:"skill_report,omitempty"`
 	// Skills and SkillActivated carry the skill_list response: the current
 	// catalog infos and the session's activated skill names.
-	Skills         []sessionlog.SkillInfo `json:"skills,omitempty"`
-	SkillActivated []string               `json:"skill_activated,omitempty"`
-	HookList       *HookListMsg           `json:"hook_list,omitempty"`
-	HookReport     *HookReportMsg         `json:"hook_report,omitempty"`
-	MCPList        *MCPListMsg            `json:"mcp_list,omitempty"`
-	MCPReport      *MCPReportMsg          `json:"mcp_report,omitempty"`
+	Skills           []sessionlog.SkillInfo             `json:"skills,omitempty"`
+	SkillActivated   []string                           `json:"skill_activated,omitempty"`
+	HookList         *HookListMsg                       `json:"hook_list,omitempty"`
+	HookReport       *HookReportMsg                     `json:"hook_report,omitempty"`
+	MCPList          *MCPListMsg                        `json:"mcp_list,omitempty"`
+	MCPReport        *MCPReportMsg                      `json:"mcp_report,omitempty"`
+	MemoryEntries    []memory.MemoryHeader              `json:"memory_entries,omitempty"`
+	MemoryReport     *MemoryReportMsg                   `json:"memory_report,omitempty"`
+	MemoryBackground *sessionlog.MemoryBackgroundRecord `json:"memory_background,omitempty"`
 }
 
 // HookSummary is one loaded hook in the merged view.
@@ -125,6 +131,13 @@ type MCPReportMsg struct {
 	Error      string   `json:"error,omitempty"`
 }
 
+type MemoryReportMsg struct {
+	Operation string `json:"operation"`
+	Scope     string `json:"scope"`
+	Deleted   int    `json:"deleted,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
 // SkillReport kinds for the ServerMsg SkillReport payload.
 const (
 	SkillReportError  = "error"
@@ -146,7 +159,7 @@ type SkillReport struct {
 
 func validOp(op string) bool {
 	switch op {
-	case "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list", "hooks_list", "hooks_reload", "mcp_list", "mcp_reload":
+	case "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list", "hooks_list", "hooks_reload", "mcp_list", "mcp_reload", "memory_list", "memory_delete", "memory_clear":
 		return true
 	}
 	return false
@@ -281,6 +294,17 @@ func validateClient(m ClientMsg) error {
 	case "mcp_list", "mcp_reload":
 		if m.SessionID == "" {
 			return fmt.Errorf("op %s requires session_id", m.Op)
+		}
+	case "memory_list", "memory_clear":
+		if m.SessionID == "" {
+			return fmt.Errorf("op %s requires session_id", m.Op)
+		}
+		if m.Op == "memory_clear" && m.MemoryScope != "" && m.MemoryScope != "user" && m.MemoryScope != "all" {
+			return fmt.Errorf("memory_clear scope must be user or all")
+		}
+	case "memory_delete":
+		if m.SessionID == "" || m.MemoryEntry == "" || (m.MemoryScope != "user" && m.MemoryScope != "project") {
+			return fmt.Errorf("op memory_delete requires session_id, user/project scope, and memory_entry")
 		}
 	case "plan_resolve":
 		if m.SessionID == "" {

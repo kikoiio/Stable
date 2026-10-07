@@ -138,7 +138,8 @@ func TestRuntimeToolSchemas(t *testing.T) {
 	schemas := runtimeToolSchemas()
 	want := []string{
 		"ask_user", "command", "edit_file", "exit_plan_mode", "glob", "grep",
-		"load_skill", "read_file", "task_create", "task_get", "task_list",
+		"load_skill", "memory_delete", "memory_list", "memory_read", "memory_save",
+		"read_file", "task_create", "task_get", "task_list",
 		"task_update", "write_file",
 	}
 	if len(schemas) != len(want) {

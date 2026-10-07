@@ -117,6 +117,12 @@ func (s *Service) handle(ctx context.Context, c ClientMsg) ([]ServerMsg, error) 
 		return s.listMCP(c)
 	case "mcp_reload":
 		return s.reloadMCP(c)
+	case "memory_list":
+		return s.listMemory(ctx, c.SessionID)
+	case "memory_delete":
+		return s.deleteMemory(ctx, c.SessionID, c.MemoryScope, c.MemoryEntry)
+	case "memory_clear":
+		return s.clearMemory(ctx, c.SessionID, c.MemoryScope)
 	case "history":
 		history, err := s.deps.Store.ListMessages(ctx)
 		if err != nil {
@@ -373,6 +379,22 @@ func (s *Service) say(ctx context.Context, c ClientMsg, kind, eventKind string) 
 	})
 	if err != nil {
 		return nil, err
+	}
+	if c.SessionID != "" {
+		root, rootErr := s.trustedSessionRoot(c.ProjectRoot)
+		if rootErr != nil {
+			return nil, rootErr
+		}
+		if _, rootErr = sessionlog.Replay(root, c.SessionID); rootErr != nil {
+			return nil, rootErr
+		}
+		memoryKind := "goal_say"
+		if kind == core.MessageKindReply {
+			memoryKind = "goal_reply"
+		}
+		if _, rootErr = sessionlog.Append(root, c.SessionID, sessionlog.EventMessage, sessionlog.Message{Role: "user", Kind: memoryKind, Text: redactRunCredential(c.Text, s.deps.ProviderCredential)}); rootErr != nil {
+			return nil, rootErr
+		}
 	}
 	event := core.Event{ID: goalrun.RandomID("evt"), GoalID: c.Goal, Kind: eventKind,
 		Payload: mustJSON(map[string]string{"message_id": msg.ID})}
