@@ -260,6 +260,7 @@ func TestLeadMessageAutomaticallyResumesIdleTeamMember(t *testing.T) {
 	}
 	service, request := teamServiceFixture(t, root, runID)
 	request.PermissionBounds, _ = json.Marshal(permission.Authority{RunID: request.RunID, SessionID: request.Work.SessionID, AllowedRoot: root})
+	service.activeRequests[request.RunID] = request
 	role := agentcatalog.Definition{Name: "explore", Instruction: "Inspect the assigned area.", Model: "inherit", Tools: []string{"read_file"}, MaxTurns: 3}
 	runner := &capturingTeamChildRunner{inputs: make(chan agent.ChildRunInput, 2)}
 	pool, err := agent.NewPoolDelegator(agent.DefaultDelegationLimits(), runner, nil)
