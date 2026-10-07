@@ -204,3 +204,21 @@ func TestProbeAndNoHostFallback(t *testing.T) {
 		t.Fatalf("project changed: %q %v", got, err)
 	}
 }
+
+func TestWorkspaceSandboxMasksPrivateMetadata(t *testing.T) {
+	p := sandboxFixture(t)
+	if err := os.WriteFile(filepath.Join(p.CandidateRoot, ".git"), []byte("gitdir: service-private"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p.WorkspaceIsolation = true
+	args, err := (LinuxManager{Bwrap: bwrapPath(t)}).args(p, []string{"/bin/true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--cap-drop ALL", "--ro-bind /dev/null /workspace/candidate/.git", "--tmpfs /workspace/candidate/.stable --remount-ro /workspace/candidate/.stable", "--tmpfs /workspace/candidate/.mewcode --remount-ro /workspace/candidate/.mewcode"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing mask %s: %s", want, joined)
+		}
+	}
+}

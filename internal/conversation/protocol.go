@@ -20,56 +20,62 @@ import (
 
 // ClientMsg is one line of JSON sent from a chat client to the session service.
 type ClientMsg struct {
-	Op               string                  `json:"op"`             // existing session operations plus run_start | run_subscribe | run_cancel
-	Goal             string                  `json:"goal,omitempty"` // focused goal (required for say/reply)
-	Text             string                  `json:"text,omitempty"` // natural-language content
-	ID               string                  `json:"id,omitempty"`   // proposal ID for confirm/reject
-	ProjectRoot      string                  `json:"project_root,omitempty"`
-	SessionID        string                  `json:"session_id,omitempty"`
-	RunID            string                  `json:"run_id,omitempty"`
-	AfterSeq         uint64                  `json:"after_seq,omitempty"`
-	Run              *agent.ExecutionRequest `json:"run,omitempty"`
-	CandidateID      string                  `json:"candidate_id,omitempty"`
-	DecisionID       string                  `json:"decision_id,omitempty"`
-	PreviewDigest    string                  `json:"preview_digest,omitempty"`
-	CandidateDigest  string                  `json:"candidate_digest,omitempty"`
-	FormalDigest     string                  `json:"formal_digest,omitempty"`
-	AcceptanceMode   string                  `json:"acceptance_mode,omitempty"`
-	Confirmed        []string                `json:"confirmed_findings,omitempty"`
-	ApprovalID       string                  `json:"approval_id,omitempty"`
-	ApprovalChoice   string                  `json:"approval_choice,omitempty"`
-	SnapshotID       string                  `json:"snapshot_id,omitempty"`
-	QuestionID       string                  `json:"question_id,omitempty"`
-	SkillName        string                  `json:"skill_name,omitempty"`
-	SkillArgs        string                  `json:"skill_args,omitempty"`
-	AgentName        string                  `json:"agent_name,omitempty"`
-	TaskID           string                  `json:"task_id,omitempty"`
-	TaskTitle        *string                 `json:"task_title,omitempty"`
-	TaskDescription  *string                 `json:"task_description,omitempty"`
-	TaskStatus       *string                 `json:"task_status,omitempty"`
-	TaskAssignee     *string                 `json:"task_assignee,omitempty"`
-	TaskBlockedBy    *[]string               `json:"task_blocked_by,omitempty"`
-	ExpectedRevision uint64                  `json:"expected_revision,omitempty"`
-	TeamID           string                  `json:"team_id,omitempty"`
-	TeamName         string                  `json:"team_name,omitempty"`
-	TeamRecipient    string                  `json:"team_recipient,omitempty"`
-	TeamToken        string                  `json:"team_token,omitempty"`
-	TeamBroadcast    bool                    `json:"team_broadcast,omitempty"`
-	TeamRequestID    string                  `json:"team_request_id,omitempty"`
-	TeamDecision     string                  `json:"team_decision,omitempty"`
-	TeamFeedback     string                  `json:"team_feedback,omitempty"`
-	TeamMemberID     string                  `json:"team_member_id,omitempty"`
-	TeamMemberName   string                  `json:"team_member_name,omitempty"`
-	TeamPlanRequired bool                    `json:"team_plan_required,omitempty"`
-	WorkKind         string                  `json:"work_kind,omitempty"`
-	GoalID           string                  `json:"goal_id,omitempty"`
-	WorkItemID       string                  `json:"work_item_id,omitempty"`
-	CoordinatorOn    bool                    `json:"coordinator_on,omitempty"`
-	Background       bool                    `json:"background,omitempty"`
-	WaitMS           int                     `json:"wait_ms,omitempty"`
-	TimeoutMS        int                     `json:"timeout_ms,omitempty"`
-	Model            string                  `json:"model,omitempty"`
-	Limit            int                     `json:"limit,omitempty"`
+	Op                   string                  `json:"op"`             // existing session operations plus run_start | run_subscribe | run_cancel
+	Goal                 string                  `json:"goal,omitempty"` // focused goal (required for say/reply)
+	Text                 string                  `json:"text,omitempty"` // natural-language content
+	ID                   string                  `json:"id,omitempty"`   // proposal ID for confirm/reject
+	ProjectRoot          string                  `json:"project_root,omitempty"`
+	SessionID            string                  `json:"session_id,omitempty"`
+	RunID                string                  `json:"run_id,omitempty"`
+	AfterSeq             uint64                  `json:"after_seq,omitempty"`
+	Run                  *agent.ExecutionRequest `json:"run,omitempty"`
+	CandidateID          string                  `json:"candidate_id,omitempty"`
+	DecisionID           string                  `json:"decision_id,omitempty"`
+	PreviewDigest        string                  `json:"preview_digest,omitempty"`
+	CandidateDigest      string                  `json:"candidate_digest,omitempty"`
+	FormalDigest         string                  `json:"formal_digest,omitempty"`
+	AcceptanceMode       string                  `json:"acceptance_mode,omitempty"`
+	Confirmed            []string                `json:"confirmed_findings,omitempty"`
+	ApprovalID           string                  `json:"approval_id,omitempty"`
+	ApprovalChoice       string                  `json:"approval_choice,omitempty"`
+	SnapshotID           string                  `json:"snapshot_id,omitempty"`
+	QuestionID           string                  `json:"question_id,omitempty"`
+	SkillName            string                  `json:"skill_name,omitempty"`
+	SkillArgs            string                  `json:"skill_args,omitempty"`
+	AgentName            string                  `json:"agent_name,omitempty"`
+	TaskID               string                  `json:"task_id,omitempty"`
+	TaskTitle            *string                 `json:"task_title,omitempty"`
+	TaskDescription      *string                 `json:"task_description,omitempty"`
+	TaskStatus           *string                 `json:"task_status,omitempty"`
+	TaskAssignee         *string                 `json:"task_assignee,omitempty"`
+	TaskBlockedBy        *[]string               `json:"task_blocked_by,omitempty"`
+	ExpectedRevision     uint64                  `json:"expected_revision,omitempty"`
+	TeamID               string                  `json:"team_id,omitempty"`
+	TeamName             string                  `json:"team_name,omitempty"`
+	TeamRecipient        string                  `json:"team_recipient,omitempty"`
+	TeamToken            string                  `json:"team_token,omitempty"`
+	TeamBroadcast        bool                    `json:"team_broadcast,omitempty"`
+	TeamRequestID        string                  `json:"team_request_id,omitempty"`
+	TeamDecision         string                  `json:"team_decision,omitempty"`
+	TeamFeedback         string                  `json:"team_feedback,omitempty"`
+	TeamMemberID         string                  `json:"team_member_id,omitempty"`
+	TeamMemberName       string                  `json:"team_member_name,omitempty"`
+	TeamPlanRequired     bool                    `json:"team_plan_required,omitempty"`
+	TeamAcceptRoleChange bool                    `json:"team_accept_role_change,omitempty"`
+	WorktreeGeneration   uint64                  `json:"worktree_generation,omitempty"`
+	WorktreePreviewID    string                  `json:"worktree_preview_id,omitempty"`
+	ConflictChoices      map[string]string       `json:"conflict_choices,omitempty"`
+	ConflictAfter        string                  `json:"conflict_after,omitempty"`
+	Isolation            string                  `json:"isolation,omitempty"`
+	WorkKind             string                  `json:"work_kind,omitempty"`
+	GoalID               string                  `json:"goal_id,omitempty"`
+	WorkItemID           string                  `json:"work_item_id,omitempty"`
+	CoordinatorOn        bool                    `json:"coordinator_on,omitempty"`
+	Background           bool                    `json:"background,omitempty"`
+	WaitMS               int                     `json:"wait_ms,omitempty"`
+	TimeoutMS            int                     `json:"timeout_ms,omitempty"`
+	Model                string                  `json:"model,omitempty"`
+	Limit                int                     `json:"limit,omitempty"`
 }
 
 // ServerMsg is one line of JSON pushed from the session service to clients.
@@ -191,7 +197,7 @@ type SkillReport struct {
 
 func validOp(op string) bool {
 	switch op {
-	case "agent_list", "agent_reload", "agent_task_start", "agent_task_list", "agent_task_get", "agent_task_cancel", "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list", "hooks_list", "hooks_reload", "mcp_list", "mcp_reload", "team_create", "team_list", "team_get", "team_close", "team_coordinator", "team_member_spawn", "team_member_resume", "team_member_stop", "team_send", "team_messages", "team_request_list", "team_request_respond", "team_shutdown_request", "team_task_create", "team_task_get", "team_task_list", "team_task_update", "worktree_create", "worktree_list", "worktree_get", "worktree_enter", "worktree_exit", "worktree_keep", "worktree_export", "worktree_remove", "worktree_preview":
+	case "agent_list", "agent_reload", "agent_task_start", "agent_task_list", "agent_task_get", "agent_task_cancel", "session_list", "session_create", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list", "hooks_list", "hooks_reload", "mcp_list", "mcp_reload", "team_create", "team_list", "team_get", "team_close", "team_coordinator", "team_member_spawn", "team_member_resume", "team_member_stop", "team_send", "team_messages", "team_request_list", "team_request_respond", "team_shutdown_request", "team_task_create", "team_task_get", "team_task_list", "team_task_update", "worktree_create", "worktree_list", "worktree_get", "worktree_enter", "worktree_exit", "worktree_keep", "worktree_export", "worktree_remove", "worktree_preview", "worktree_resolve", "worktree_discard_preview", "worktree_discard":
 		return true
 	}
 	return false
@@ -216,6 +222,9 @@ func validateClient(m ClientMsg) error {
 	}
 	switch m.Op {
 	case "agent_list", "agent_reload", "agent_task_start", "agent_task_list", "agent_task_get", "agent_task_cancel":
+		if m.Isolation != "" && (m.Op != "agent_task_start" || (m.Isolation != "none" && m.Isolation != "worktree")) {
+			return fmt.Errorf("isolation is only supported for agent_task_start with none or worktree")
+		}
 		if m.SessionID == "" {
 			return fmt.Errorf("op %s requires session_id", m.Op)
 		}
@@ -296,7 +305,7 @@ func validateClient(m ClientMsg) error {
 		if sessionlog.ValidateID(m.SessionID) != nil || m.Run != nil || m.RunID != "" || m.ProjectRoot != "" {
 			return fmt.Errorf("team_coordinator requires only a valid session scope")
 		}
-	case "worktree_create", "worktree_list", "worktree_get", "worktree_enter", "worktree_exit", "worktree_keep", "worktree_export", "worktree_remove", "worktree_preview":
+	case "worktree_create", "worktree_list", "worktree_get", "worktree_enter", "worktree_exit", "worktree_keep", "worktree_export", "worktree_remove", "worktree_preview", "worktree_resolve", "worktree_discard_preview", "worktree_discard":
 		if sessionlog.ValidateID(m.SessionID) != nil || m.Run != nil || m.ProjectRoot != "" || m.RunID != "" && sessionlog.ValidateID(m.RunID) != nil {
 			return fmt.Errorf("op %s requires a valid session scope and server-owned project root", m.Op)
 		}
@@ -317,6 +326,29 @@ func validateClient(m ClientMsg) error {
 		} else if sessionlog.ValidateID(m.ID) != nil || m.Text != "" {
 			return fmt.Errorf("op %s requires worktree id", m.Op)
 		}
+		if m.Op == "worktree_resolve" {
+			if sessionlog.ValidateID(m.WorktreePreviewID) != nil || m.WorktreeGeneration == 0 || len(m.ConflictChoices) == 0 || len(m.ConflictChoices) > 100 {
+				return fmt.Errorf("worktree_resolve requires a current preview, generation and bounded per-path choices")
+			}
+			bytes := 0
+			for path, choice := range m.ConflictChoices {
+				clean, err := workspace.CleanRelative(path)
+				bytes += len(path)
+				if err != nil || clean != path || workspace.ProtectedRoot(path) || len(path) > 4096 || bytes > 64<<10 || (choice != workspace.UseFormal && choice != workspace.UseWorkspace) {
+					return fmt.Errorf("invalid worktree conflict choice")
+				}
+			}
+		} else if len(m.ConflictChoices) != 0 || m.WorktreePreviewID != "" {
+			return fmt.Errorf("conflict decisions are only accepted by worktree_resolve")
+		}
+		if m.Op == "worktree_discard" {
+			if sessionlog.ValidateID(m.DecisionID) != nil || len(m.PreviewDigest) != 64 || m.WorktreeGeneration == 0 {
+				return fmt.Errorf("worktree_discard requires a service-issued decision, digest and generation")
+			}
+		}
+		if m.ConflictAfter != "" && m.Op != "worktree_preview" {
+			return fmt.Errorf("conflict cursor is only accepted by worktree_preview")
+		}
 	case "team_create", "team_list", "team_get", "team_close":
 		if m.SessionID == "" {
 			return fmt.Errorf("op %s requires session_id", m.Op)
@@ -335,6 +367,9 @@ func validateClient(m ClientMsg) error {
 			return fmt.Errorf("op %s requires active lead run and team scope", m.Op)
 		}
 		if m.Op == "team_member_spawn" {
+			if m.TeamAcceptRoleChange {
+				return fmt.Errorf("team role change acceptance is only valid when resuming a member")
+			}
 			_, memberNameErr := teams.NormalizeMemberName(m.TeamMemberName)
 			_, agentNameErr := teams.NormalizeName(m.AgentName)
 			if teams.ValidateText(m.TeamMemberName, teams.MaxNameBytes, true) != nil || memberNameErr != nil || teams.ValidateText(m.AgentName, teams.MaxNameBytes, true) != nil || agentNameErr != nil || teams.ValidateText(m.Text, teams.MaxInputBytes, true) != nil || m.TeamMemberID != "" {

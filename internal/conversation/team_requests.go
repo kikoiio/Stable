@@ -137,6 +137,9 @@ func (s *Service) StopTeamMember(ctx context.Context, sessionID, teamID, memberI
 		return teams.Member{}, err
 	}
 	s.eventMu.Unlock()
+	if invalidated := s.teamScheduler.invalidateMember(memberID); invalidated != nil {
+		cancel = invalidated
+	}
 	cancel()
 	return member, nil
 }
@@ -229,6 +232,9 @@ func (s *Service) RespondTeamRequest(ctx context.Context, request agent.Executio
 		member.Revision++
 		if err := s.appendTeamMemberState(root, team, request.RunID, teams.Lead, member); err != nil {
 			return prior, err
+		}
+		if actor.Lead && s.teamScheduler != nil {
+			s.teamScheduler.signalFromLead(request, scope, team.ID, member.ID, prior.ID)
 		}
 	}
 	if prior.Type == teams.RequestShutdown && prior.Status == teams.RequestApproved {

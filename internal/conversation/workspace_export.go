@@ -81,11 +81,17 @@ func (e workspaceCandidateExporter) ExportWorkspace(ctx context.Context, scope w
 		return workspace.Snapshot{}, err
 	}
 	if len(preview.Conflicts) != 0 {
-		return workspace.Snapshot{}, fmt.Errorf("workspace export has %d unresolved path conflicts", len(preview.Conflicts))
+		if !record.Resolution.Matches(record, preview) {
+			return workspace.Snapshot{}, fmt.Errorf("workspace export has %d unresolved path conflicts; a current user resolution is required", len(preview.Conflicts))
+		}
+		preview.Manifest, err = workspace.ResolveThreeWay(preview, record.Resolution.Choices, workspace.DefaultLimits())
+		if err != nil {
+			return workspace.Snapshot{}, err
+		}
 	}
 	// Bind candidate identity to all three inputs. A retry after a crash finds
 	// the same candidate; a changed formal tree creates a distinct candidate.
-	identity := fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s", record.Snapshot.ID, record.Snapshot.Generation, preview.BaselineDigest, preview.FormalDigest, preview.WorkspaceDigest)
+	identity := fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s\x00%s", record.Snapshot.ID, record.Snapshot.Generation, preview.BaselineDigest, preview.FormalDigest, preview.WorkspaceDigest, preview.Manifest.Digest)
 	idDigest := sha256.Sum256([]byte(identity))
 	candidateID := "worktree-" + hex.EncodeToString(idDigest[:16])
 	actionID := "workspace-export-" + hex.EncodeToString(idDigest[16:24])
@@ -102,7 +108,7 @@ func (e workspaceCandidateExporter) ExportWorkspace(ctx context.Context, scope w
 		if digestErr != nil || digest != existing.Candidate.CandidateDigest {
 			return workspace.Snapshot{}, workspace.ErrSourceChanged
 		}
-		return workspace.Snapshot{ID: record.Snapshot.ID, CandidateID: candidateID, State: workspace.StateExported, BaselineDigest: baseline.Digest, WorkspaceDigest: working.Digest, ChangedFiles: record.Snapshot.ChangedFiles}, nil
+		return workspace.Snapshot{ID: record.Snapshot.ID, CandidateID: candidateID, State: workspace.StateExported, BaselineDigest: baseline.Digest, FormalDigest: formal.Digest, WorkspaceDigest: working.Digest, ChangedFiles: record.Snapshot.ChangedFiles}, nil
 	} else if !errors.Is(getErr, sql.ErrNoRows) {
 		return workspace.Snapshot{}, getErr
 	}
@@ -146,7 +152,7 @@ func (e workspaceCandidateExporter) ExportWorkspace(ctx context.Context, scope w
 	}); err != nil {
 		return workspace.Snapshot{}, err
 	}
-	return workspace.Snapshot{ID: record.Snapshot.ID, CandidateID: candidateID, State: workspace.StateExported, BaselineDigest: baseline.Digest, WorkspaceDigest: working.Digest, ChangedFiles: record.Snapshot.ChangedFiles}, nil
+	return workspace.Snapshot{ID: record.Snapshot.ID, CandidateID: candidateID, State: workspace.StateExported, BaselineDigest: baseline.Digest, FormalDigest: formal.Digest, WorkspaceDigest: working.Digest, ChangedFiles: record.Snapshot.ChangedFiles}, nil
 }
 
 func installMergedManifest(ctx context.Context, target, formalRoot, workspaceRoot string, formal, working, merged workspace.Manifest) error {

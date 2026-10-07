@@ -669,3 +669,57 @@ func TestPoolDelegatorTaskBudgetCanOnlyNarrow(t *testing.T) {
 		t.Fatalf("per-task input cap ignored: handle=%+v err=%v", handle, err)
 	}
 }
+
+func TestNamedTaskPreboundChildRunIDIsPreservedAndRejectsDuplicate(t *testing.T) {
+	entered := make(chan ChildRunInput, 1)
+	release := make(chan struct{})
+	runner := childRunnerFunc(func(ctx context.Context, input ChildRunInput) ChildRunResult {
+		entered <- input
+		select {
+		case <-release:
+			return ChildRunResult{Status: DelegationSucceeded}
+		case <-ctx.Done():
+			return ChildRunResult{Status: DelegationCanceled}
+		}
+	})
+	pool, err := NewPoolDelegator(DelegationLimits{Workers: 1, QueueCapacity: 2}, runner, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	parent := validParent()
+	parent.RunID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	parent.ChildRunID = parent.RunID
+	parent.PermissionBounds, _ = json.Marshal(map[string]any{"run_id": parent.RunID, "session_id": parent.Work.SessionID, "allowed_root": parent.ProjectRoot})
+	handle, err := pool.SubmitTask(context.Background(), parent, DelegationTask{ID: "first", Name: "writer", Instruction: "write"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case input := <-entered:
+		if input.ChildRunID != parent.RunID {
+			t.Fatalf("lease run ID changed: %s", input.ChildRunID)
+		}
+		var bounds struct {
+			RunID string `json:"run_id"`
+		}
+		json.Unmarshal(input.PermissionBounds, &bounds)
+		if bounds.RunID != parent.RunID {
+			t.Fatalf("authority changed: %s", bounds.RunID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("child did not start")
+	}
+	if _, err := pool.SubmitTask(context.Background(), parent, DelegationTask{ID: "duplicate", Name: "writer", Instruction: "write"}); err == nil {
+		t.Fatal("duplicate active prebound ID admitted")
+	}
+	invalid := parent
+	invalid.ChildRunID = "bad"
+	if _, err := pool.SubmitTask(context.Background(), invalid, DelegationTask{ID: "invalid", Name: "writer", Instruction: "write"}); err == nil {
+		t.Fatal("invalid prebound ID admitted")
+	}
+	close(release)
+	if result := <-handle.Results; result.Status != DelegationSucceeded {
+		t.Fatalf("first result=%+v", result)
+	}
+}

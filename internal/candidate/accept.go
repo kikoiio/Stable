@@ -53,6 +53,10 @@ type protectedMetadataStore interface {
 	LoadProtectedMetadata(context.Context, string) ([]ProtectedMetadataFact, error)
 }
 
+type acceptanceRootIdentityStore interface {
+	SaveAcceptanceRootIdentities(context.Context, string, string, string) error
+}
+
 type acceptanceJournal struct{ store AcceptanceStore }
 
 func (j acceptanceJournal) Advance(ctx context.Context, id string, from, to TransactionPhase, reason string) error {
@@ -77,6 +81,7 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 		return Receipt{}, err
 	}
 	var metadataFacts []ProtectedMetadataFact
+	var expectedRootIdentity, targetRootIdentity string
 	if c.ManifestPolicy == ManifestPolicyProject {
 		if err = ValidateProtectedMetadata(c.FormalRoot, c.CandidateRoot); err != nil {
 			return Receipt{}, err
@@ -84,6 +89,17 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 		metadataFacts, err = CaptureProtectedMetadata(c.FormalRoot)
 		if err != nil {
 			return Receipt{}, err
+		}
+		expectedRootIdentity, err = CaptureRootIdentity(c.FormalRoot)
+		if err != nil {
+			return Receipt{}, err
+		}
+		targetRootIdentity, err = CaptureRootIdentity(c.CandidateRoot)
+		if err != nil {
+			return Receipt{}, err
+		}
+		if _, ok := store.(acceptanceRootIdentityStore); !ok {
+			return Receipt{}, errors.New("transaction root identity journal is unavailable")
 		}
 		if _, ok := store.(protectedMetadataStore); !ok {
 			return Receipt{}, errors.New("protected metadata journal is unavailable")
@@ -102,6 +118,10 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 		return Receipt{}, errors.New("acceptance is pending reconciliation")
 	}
 	if c.ManifestPolicy == ManifestPolicyProject {
+		if err = store.(acceptanceRootIdentityStore).SaveAcceptanceRootIdentities(ctx, decision.ID, expectedRootIdentity, targetRootIdentity); err != nil {
+			_ = store.SetAcceptancePhase(ctx, decision.ID, "prepared", "blocked", err.Error())
+			return Receipt{}, err
+		}
 		metadataJournal := store.(protectedMetadataStore)
 		if err = metadataJournal.SaveProtectedMetadata(ctx, decision.ID, metadataFacts); err != nil {
 			_ = store.SetAcceptancePhase(ctx, decision.ID, "prepared", "blocked", err.Error())
@@ -132,7 +152,7 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 			}
 		}
 	}
-	tx := DirectoryTransaction{ID: decision.ID, Kind: TransactionAcceptance, ManifestPolicy: c.ManifestPolicy, ProtectedMetadata: metadataFacts, CurrentRoot: c.FormalRoot, IncomingRoot: c.CandidateRoot, RollbackRoot: rollback, ExpectedDigest: decision.FormalDigest, TargetDigest: decision.CandidateDigest, ServiceRoot: filepath.Join(c.FormalRoot, ".stable"), Mode: mode}
+	tx := DirectoryTransaction{ID: decision.ID, Kind: TransactionAcceptance, ManifestPolicy: c.ManifestPolicy, ProtectedMetadata: metadataFacts, CurrentRoot: c.FormalRoot, IncomingRoot: c.CandidateRoot, RollbackRoot: rollback, ExpectedRootIdentity: expectedRootIdentity, TargetRootIdentity: targetRootIdentity, ExpectedDigest: decision.FormalDigest, TargetDigest: decision.CandidateDigest, ServiceRoot: filepath.Join(c.FormalRoot, ".stable"), Mode: mode}
 	if err = NewTransactionCoordinator().Apply(ctx, tx, acceptanceJournal{store: store}); err != nil {
 		_ = store.SetAcceptancePhase(ctx, decision.ID, "prepared", "blocked", err.Error())
 		return Receipt{}, err
@@ -151,6 +171,13 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 	if moveErr != nil {
 		_ = store.SetAcceptancePhase(ctx, decision.ID, "swapped", "blocked", moveErr.Error())
 		return Receipt{}, fmt.Errorf("project exchanged; session state restore required: %w", moveErr)
+	}
+	if state, err := NewTransactionCoordinator().Inspect(ctx, tx, PhaseSwapped); err != nil || state != RecoveryNew {
+		if err == nil {
+			err = errors.New("accepted roots changed before finalization")
+		}
+		_ = store.SetAcceptancePhase(ctx, decision.ID, "swapped", "blocked", err.Error())
+		return Receipt{}, err
 	}
 	_, acceptedDigest, err := BuildManifestForPolicy(c.FormalRoot, c.ManifestPolicy)
 	if err != nil {
@@ -176,6 +203,11 @@ func validateAcceptance(ctx context.Context, c Candidate, review Review, decisio
 	candidatePolicy, err := normalizeManifestPolicy(c.ManifestPolicy)
 	if err != nil {
 		return err
+	}
+	if candidatePolicy == ManifestPolicyLegacy {
+		if err := RejectLegacyGitMetadata(c.FormalRoot, c.CandidateRoot); err != nil {
+			return err
+		}
 	}
 	reviewPolicy, err := normalizeManifestPolicy(review.ManifestPolicy)
 	if err != nil || reviewPolicy != candidatePolicy {

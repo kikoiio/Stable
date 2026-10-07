@@ -72,7 +72,7 @@ func (d Definition) EffectiveTools() []string {
 func (d Definition) EffectiveToolsForIsolation(isolation string) []string {
 	allowed := map[string]bool{"read_file": true, "glob": true, "grep": true}
 	if isolation == "worktree" && d.Name != "explore" && d.Name != "plan" {
-		allowed["write_file"], allowed["edit_file"] = true, true
+		allowed["write_file"], allowed["edit_file"], allowed["command"] = true, true, true
 	}
 	if d.Tools != nil {
 		requested := make(map[string]bool, len(d.Tools))

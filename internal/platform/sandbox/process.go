@@ -26,21 +26,23 @@ var (
 )
 
 type SandboxProfile struct {
-	ProjectRoot       string
-	CandidateRoot     string
-	RunRoot           string
-	ReadOnlyMounts    []ReadOnlyMount
-	ReadOnlyFiles     []ReadOnlyFileMount
-	Timeout           time.Duration
-	OutputLimit       int
-	Environment       []string
-	NetworkGrants     []permission.NetworkGrant
-	ProxyHelperPath   string
-	CandidateID       string
-	SessionID         string
-	SessionArgv       []string
-	sessionControl    bool
-	sessionGeneration uint64
+	ProjectRoot         string
+	CandidateRoot       string
+	RunRoot             string
+	ReadOnlyMounts      []ReadOnlyMount
+	ReadOnlyFiles       []ReadOnlyFileMount
+	WorkspaceIsolation  bool
+	WorkspaceVolumeRoot string
+	Timeout             time.Duration
+	OutputLimit         int
+	Environment         []string
+	NetworkGrants       []permission.NetworkGrant
+	ProxyHelperPath     string
+	CandidateID         string
+	SessionID           string
+	SessionArgv         []string
+	sessionControl      bool
+	sessionGeneration   uint64
 }
 
 type ReadOnlyMount struct {
@@ -151,6 +153,17 @@ func ValidateProfile(p SandboxProfile) error {
 			}
 		}
 	}
+	if p.WorkspaceVolumeRoot != "" {
+		if !p.WorkspaceIsolation {
+			return profileMessage("volume boundary requires workspace isolation")
+		}
+		if err := BoundedWorkspaceVolume(p.WorkspaceVolumeRoot, p.ProjectRoot, p.CandidateRoot, p.RunRoot); err != nil {
+			return err
+		}
+	}
+	if p.WorkspaceIsolation && len(p.NetworkGrants) != 0 {
+		return networkGrantMessage("workspace commands cannot access network")
+	}
 	if p.Timeout < 0 {
 		return profileMessage("sandbox timeout cannot be negative")
 	}
@@ -202,7 +215,7 @@ func ValidateProfile(p SandboxProfile) error {
 		}
 	}
 	for _, mount := range p.ReadOnlyFiles {
-		if len(p.NetworkGrants) == 0 || !filepath.IsAbs(mount.HostPath) || mount.GuestPath != "/workspace/runtime/agentworker" {
+		if !filepath.IsAbs(mount.HostPath) || mount.GuestPath != "/workspace/runtime/agentworker" {
 			return profileMessage("invalid read-only sandbox file mount")
 		}
 		if _, exists := seenGuest[mount.GuestPath]; exists {

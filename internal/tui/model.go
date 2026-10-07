@@ -96,6 +96,8 @@ type Model struct {
 	stream            *conversation.StreamClient
 	AgentTasks        []agent.AgentTaskSnapshot
 	Worktrees         []workspace.Snapshot
+	WorktreeDialog    *worktreeDecisionDialog
+	worktreeNextPage  string
 	agentTaskState
 	teamUIState
 	history    *inputhistory.Store
@@ -550,6 +552,7 @@ const (
 	DialogQuestion
 	DialogPlan
 	DialogReview
+	DialogWorkspace
 	DialogProposal
 )
 
@@ -571,6 +574,9 @@ func (m Model) pendingDialog() DialogKind {
 	}
 	if m.Review != nil {
 		return DialogReview
+	}
+	if m.WorktreeDialog != nil {
+		return DialogWorkspace
 	}
 	if _, ok := m.popupProposal(); ok {
 		return DialogProposal
@@ -693,6 +699,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handlePlanKey(v)
 		case DialogReview:
 			return m.handleReviewKey(v)
+		case DialogWorkspace:
+			return m.handleWorktreeDecisionKey(v)
 		case DialogProposal:
 			return m.handleProposalKey(v)
 		}
@@ -715,7 +723,6 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 		return m.handleTeamResult(r)
 	}
 	if strings.HasPrefix(r.op, "worktree_") {
-		m.Pending = false
 		if r.err != nil {
 			m.Err = r.err
 			m.Status = "工作树请求失败：" + r.err.Error()
@@ -723,6 +730,15 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 		}
 		m.Err = nil
 		applyWorktreeMessages(&m, r.op, r.msgs)
+		if r.op == "worktree_resolve" && m.worktreeNextPage != "" {
+			after := m.worktreeNextPage
+			m.worktreeNextPage = ""
+			for _, msg := range r.msgs {
+				if msg.Worktree != nil && msg.Worktree.ResolvedCount < msg.Worktree.ConflictCount {
+					return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "worktree_preview", SessionID: m.ActiveSession, ID: msg.Worktree.ID, ConflictAfter: after})
+				}
+			}
+		}
 		return m, nil
 	}
 	m.Pending = false
@@ -1893,6 +1909,8 @@ func (m Model) View() string {
 		}
 		runActive := m.ActiveRunID != "" || m.Pending
 		return renderReview(*m.Review, m.ReviewConfirmed, m.ReviewCursor, m.ReviewSnapshots, m.RewindPick, m.RewindCursor, m.RewindArmed, runActive, m.Status, errorText, m.Width)
+	case DialogWorkspace:
+		return m.renderWorktreeDecision()
 	case DialogProposal:
 		proposal, _ := m.popupProposal()
 		return renderProposalDialog(proposal, m.Width)

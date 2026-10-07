@@ -169,13 +169,21 @@ func (s *Service) rewindSnapshot(ctx context.Context, c ClientMsg) (sessionlog.R
 		return fail(err)
 	}
 	journal := store.RewindJournal{ID: id, CandidateID: c.CandidateID, SnapshotID: c.SnapshotID, ExpectedDigest: digest, TargetDigest: snap.Digest, StagingDir: staging, TransactionMode: secfile.TransactionMode(), RollbackPath: staging + ".rollback"}
+	journal.ExpectedRootIdentity, err = candidate.CaptureRootIdentity(cand.CandidateRoot)
+	if err != nil {
+		return fail(err)
+	}
+	journal.TargetRootIdentity, err = candidate.CaptureRootIdentity(staging)
+	if err != nil {
+		return fail(err)
+	}
 	if err = s.deps.Store.BeginRewind(ctx, journal); err != nil {
 		_ = os.RemoveAll(staging)
 		return fail(err)
 	}
 	// A crash from here on leaves the journal for startup reconciliation;
 	// the synchronous path reports the same transitions as they happen.
-	tx := candidate.DirectoryTransaction{ID: journal.ID, Kind: candidate.TransactionRewind, ManifestPolicy: cand.ManifestPolicy, CurrentRoot: cand.CandidateRoot, IncomingRoot: staging, RollbackRoot: journal.RollbackPath, ExpectedDigest: journal.ExpectedDigest, TargetDigest: journal.TargetDigest, Mode: journal.TransactionMode}
+	tx := candidate.DirectoryTransaction{ID: journal.ID, Kind: candidate.TransactionRewind, ManifestPolicy: cand.ManifestPolicy, CurrentRoot: cand.CandidateRoot, IncomingRoot: staging, RollbackRoot: journal.RollbackPath, ExpectedRootIdentity: journal.ExpectedRootIdentity, TargetRootIdentity: journal.TargetRootIdentity, ExpectedDigest: journal.ExpectedDigest, TargetDigest: journal.TargetDigest, Mode: journal.TransactionMode}
 	if err = candidate.NewTransactionCoordinator().Apply(ctx, tx, rewindJournalAdapter{store: s.deps.Store}); err != nil {
 		return fail(fmt.Errorf("exchange candidate with staged snapshot: %w", err))
 	}

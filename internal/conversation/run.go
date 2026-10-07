@@ -614,6 +614,11 @@ func (s *Service) cancelRun(msg ClientMsg, updates chan ServerMsg) error {
 	if s.deps.AgentTasks != nil {
 		s.deps.AgentTasks.CancelParent(msg.SessionID, msg.RunID)
 	}
+	if s.teamScheduler != nil {
+		for _, cancel := range s.teamScheduler.invalidateParentRun(msg.RunID) {
+			cancel()
+		}
+	}
 	return s.deps.Runner.Cancel(msg.RunID)
 }
 

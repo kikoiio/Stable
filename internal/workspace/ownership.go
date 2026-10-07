@@ -16,7 +16,7 @@ import (
 )
 
 const journalVersion = 1
-const maxJournalBytes = 64 << 10
+const maxJournalBytes = 2 << 20
 
 // RootIdentity identifies a physical directory, separately from stable project
 // identity. Directory replacement must never let a journal adopt a new root.
@@ -34,12 +34,14 @@ type Operation struct {
 }
 
 type Record struct {
-	Version      int          `json:"version"`
-	Scope        Scope        `json:"scope"`
-	Snapshot     Snapshot     `json:"snapshot"`
-	RootIdentity RootIdentity `json:"root_identity"`
-	Operation    Operation    `json:"operation"`
-	UsedBytes    int64        `json:"used_bytes"`
+	Version      int             `json:"version"`
+	Scope        Scope           `json:"scope"`
+	Snapshot     Snapshot        `json:"snapshot"`
+	RootIdentity RootIdentity    `json:"root_identity"`
+	Operation    Operation       `json:"operation"`
+	UsedBytes    int64           `json:"used_bytes"`
+	Resolution   *UserResolution `json:"resolution,omitempty"`
+	Discard      *UserDiscard    `json:"discard,omitempty"`
 }
 
 // OwnershipStore persists resource intent separately from public session facts.
@@ -290,6 +292,9 @@ func validateRecord(record Record) error {
 		if clean, err := CleanRelative(path); err != nil || clean != path || ProtectedRoot(path) {
 			return ErrUnsafePath
 		}
+	}
+	if err := validateUserDecisions(record); err != nil {
+		return err
 	}
 	return nil
 }

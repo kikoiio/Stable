@@ -31,17 +31,19 @@ const (
 )
 
 type DirectoryTransaction struct {
-	ID                string
-	Kind              TransactionKind
-	ManifestPolicy    string
-	ProtectedMetadata []ProtectedMetadataFact
-	CurrentRoot       string
-	IncomingRoot      string
-	RollbackRoot      string
-	ExpectedDigest    string
-	TargetDigest      string
-	ServiceRoot       string
-	Mode              string
+	ID                   string
+	Kind                 TransactionKind
+	ManifestPolicy       string
+	ProtectedMetadata    []ProtectedMetadataFact
+	CurrentRoot          string
+	IncomingRoot         string
+	RollbackRoot         string
+	ExpectedRootIdentity string
+	TargetRootIdentity   string
+	ExpectedDigest       string
+	TargetDigest         string
+	ServiceRoot          string
+	Mode                 string
 }
 
 type ProtectedMetadataFact struct {
@@ -117,8 +119,12 @@ func (c *TransactionCoordinator) Apply(ctx context.Context, tx DirectoryTransact
 			return err
 		}
 	}
-	if err := verifyDigestForPolicy(tx.CurrentRoot, tx.TargetDigest, tx.ManifestPolicy); err != nil {
+	state, err := c.Inspect(ctx, tx, PhaseSwapped)
+	if err != nil {
 		return err
+	}
+	if state != RecoveryNew {
+		return errors.New("exchanged roots no longer match transaction journal")
 	}
 	return journal.Advance(ctx, tx.ID, phaseBeforeSwapped(tx), PhaseSwapped, "")
 }
@@ -127,66 +133,95 @@ func (c *TransactionCoordinator) Inspect(_ context.Context, tx DirectoryTransact
 	if err := validateTransaction(tx); err != nil {
 		return RecoveryBlocked, err
 	}
+	currentIdentity, currentIdentityErr := CaptureRootIdentity(tx.CurrentRoot)
+	incomingIdentity, incomingIdentityErr := CaptureRootIdentity(tx.IncomingRoot)
+	rollbackIdentity, rollbackIdentityErr := CaptureRootIdentity(tx.RollbackRoot)
+	for _, err := range []error{currentIdentityErr, incomingIdentityErr, rollbackIdentityErr} {
+		if err != nil && !os.IsNotExist(err) {
+			return RecoveryBlocked, err
+		}
+	}
+	matches := func(actual, expected string) bool { return expected == "" || actual == expected }
 	current, currentErr := digestStateForPolicy(tx.CurrentRoot, tx.ManifestPolicy)
-	_, incomingErr := digestStateForPolicy(tx.IncomingRoot, tx.ManifestPolicy)
-	_, rollbackErr := digestStateForPolicy(tx.RollbackRoot, tx.ManifestPolicy)
-	if currentErr == nil && current == tx.TargetDigest {
+	incoming, incomingErr := digestStateForPolicy(tx.IncomingRoot, tx.ManifestPolicy)
+	rollback, rollbackErr := digestStateForPolicy(tx.RollbackRoot, tx.ManifestPolicy)
+	for _, err := range []error{currentErr, incomingErr, rollbackErr} {
+		if err != nil && !os.IsNotExist(err) {
+			return RecoveryBlocked, err
+		}
+	}
+	if currentErr == nil && current == tx.TargetDigest && incomingErr == nil && incoming == tx.ExpectedDigest && os.IsNotExist(rollbackErr) && matches(currentIdentity, tx.TargetRootIdentity) && matches(incomingIdentity, tx.ExpectedRootIdentity) {
 		return RecoveryNew, nil
 	}
-	if currentErr == nil && current == tx.ExpectedDigest && (phase == PhasePrepared || phase == PhaseOldSaved) {
+	if currentErr == nil && current == tx.ExpectedDigest && incomingErr == nil && incoming == tx.TargetDigest && os.IsNotExist(rollbackErr) && phase == PhasePrepared && matches(currentIdentity, tx.ExpectedRootIdentity) && matches(incomingIdentity, tx.TargetRootIdentity) {
 		return RecoveryOld, nil
 	}
-	if phase == PhaseOldSaved && incomingErr == nil && rollbackErr == nil {
-		return RecoveryIntermediate, nil
+	if tx.Mode == "journaled-move" && rollbackErr == nil && rollback == tx.ExpectedDigest && matches(rollbackIdentity, tx.ExpectedRootIdentity) {
+		if os.IsNotExist(currentErr) && incomingErr == nil && incoming == tx.TargetDigest && matches(incomingIdentity, tx.TargetRootIdentity) || currentErr == nil && current == tx.TargetDigest && os.IsNotExist(incomingErr) && matches(currentIdentity, tx.TargetRootIdentity) {
+			return RecoveryIntermediate, nil
+		}
 	}
-	if phase == PhaseTargetInstalled && currentErr == nil && incomingErr != nil && rollbackErr == nil {
-		return RecoveryIntermediate, nil
-	}
-	if incomingErr == nil || rollbackErr == nil {
-		return RecoveryIntermediate, nil
-	}
-	return RecoveryBlocked, fmt.Errorf("transaction phase %s has no recognizable old or new root", phase)
+	return RecoveryBlocked, fmt.Errorf("transaction phase %s has no recognizable old/new/rollback topology", phase)
 }
 
 func (c *TransactionCoordinator) Recover(ctx context.Context, tx DirectoryTransaction, phase TransactionPhase, journal TransactionJournal) error {
+	if journal == nil {
+		return errors.New("transaction journal is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	state, err := c.Inspect(ctx, tx, phase)
 	if err != nil {
 		return err
 	}
 	switch state {
 	case RecoveryOld:
-		if tx.IncomingRoot != "" {
-			_ = os.RemoveAll(tx.IncomingRoot)
-		}
+		// Keep the valid incoming root. Recovery must not destroy a resource
+		// merely because its path occurs in a journal.
 		return journal.Advance(ctx, tx.ID, phase, PhaseFinalized, "old version remains")
 	case RecoveryNew:
-		if err := verifyDigestForPolicy(tx.CurrentRoot, tx.TargetDigest, tx.ManifestPolicy); err != nil {
-			return err
-		}
-		return journal.Advance(ctx, tx.ID, phase, PhaseSwapped, "new version installed")
+		return advance(ctx, journal, tx.ID, phase, PhaseSwapped, "new version installed")
 	case RecoveryIntermediate:
-		if tx.Mode != "journaled-move" {
-			return fmt.Errorf("atomic transaction %s has an unrecognized intermediate state", tx.ID)
+		if tx.Kind == TransactionAcceptance && tx.ManifestPolicy == ManifestPolicyProject {
+			installed := tx.CurrentRoot
+			if _, err := os.Lstat(installed); os.IsNotExist(err) {
+				installed = tx.IncomingRoot
+			}
+			if err := ValidateProtectedMetadataFacts(tx.RollbackRoot, installed, tx.ProtectedMetadata); err != nil {
+				return err
+			}
 		}
-		if phase == PhaseOldSaved {
+		if phase == PhasePrepared {
+			if err := journal.Advance(ctx, tx.ID, phase, PhaseOldSaved, "recovered old root move"); err != nil {
+				return err
+			}
+			phase = PhaseOldSaved
+		}
+		if _, err := os.Lstat(tx.CurrentRoot); os.IsNotExist(err) {
 			if err := secfile.MoveDirectory(tx.IncomingRoot, tx.CurrentRoot, false); err != nil {
 				return err
 			}
-			if err := journal.Advance(ctx, tx.ID, PhaseOldSaved, PhaseTargetInstalled, "recovered target installation"); err != nil {
-				return err
-			}
-			if err := secfile.MoveDirectory(tx.RollbackRoot, tx.IncomingRoot, false); err != nil {
-				return err
-			}
-			return journal.Advance(ctx, tx.ID, PhaseTargetInstalled, PhaseSwapped, "recovered old root placement")
 		}
-		if phase == PhaseTargetInstalled {
-			if err := secfile.MoveDirectory(tx.RollbackRoot, tx.IncomingRoot, false); err != nil {
+		if phase == PhaseOldSaved {
+			if err := journal.Advance(ctx, tx.ID, phase, PhaseTargetInstalled, "recovered target installation"); err != nil {
 				return err
 			}
-			return journal.Advance(ctx, tx.ID, PhaseTargetInstalled, PhaseSwapped, "recovered old root placement")
+			phase = PhaseTargetInstalled
 		}
-		return fmt.Errorf("transaction %s intermediate phase %s cannot continue", tx.ID, phase)
+		if phase != PhaseTargetInstalled {
+			return fmt.Errorf("transaction %s intermediate phase %s cannot continue", tx.ID, phase)
+		}
+		if err := secfile.MoveDirectory(tx.RollbackRoot, tx.IncomingRoot, false); err != nil {
+			return err
+		}
+		if state, err := c.Inspect(ctx, tx, PhaseSwapped); err != nil || state != RecoveryNew {
+			if err != nil {
+				return err
+			}
+			return errors.New("recovered roots no longer match transaction journal")
+		}
+		return journal.Advance(ctx, tx.ID, phase, PhaseSwapped, "recovered old root placement")
 	default:
 		return fmt.Errorf("transaction %s recovery is blocked", tx.ID)
 	}
@@ -196,6 +231,21 @@ func (c *TransactionCoordinator) Cleanup(_ context.Context, tx DirectoryTransact
 	for _, path := range []string{tx.RollbackRoot, tx.IncomingRoot} {
 		if path == "" {
 			continue
+		}
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if tx.ExpectedRootIdentity == "" {
+			return errors.New("cleanup root identity is unavailable; retain for reconciliation")
+		}
+		identity, err := CaptureRootIdentity(path)
+		if err != nil || identity != tx.ExpectedRootIdentity {
+			return errors.New("cleanup root identity changed")
+		}
+		if err := verifyDigestForPolicy(path, tx.ExpectedDigest, tx.ManifestPolicy); err != nil {
+			return err
 		}
 		if err := os.RemoveAll(path); err != nil {
 			return err
@@ -385,14 +435,16 @@ func RestoreProtectedMetadataFacts(formalRoot, spentCandidateRoot string, facts 
 		if err != nil || identity != fact.Identity {
 			return fmt.Errorf("saved metadata %s identity does not match journal", name)
 		}
-		if sourceInfo.IsDir() {
-			if err := secfile.MoveDirectory(source, destination, false); err != nil {
-				return err
-			}
-		} else {
-			if err := renameAndSync(source, destination); err != nil {
-				return err
-			}
+		if err := renameAndSync(source, destination); err != nil {
+			return err
+		}
+		installedInfo, err := os.Lstat(destination)
+		if err != nil {
+			return err
+		}
+		installedIdentity, err := fileIdentity(installedInfo)
+		if err != nil || installedIdentity != fact.Identity {
+			return fmt.Errorf("metadata %s identity changed during restore", name)
 		}
 		if err := formal.Revalidate(); err != nil {
 			return err
@@ -405,7 +457,7 @@ func RestoreProtectedMetadataFacts(formalRoot, spentCandidateRoot string, facts 
 }
 
 func renameAndSync(source, destination string) error {
-	if err := os.Rename(source, destination); err != nil {
+	if err := moveMetadataNoReplace(source, destination); err != nil {
 		return err
 	}
 	for _, dir := range []string{filepath.Dir(source), filepath.Dir(destination)} {
@@ -470,6 +522,46 @@ func validateTransaction(tx DirectoryTransaction) error {
 	if tx.Kind != TransactionAcceptance && tx.Kind != TransactionRewind {
 		return errors.New("unsupported transaction kind")
 	}
+	policy, err := normalizeManifestPolicy(tx.ManifestPolicy)
+	if err != nil {
+		return err
+	}
+	if policy == ManifestPolicyLegacy {
+		return RejectLegacyGitMetadata(tx.CurrentRoot, tx.IncomingRoot, tx.RollbackRoot)
+	}
+	if tx.ExpectedRootIdentity == "" || tx.TargetRootIdentity == "" {
+		return errors.New("project-v2 transaction root identities are missing; explicit reconciliation is required")
+	}
+	if tx.Kind == TransactionRewind {
+		for _, root := range []string{tx.CurrentRoot, tx.IncomingRoot, tx.RollbackRoot} {
+			if root == "" {
+				continue
+			}
+			for _, name := range []string{".git", ".stable", ".mewcode"} {
+				if _, err := os.Lstat(filepath.Join(root, name)); err == nil {
+					return fmt.Errorf("rewind root contains protected metadata %s", name)
+				} else if !os.IsNotExist(err) {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// RejectLegacyGitMetadata prevents old reviews and unfinished transactions
+// from exchanging Git entities under the unprotected legacy manifest policy.
+func RejectLegacyGitMetadata(roots ...string) error {
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(root, ".git")); err == nil {
+			return errors.New("legacy candidate contains Git metadata; safely re-export and create a new review")
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -484,6 +576,15 @@ func verifyTransactionRoots(tx DirectoryTransaction) error {
 	}
 	if err = secfile.SameVolume(current.Path(), incoming.Path()); err != nil {
 		return err
+	}
+	for root, expected := range map[string]string{current.Path(): tx.ExpectedRootIdentity, incoming.Path(): tx.TargetRootIdentity} {
+		if expected == "" {
+			continue
+		}
+		actual, err := CaptureRootIdentity(root)
+		if err != nil || actual != expected {
+			return errors.New("transaction root identity changed")
+		}
 	}
 	if err = current.Revalidate(); err != nil {
 		return err
@@ -552,4 +653,21 @@ func advance(ctx context.Context, j TransactionJournal, id string, from, to Tran
 		return nil
 	}
 	return j.Advance(ctx, id, from, to, reason)
+}
+
+// CaptureRootIdentity records the directory entity, independently of its data
+// digest; a byte-identical replacement must not inherit a journal's ownership.
+func CaptureRootIdentity(path string) (string, error) {
+	if path == "" {
+		return "", os.ErrNotExist
+	}
+	root, err := secfile.OpenRoot(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(root.Path())
+	if err != nil {
+		return "", err
+	}
+	return fileIdentity(info)
 }

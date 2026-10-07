@@ -122,6 +122,13 @@ type Snapshot struct {
 	ChangedFiles    int      `json:"changed_files"`
 	ConflictCount   int      `json:"conflict_count"`
 	Conflicts       []string `json:"conflicts,omitempty"`
+	PreviewID       string   `json:"preview_id,omitempty"`
+	ConflictNext    string   `json:"conflict_next,omitempty"`
+	ResolutionID    string   `json:"resolution_id,omitempty"`
+	ResolvedCount   int      `json:"resolved_count,omitempty"`
+	DiscardID       string   `json:"discard_id,omitempty"`
+	DiscardDigest   string   `json:"discard_digest,omitempty"`
+	DiscardPaths    []string `json:"discard_paths,omitempty"`
 	Summary         string   `json:"summary,omitempty"`
 	Error           string   `json:"error,omitempty"`
 }

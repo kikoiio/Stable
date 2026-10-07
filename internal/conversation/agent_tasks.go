@@ -34,6 +34,7 @@ type agentTaskState struct {
 	work            agent.WorkRef
 	cancel          context.CancelFunc
 	done            chan struct{}
+	runnerDone      chan struct{}
 	roleInstruction string
 	persistErr      error
 	workspace       *workspace.LifecycleService
@@ -108,16 +109,18 @@ func (c *AgentTaskCoordinator) run(ctx context.Context, parent agent.ParentRun, 
 	if direct {
 		origin = ""
 	}
-	if isolation == "worktree" && (def.Name == "explore" || def.Name == "plan" || direct || origin == "") {
+	if isolation == "worktree" && (def.Name == "explore" || def.Name == "plan" || (!direct && origin == "")) {
 		return agent.AgentTaskSnapshot{}, errors.New("worktree isolation requires a persisted lead run and a writable agent role")
 	}
 	var manager *workspace.LifecycleService
 	var writerLease *workspace.WriterLease
 	if isolation == "worktree" {
-		active, activeErr := s.activeRunRequest(parent.Work.SessionID, parent.RunID)
-		started, found, logErr := sessionlog.FindRunStart(currentProjectRoot(s.deps.ProjectRoot), parent.Work.SessionID, parent.RunID)
-		if activeErr != nil || active.Work != parent.Work || active.TeamTurn != nil || active.TeamUser || logErr != nil || !found || started.TeamID != "" || started.AgentTaskID != "" || started.OriginRunID != "" {
-			return agent.AgentTaskSnapshot{}, workspace.ErrOwnership
+		if !direct {
+			active, activeErr := s.activeRunRequest(parent.Work.SessionID, parent.RunID)
+			started, found, logErr := sessionlog.FindRunStart(currentProjectRoot(s.deps.ProjectRoot), parent.Work.SessionID, parent.RunID)
+			if activeErr != nil || active.Work != parent.Work || active.TeamTurn != nil || active.TeamUser || logErr != nil || !found || started.TeamID != "" || started.AgentTaskID != "" || started.OriginRunID != "" {
+				return agent.AgentTaskSnapshot{}, workspace.ErrOwnership
+			}
 		}
 		projectRoot, scope, scopeErr := s.workspaceScope(ctx, ClientMsg{SessionID: parent.Work.SessionID, WorkKind: string(parent.Work.Kind), GoalID: parent.Work.GoalID, WorkItemID: parent.Work.WorkItemID})
 		if scopeErr != nil || filepath.Clean(projectRoot) != filepath.Clean(parent.ProjectRoot) {
@@ -155,6 +158,7 @@ func (c *AgentTaskCoordinator) run(ctx context.Context, parent agent.ParentRun, 
 		}
 	}
 	parent.RunID = runID
+	parent.ChildRunID = runID
 	if writerLease == nil {
 		authority.RunID = runID
 		parent.PermissionBounds, err = json.Marshal(authority)
@@ -177,6 +181,15 @@ func (c *AgentTaskCoordinator) run(ctx context.Context, parent agent.ParentRun, 
 	allowed := map[string]bool{}
 	for _, name := range def.EffectiveToolsForIsolation(isolation) {
 		allowed[name] = true
+	}
+	parentTools := make(map[string]bool, len(parent.ToolSchemas))
+	for _, schema := range parent.ToolSchemas {
+		parentTools[schema.Name] = true
+	}
+	for name := range allowed {
+		if !parentTools[name] {
+			delete(allowed, name)
+		}
 	}
 	schemas := []llm.ToolSchema{}
 	for _, schema := range parent.ToolSchemas {
@@ -201,7 +214,7 @@ func (c *AgentTaskCoordinator) run(ctx context.Context, parent agent.ParentRun, 
 		duration = parent.Budget.MaxDuration
 	}
 	runCtx, cancel := context.WithTimeout(base, duration)
-	state := &agentTaskState{snapshot: agent.AgentTaskSnapshot{ID: taskID, RunID: runID, OriginRunID: origin, SessionID: parent.Work.SessionID, AgentName: def.Name, Name: def.Name, Status: agent.DelegationQueued}, work: parent.Work, cancel: cancel, done: make(chan struct{}), roleInstruction: def.Instruction, workspace: manager, writerLease: writerLease}
+	state := &agentTaskState{snapshot: agent.AgentTaskSnapshot{ID: taskID, RunID: runID, OriginRunID: origin, SessionID: parent.Work.SessionID, AgentName: def.Name, Name: def.Name, Status: agent.DelegationQueued}, work: parent.Work, cancel: cancel, done: make(chan struct{}), runnerDone: make(chan struct{}), roleInstruction: def.Instruction, workspace: manager, writerLease: writerLease}
 	if writerLease != nil {
 		state.snapshot.WorkspaceID = writerLease.WorkspaceID
 		state.snapshot.WorkspaceGeneration = writerLease.Generation
@@ -245,6 +258,7 @@ func (c *AgentTaskCoordinator) run(ctx context.Context, parent agent.ParentRun, 
 	}
 	go func() {
 		result := <-handle.Results
+		close(state.runnerDone)
 		status := agent.RunCompleted
 		switch result.Status {
 		case agent.DelegationFailed:
@@ -546,3 +560,35 @@ func (c *AgentTaskCoordinator) sanitizeEvent(runID string, event agent.Delegatio
 	}
 	return event
 }
+
+// StopWorkspaceWriter waits for the runner, whose tool calls wait for their
+// sandbox process trees. It does not wait for lease settlement: the workspace
+// manager may hold its lifecycle lock while it invokes this callback.
+func (c *AgentTaskCoordinator) StopWorkspaceWriter(ctx context.Context, lease workspace.WriterLease) error {
+	if c == nil {
+		return workspace.ErrUnavailable
+	}
+	c.mu.Lock()
+	var found *agentTaskState
+	for _, state := range c.active {
+		if state.writerLease != nil && state.writerLease.WorkspaceID == lease.WorkspaceID && state.writerLease.RunID == lease.RunID && state.writerLease.Generation == lease.Generation && state.work == lease.Scope.Work && state.writerLease.Scope.SameOwner(lease.Scope) {
+			found = state
+			state.cancel()
+			break
+		}
+	}
+	c.mu.Unlock()
+	if found == nil {
+		return workspace.ErrUnavailable
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	select {
+	case <-found.runnerDone:
+		return nil
+	case <-waitCtx.Done():
+		return waitCtx.Err()
+	}
+}
+
+var _ workspace.WriterStopper = (*AgentTaskCoordinator)(nil)

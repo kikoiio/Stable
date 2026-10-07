@@ -57,10 +57,10 @@ func registerAgentCommands(host *commandHost, registry *commands.Registry) {
 		req.SessionID = m.ActiveSession
 		m.Composer.SetValue("")
 		m.recordHistory(host.raw)
-		m.Status = "正在查询只读 agent 任务…"
+		m.Status = "正在查询 agent 任务…"
 		host.send(requestCmd(m.Socket, req))
 	}
-	register("agents", "列出只读 agent 角色", "reload", func(args string) {
+	register("agents", "列出 agent 角色", "reload", func(args string) {
 		op := "agent_list"
 		switch strings.TrimSpace(args) {
 		case "":
@@ -72,15 +72,22 @@ func registerAgentCommands(host *commandHost, registry *commands.Registry) {
 		}
 		send(conversation.ClientMsg{Op: op})
 	})
-	register("agent", "启动独立只读后台任务", "角色 任务", func(args string) {
+	register("agent", "启动独立后台任务或受控工作树任务", "[--worktree] 角色 任务", func(args string) {
+		args = strings.TrimSpace(args)
 		fields := strings.Fields(args)
+		isolation := ""
+		if len(fields) > 0 && fields[0] == "--worktree" {
+			isolation = "worktree"
+			args = strings.TrimSpace(strings.TrimPrefix(args, "--worktree"))
+			fields = strings.Fields(args)
+		}
 		if len(fields) < 2 {
-			host.model.Status = "用法：/agent <角色> <任务>"
+			host.model.Status = "用法：/agent [--worktree] <角色> <任务>"
 			return
 		}
 		name := fields[0]
 		instruction := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(args), name))
-		send(conversation.ClientMsg{Op: "agent_task_start", AgentName: name, Text: instruction, Background: true})
+		send(conversation.ClientMsg{Op: "agent_task_start", AgentName: name, Text: instruction, Background: true, Isolation: isolation})
 	})
 	register("tasks", "查看或取消本会话 agent 任务", "[next | get ID | stop ID]", func(args string) {
 		fields := strings.Fields(args)

@@ -26,15 +26,17 @@ type CandidateRecord struct {
 }
 
 type AcceptanceRecovery struct {
-	Record            CandidateRecord
-	Decision          candidate.AcceptanceDecision
-	Phase             string
-	OldDigest         string
-	NewDigest         string
-	TransactionMode   string
-	RollbackPath      string
-	ManifestPolicy    string
-	ProtectedMetadata []candidate.ProtectedMetadataFact
+	Record               CandidateRecord
+	Decision             candidate.AcceptanceDecision
+	Phase                string
+	OldDigest            string
+	NewDigest            string
+	TransactionMode      string
+	RollbackPath         string
+	ManifestPolicy       string
+	ProtectedMetadata    []candidate.ProtectedMetadataFact
+	ExpectedRootIdentity string
+	TargetRootIdentity   string
 }
 
 func (s *Store) CheckAcceptance(ctx context.Context, d candidate.AcceptanceDecision) (bool, candidate.Receipt, bool, error) {
@@ -149,9 +151,20 @@ func (s *Store) SaveAcceptanceDecision(ctx context.Context, d candidate.Acceptan
 	if err != nil {
 		return false, err
 	}
-	var candidateRoot, manifestPolicy string
-	if err = s.db.QueryRowContext(ctx, `SELECT candidate_root,manifest_policy FROM candidates WHERE id=?`, d.CandidateID).Scan(&candidateRoot, &manifestPolicy); err != nil {
+	var candidateRoot, formalRoot, manifestPolicy string
+	if err = s.db.QueryRowContext(ctx, `SELECT candidate_root,formal_root,manifest_policy FROM candidates WHERE id=?`, d.CandidateID).Scan(&candidateRoot, &formalRoot, &manifestPolicy); err != nil {
 		return false, err
+	}
+	var expectedRootIdentity, targetRootIdentity string
+	if manifestPolicy == candidate.ManifestPolicyProject {
+		expectedRootIdentity, err = candidate.CaptureRootIdentity(formalRoot)
+		if err != nil {
+			return false, err
+		}
+		targetRootIdentity, err = candidate.CaptureRootIdentity(candidateRoot)
+		if err != nil {
+			return false, err
+		}
 	}
 	transactionMode := secfile.TransactionMode()
 	rollback := filepath.Join(filepath.Dir(filepath.Clean(candidateRoot)), ".stable-accept-rollback-"+d.ID)
@@ -172,7 +185,7 @@ func (s *Store) SaveAcceptanceDecision(ctx context.Context, d candidate.Acceptan
 	if candidateID != d.CandidateID || userID != d.UserID || candidateDigest != d.CandidateDigest || previewDigest != d.PreviewDigest || formalDigest != d.FormalDigest || mode != string(d.Mode) || storedFindings != string(findings) {
 		return false, errors.New("acceptance decision ID was reused with different contents")
 	}
-	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO acceptance_apply_journal(decision_id,candidate_id,phase,transaction_mode,rollback_path,manifest_policy,old_digest,new_digest,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, d.ID, d.CandidateID, "prepared", transactionMode, rollback, manifestPolicy, d.FormalDigest, d.CandidateDigest, time.Now().UTC().Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO acceptance_apply_journal(decision_id,candidate_id,phase,transaction_mode,rollback_path,manifest_policy,expected_root_identity,target_root_identity,old_digest,new_digest,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, d.ID, d.CandidateID, "prepared", transactionMode, rollback, manifestPolicy, expectedRootIdentity, targetRootIdentity, d.FormalDigest, d.CandidateDigest, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return false, err
 	}
@@ -278,7 +291,7 @@ func (s *Store) FindAcceptanceReceipt(ctx context.Context, decisionID string) (c
 }
 
 func (s *Store) PendingAcceptances(ctx context.Context) ([]AcceptanceRecovery, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT c.id,c.action_id,c.goal_id,c.formal_root,c.candidate_root,c.manifest_policy,c.baseline_digest,c.candidate_digest,c.root_mode,c.criteria_revision,c.dependency_revision,c.status,c.created_at,c.updated_at,d.id,d.user_id,d.candidate_digest,d.preview_digest,d.formal_digest,d.mode,d.confirmed_findings_json,j.phase,j.old_digest,j.new_digest,j.transaction_mode,j.rollback_path,j.manifest_policy,j.protected_metadata_json FROM acceptance_apply_journal j JOIN candidates c ON c.id=j.candidate_id JOIN acceptance_decisions d ON d.id=j.decision_id WHERE j.phase IN ('prepared','old_saved','target_installed','swapped','blocked') ORDER BY j.updated_at,j.decision_id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT c.id,c.action_id,c.goal_id,c.formal_root,c.candidate_root,c.manifest_policy,c.baseline_digest,c.candidate_digest,c.root_mode,c.criteria_revision,c.dependency_revision,c.status,c.created_at,c.updated_at,d.id,d.user_id,d.candidate_digest,d.preview_digest,d.formal_digest,d.mode,d.confirmed_findings_json,j.phase,j.old_digest,j.new_digest,j.transaction_mode,j.rollback_path,j.manifest_policy,j.expected_root_identity,j.target_root_identity,j.protected_metadata_json FROM acceptance_apply_journal j JOIN candidates c ON c.id=j.candidate_id JOIN acceptance_decisions d ON d.id=j.decision_id WHERE j.phase IN ('prepared','old_saved','target_installed','swapped','blocked') ORDER BY j.updated_at,j.decision_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -288,7 +301,7 @@ func (s *Store) PendingAcceptances(ctx context.Context) ([]AcceptanceRecovery, e
 		var x AcceptanceRecovery
 		var cstatus, created, updated, mode, findings string
 		var metadataRaw string
-		err = rows.Scan(&x.Record.Candidate.ID, &x.Record.ActionID, &x.Record.GoalID, &x.Record.Candidate.FormalRoot, &x.Record.Candidate.CandidateRoot, &x.Record.Candidate.ManifestPolicy, &x.Record.Candidate.BaselineDigest, &x.Record.Candidate.CandidateDigest, &x.Record.Candidate.RootMode, &x.Record.CriteriaRevision, &x.Record.DependencyRevision, &cstatus, &created, &updated, &x.Decision.ID, &x.Decision.UserID, &x.Decision.CandidateDigest, &x.Decision.PreviewDigest, &x.Decision.FormalDigest, &mode, &findings, &x.Phase, &x.OldDigest, &x.NewDigest, &x.TransactionMode, &x.RollbackPath, &x.ManifestPolicy, &metadataRaw)
+		err = rows.Scan(&x.Record.Candidate.ID, &x.Record.ActionID, &x.Record.GoalID, &x.Record.Candidate.FormalRoot, &x.Record.Candidate.CandidateRoot, &x.Record.Candidate.ManifestPolicy, &x.Record.Candidate.BaselineDigest, &x.Record.Candidate.CandidateDigest, &x.Record.Candidate.RootMode, &x.Record.CriteriaRevision, &x.Record.DependencyRevision, &cstatus, &created, &updated, &x.Decision.ID, &x.Decision.UserID, &x.Decision.CandidateDigest, &x.Decision.PreviewDigest, &x.Decision.FormalDigest, &mode, &findings, &x.Phase, &x.OldDigest, &x.NewDigest, &x.TransactionMode, &x.RollbackPath, &x.ManifestPolicy, &x.ExpectedRootIdentity, &x.TargetRootIdentity, &metadataRaw)
 		if err != nil {
 			return nil, err
 		}
@@ -333,37 +346,25 @@ func (s *Store) ReconcileAcceptances(ctx context.Context) error {
 		if policy == candidate.ManifestPolicyProject && len(item.ProtectedMetadata) != 3 {
 			return s.blockAcceptance(ctx, item, errors.New("protected metadata facts are missing from the acceptance journal"))
 		}
-		_, formalDigest, err := candidate.BuildManifestForPolicy(item.Record.Candidate.FormalRoot, policy)
-		if err != nil {
-			return s.blockAcceptance(ctx, item, err)
-		}
-		_, candidateDigest, err := candidate.BuildManifestForPolicy(item.Record.Candidate.CandidateRoot, policy)
-		if err != nil {
-			return s.blockAcceptance(ctx, item, err)
-		}
 		oldDigest, newDigest := item.OldDigest, item.NewDigest
-		if item.Phase == "prepared" && formalDigest == oldDigest && candidateDigest == newDigest {
-			tx := candidate.DirectoryTransaction{ID: item.Decision.ID, Kind: candidate.TransactionAcceptance, ManifestPolicy: policy, ProtectedMetadata: item.ProtectedMetadata, CurrentRoot: item.Record.Candidate.FormalRoot, IncomingRoot: item.Record.Candidate.CandidateRoot, RollbackRoot: item.RollbackPath, ExpectedDigest: oldDigest, TargetDigest: newDigest, Mode: item.TransactionMode}
-			if tx.Mode == "" {
-				tx.Mode = "atomic-exchange"
-			}
-			if err = candidate.NewTransactionCoordinator().Apply(ctx, tx, acceptanceJournalAdapter{store: s}); err != nil {
-				return s.blockAcceptance(ctx, item, err)
-			}
-		} else if item.Phase == "old_saved" || item.Phase == "target_installed" {
-			tx := candidate.DirectoryTransaction{ID: item.Decision.ID, Kind: candidate.TransactionAcceptance, ManifestPolicy: policy, ProtectedMetadata: item.ProtectedMetadata, CurrentRoot: item.Record.Candidate.FormalRoot, IncomingRoot: item.Record.Candidate.CandidateRoot, RollbackRoot: item.RollbackPath, ExpectedDigest: oldDigest, TargetDigest: newDigest, Mode: item.TransactionMode}
-			if err = candidate.NewTransactionCoordinator().Recover(ctx, tx, candidate.TransactionPhase(item.Phase), acceptanceJournalAdapter{store: s}); err != nil {
-				return s.blockAcceptance(ctx, item, err)
-			}
-		} else if formalDigest == newDigest && candidateDigest == oldDigest {
-			if item.Phase == "prepared" {
-				if err = s.SetAcceptancePhase(ctx, item.Decision.ID, "prepared", "swapped", ""); err != nil {
-					return err
-				}
-			}
-		} else if !(oldDigest == newDigest && formalDigest == newDigest && candidateDigest == newDigest) {
-			return s.blockAcceptance(ctx, item, fmt.Errorf("formal/candidate digests do not match the apply journal (formal=%s candidate=%s)", formalDigest, candidateDigest))
+		tx := candidate.DirectoryTransaction{ID: item.Decision.ID, Kind: candidate.TransactionAcceptance, ManifestPolicy: policy, ProtectedMetadata: item.ProtectedMetadata, ExpectedRootIdentity: item.ExpectedRootIdentity, TargetRootIdentity: item.TargetRootIdentity, CurrentRoot: item.Record.Candidate.FormalRoot, IncomingRoot: item.Record.Candidate.CandidateRoot, RollbackRoot: item.RollbackPath, ExpectedDigest: oldDigest, TargetDigest: newDigest, Mode: item.TransactionMode}
+		if tx.Mode == "" {
+			tx.Mode = "atomic-exchange"
 		}
+		coordinator := candidate.NewTransactionCoordinator()
+		state, inspectErr := coordinator.Inspect(ctx, tx, candidate.TransactionPhase(item.Phase))
+		if inspectErr != nil {
+			return s.blockAcceptance(ctx, item, inspectErr)
+		}
+		if state == candidate.RecoveryOld && item.Phase == "prepared" {
+			err = coordinator.Apply(ctx, tx, acceptanceJournalAdapter{store: s})
+		} else {
+			err = coordinator.Recover(ctx, tx, candidate.TransactionPhase(item.Phase), acceptanceJournalAdapter{store: s})
+		}
+		if err != nil {
+			return s.blockAcceptance(ctx, item, err)
+		}
+
 		if policy == candidate.ManifestPolicyProject {
 			err = candidate.RestoreProtectedMetadataFacts(item.Record.Candidate.FormalRoot, item.Record.Candidate.CandidateRoot, item.ProtectedMetadata)
 		} else {
@@ -371,6 +372,12 @@ func (s *Store) ReconcileAcceptances(ctx context.Context) error {
 		}
 		if err != nil {
 			return s.blockAcceptance(ctx, item, err)
+		}
+		if state, inspectErr := coordinator.Inspect(ctx, tx, candidate.PhaseSwapped); inspectErr != nil || state != candidate.RecoveryNew {
+			if inspectErr == nil {
+				inspectErr = errors.New("acceptance roots changed before finalization")
+			}
+			return s.blockAcceptance(ctx, item, inspectErr)
 		}
 		receipt := candidate.Receipt{ID: "receipt-" + item.Decision.ID, DecisionID: item.Decision.ID, CandidateID: item.Record.Candidate.ID, FormalDigest: newDigest, AcceptedAt: time.Now().UTC()}
 		if err = s.FinalizeAcceptance(ctx, item.Decision, receipt, item.Record.GoalID, item.Record.ActionID); err != nil {
@@ -387,8 +394,12 @@ func (j acceptanceJournalAdapter) Advance(ctx context.Context, id string, from, 
 }
 
 func (s *Store) blockAcceptance(ctx context.Context, item AcceptanceRecovery, cause error) error {
-	if item.Phase != "blocked" {
-		if err := s.SetAcceptancePhase(ctx, item.Decision.ID, item.Phase, "blocked", cause.Error()); err != nil {
+	var currentPhase string
+	if err := s.db.QueryRowContext(ctx, `SELECT phase FROM acceptance_apply_journal WHERE decision_id=?`, item.Decision.ID).Scan(&currentPhase); err != nil {
+		return err
+	}
+	if currentPhase != "blocked" {
+		if err := s.SetAcceptancePhase(ctx, item.Decision.ID, currentPhase, "blocked", cause.Error()); err != nil {
 			return err
 		}
 	}
@@ -472,4 +483,22 @@ func (s *Store) FinalizeAcceptance(ctx context.Context, d candidate.AcceptanceDe
 		}
 	}
 	return tx.Commit()
+}
+
+func (s *Store) SaveAcceptanceRootIdentities(ctx context.Context, id, expected, target string) error {
+	if expected == "" || target == "" {
+		return errors.New("transaction root identities are required")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE acceptance_apply_journal SET expected_root_identity=?,target_root_identity=? WHERE decision_id=? AND phase='prepared' AND (expected_root_identity='' OR expected_root_identity=?) AND (target_root_identity='' OR target_root_identity=?)`, expected, target, id, expected, target)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return errors.New("transaction root identities changed or journal is no longer prepared")
+	}
+	return nil
 }

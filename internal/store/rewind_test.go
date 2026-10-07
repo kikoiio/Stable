@@ -191,3 +191,76 @@ func TestRewindJournalMigration(t *testing.T) {
 		t.Fatalf("journal lost across reopen: %t, %v", ok, err)
 	}
 }
+
+func TestJournaledRewindRecoveryEveryMoveBoundary(t *testing.T) {
+	cases := []struct {
+		name  string
+		phase string
+		moves int
+	}{
+		{"old_move_before_journal", RewindPrepared, 1}, {"old_saved", RewindOldSaved, 1},
+		{"target_move_before_journal", RewindOldSaved, 2}, {"target_installed", RewindTargetInstalled, 2},
+		{"rollback_move_before_journal", RewindTargetInstalled, 3}, {"swapped", RewindSwapped, 3},
+	}
+	for _, policy := range []string{candidate.ManifestPolicyLegacy, candidate.ManifestPolicyProject} {
+		for _, fixture := range cases {
+			t.Run(policy+"/"+fixture.name, func(t *testing.T) {
+				s, dbPath := newGoalStore(t)
+				ctx := context.Background()
+				root, oldDigest := rewindCandidate(t, s, ctx, map[string]string{"board": "old"})
+				if _, err := s.DB().Exec(`UPDATE candidates SET manifest_policy=? WHERE id='cand'`, policy); err != nil {
+					t.Fatal(err)
+				}
+				staging := filepath.Join(filepath.Dir(root), "staging")
+				rollback := filepath.Join(filepath.Dir(root), "rollback")
+				if err := os.Mkdir(staging, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(staging, "board"), []byte("new"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				_, newDigest, err := candidate.BuildManifest(staging)
+				if err != nil {
+					t.Fatal(err)
+				}
+				j := RewindJournal{ID: "rw", CandidateID: "cand", SnapshotID: "snap", ExpectedDigest: oldDigest, TargetDigest: newDigest, StagingDir: staging, RollbackPath: rollback, TransactionMode: "journaled-move"}
+				if err = s.BeginRewind(ctx, j); err != nil {
+					t.Fatal(err)
+				}
+				if _, err = s.DB().Exec(`UPDATE rewind_journal SET phase=? WHERE id=?`, fixture.phase, j.ID); err != nil {
+					t.Fatal(err)
+				}
+				moves := [][2]string{{root, rollback}, {staging, root}, {rollback, staging}}
+				for _, move := range moves[:fixture.moves] {
+					if err = os.Rename(move[0], move[1]); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err = s.Close(); err != nil {
+					t.Fatal(err)
+				}
+				s, err = Open(dbPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer s.Close()
+				for attempt := 0; attempt < 2; attempt++ {
+					if err = s.ReconcileRewinds(ctx); err != nil {
+						t.Fatalf("recovery %d: %v", attempt, err)
+					}
+				}
+				rec, err := s.GetCandidate(ctx, "cand")
+				if err != nil || rec.Candidate.CandidateDigest != newDigest {
+					t.Fatalf("candidate=%+v err=%v", rec, err)
+				}
+				data, err := os.ReadFile(filepath.Join(root, "board"))
+				if err != nil || string(data) != "new" {
+					t.Fatalf("rewind=%q err=%v", data, err)
+				}
+				if _, err = os.Lstat(rollback); !os.IsNotExist(err) {
+					t.Fatalf("rollback was stranded: %v", err)
+				}
+			})
+		}
+	}
+}

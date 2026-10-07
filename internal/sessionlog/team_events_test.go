@@ -202,6 +202,33 @@ func TestTeamHandoffTerminalAndStream(t *testing.T) {
 	}
 }
 
+func TestTeamRoleMetadataCanChangeOnlyOnExplicitLeadResume(t *testing.T) {
+	f := newTeamFixture(t)
+	f.accept()
+	f.delegation("queued")
+	f.delegation("running")
+	f.delegation("succeeded")
+	f.run("terminal", map[string]string{"status": "completed"})
+	f.turn.Status = "succeeded"
+	f.turn.Elapsed = time.Second
+	f.write(TeamTurnTerminal, func(e *TeamEvent) { e.Turn = &f.turn })
+	f.member.Revision++
+	f.member.Status = teams.MemberIdle
+	f.member.TurnID, f.member.RunID = f.turn.ID, f.turn.RunID
+	f.member.OriginRunID = "parent"
+	f.member.Budget = teams.Budget{AcceptedTurns: 1, Elapsed: time.Second}
+	f.write(TeamMemberState, func(e *TeamEvent) { e.ActorID = "service"; e.ActorRunID = ""; e.Member = &f.member })
+
+	updated := f.member
+	updated.Revision++
+	updated.RoleHash = "new-role-hash"
+	updated.Tools = []string{"glob", "read_file"}
+	f.write(TeamMemberState, func(e *TeamEvent) { e.Member = &updated })
+	if _, err := ReplayTeams(f.root, f.session); err != nil {
+		t.Fatalf("explicit role metadata update failed replay: %v", err)
+	}
+}
+
 func TestTeamTaskCASAndDependencies(t *testing.T) {
 	f := newTeamFixture(t)
 	a := teams.Task{ID: "a", TeamID: f.team.ID, Title: "first", Status: teams.TaskPending, Revision: 1, CreatedBy: teams.Lead}

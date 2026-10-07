@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
 
 	"stable/internal/agent"
 	"stable/internal/permission"
@@ -68,7 +70,7 @@ func (s *Service) workspaceService(formalRoot string) (*workspace.LifecycleServi
 	if err != nil {
 		return nil, err
 	}
-	manager, err := workspace.NewService(layout, workspace.DefaultLimits(), workspace.ServiceDependencies{IdleGuard: s, Exporter: workspaceCandidateExporter{service: s}})
+	manager, err := workspace.NewService(layout, workspace.DefaultLimits(), workspace.ServiceDependencies{IdleGuard: s, Stopper: s.deps.AgentTasks, Exporter: workspaceCandidateExporter{service: s}})
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +142,17 @@ func (s *Service) handleWorkspaceRequest(ctx context.Context, msg ClientMsg) (Se
 	case "worktree_exit":
 		snapshot, err = manager.Exit(ctx, scope)
 	case "worktree_preview":
-		snapshot, err = manager.Preview(ctx, scope, msg.ID)
+		if msg.ConflictAfter == "" {
+			snapshot, err = manager.Preview(ctx, scope, msg.ID)
+		} else {
+			snapshot, err = manager.ConflictPage(ctx, scope, msg.ID, msg.ConflictAfter)
+		}
+	case "worktree_resolve":
+		snapshot, err = manager.ResolveUser(ctx, scope, msg.ID, strconv.Itoa(os.Getuid()), msg.WorktreePreviewID, msg.WorktreeGeneration, msg.ConflictChoices)
+	case "worktree_discard_preview":
+		snapshot, err = manager.PreviewDiscardUser(ctx, scope, msg.ID, strconv.Itoa(os.Getuid()))
+	case "worktree_discard":
+		snapshot, err = manager.RemoveDiscardUser(ctx, scope, msg.ID, strconv.Itoa(os.Getuid()), msg.DecisionID, msg.PreviewDigest, msg.WorktreeGeneration)
 	case "worktree_export":
 		snapshot, err = manager.Export(ctx, scope, msg.ID)
 	case "worktree_keep":

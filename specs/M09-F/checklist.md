@@ -79,9 +79,10 @@
 |---|---|---|---|
 | Go build + `go test ./...` | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [Go run 37640598695](https://github.com/kikoiio/Stable/actions/runs/37640598695), `build-and-test` | 通过；通用单测不替代真实 writer sandbox/quota 与 AC1–9 组合验收。 |
 | 全量 E2E workflow | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [E2E run 37640598926](https://github.com/kikoiio/Stable/actions/runs/37640598926), `unit`, `e2e-core`, `e2e-m03`, `e2e-m04`, `e2e-sessions`, `cases` | 所有 job 通过；workflow 没有覆盖 F 的冲突用户 resolution、真实 writer quota/sandbox 集成和生命周期用户接受闭环。 |
-| Go package acceptance | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [Go run 37640598695](https://github.com/kikoiio/Stable/actions/runs/37640598695), `test-package` | 记录时仍在依赖初始化阶段，尚无结果。 |
+| Go package acceptance | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [Go run 37640598695](https://github.com/kikoiio/Stable/actions/runs/37640598695), `test-package` | 通过；run 总结由 in_progress 更新为 success，job 完成于 2026-10-07 15:16 UTC。仅是预览改动前 SHA 的结果。 |
+| Preview regression first run / repair | `90ed0d7` → `75594bd2c4279c115c18fb5f22c741f868dcfcb5` | [failed Go run 37643405245](https://github.com/kikoiio/Stable/actions/runs/37643405245), `build-and-test`; [repaired Go run 37644076609](https://github.com/kikoiio/Stable/actions/runs/37644076609), `build-and-test` | 首次单测失败仅因 preview lifecycle fixture 未带可信 authority；修复 fixture 后 build 与 `go test ./...` 通过。package job 与 E2E workflow 仍在运行。 |
 | Lifecycle journal restart（本地定向） | 工作树未提交 | `go test ./internal/workspace -run TestLifecycleServiceRecoversInterruptedJournalOperationsConservatively` | creating intent 被标为 interrupted 且不创建项目内容；root 已消失的 remove intent 收敛为 removed；未知 writer 保留 writer ID 并让 stop 返回 unavailable；第二次 startup 幂等。未覆盖真实 PID、export candidate 与真实 sandbox。 |
-| Runtime/protocol/TUI 基础接线与冲突预览 | 待本轮提交 | `git diff --check` | 专用 state root、workspace lifecycle、enter/exit/export 与 `/worktrees preview` 已接线；preview 持久化三方 digest 和最多 100 个冲突路径。尚未编译或执行；writer sandbox/quota、用户逐路径 resolution 与 discard 决策仍未接线。 |
+| Runtime/protocol/TUI 基础接线与冲突预览 | `90ed0d7` | 已接线；[Go run 37644076609](https://github.com/kikoiio/Stable/actions/runs/37644076609) build/unit 通过 | 专用 state root、workspace lifecycle、enter/exit/export 与 `/worktrees preview` 已接线；preview 持久化三方 digest 和最多 100 个冲突路径。package/E2E、writer sandbox/quota、用户逐路径 resolution 与 discard 决策仍待验收。 |
 | 定向契约/快照/private Git | 待填 | 待填 | 未执行 |
 | 真实sandbox与quota攻击 | 待填 | 待填 | 未执行 |
 | metadata事务全部crash点 | 待填 | 待填 | 未执行 |

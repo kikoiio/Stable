@@ -42,7 +42,7 @@ func (s *Service) handleAgentRequest(ctx context.Context, msg ClientMsg) ([]Serv
 		}
 		parent, err = s.forkParentRun(ctx, msg.SessionID, "agent-entry-"+id)
 		if err == nil {
-			snapshot, err = s.deps.AgentTasks.run(ctx, parent, agent.AgentTaskRequest{AgentName: msg.AgentName, Instruction: msg.Text, Background: true, Model: msg.Model, Timeout: time.Duration(msg.TimeoutMS) * time.Millisecond}, true)
+			snapshot, err = s.deps.AgentTasks.run(ctx, parent, agent.AgentTaskRequest{AgentName: msg.AgentName, Instruction: msg.Text, Background: true, Model: msg.Model, Timeout: time.Duration(msg.TimeoutMS) * time.Millisecond, Isolation: msg.Isolation}, true)
 		}
 	case "agent_task_get":
 		snapshot, err = s.deps.AgentTasks.Output(ctx, parent, msg.TaskID, time.Duration(msg.WaitMS)*time.Millisecond)

@@ -51,6 +51,9 @@ func (s *Service) CreateTeamTask(ctx context.Context, request agent.ExecutionReq
 		return teams.Task{}, err
 	}
 	_, err = sessionlog.Append(root, scope.SessionID, sessionlog.EventTeam, sessionlog.TeamEvent{ID: eventID, TeamID: teamID, SessionID: scope.SessionID, Kind: sessionlog.TeamTaskCreated, Revision: team.Revision + 1, ActorID: task.CreatedBy, ActorRunID: request.RunID, Task: &persistedTask})
+	if err == nil && actor.Lead && task.Assignee != "" && s.teamScheduler != nil {
+		s.teamScheduler.signalFromLead(request, scope, teamID, task.Assignee, "task:"+task.ID)
+	}
 	return task, err
 }
 
@@ -129,6 +132,9 @@ func (s *Service) UpdateTeamTask(ctx context.Context, request agent.ExecutionReq
 	persistedTask := task
 	persistedTask.Blocks = nil
 	_, err = sessionlog.Append(root, scope.SessionID, sessionlog.EventTeam, sessionlog.TeamEvent{ID: eventID, TeamID: teamID, SessionID: scope.SessionID, Kind: sessionlog.TeamTaskUpdated, Revision: team.Revision + 1, ActorID: actorID(actor), ActorRunID: request.RunID, Task: &persistedTask})
+	if err == nil && actor.Lead && task.Assignee != "" && task.Status != teams.TaskCompleted && s.teamScheduler != nil {
+		s.teamScheduler.signalFromLead(request, scope, teamID, task.Assignee, "task:"+task.ID)
+	}
 	return task, err
 }
 

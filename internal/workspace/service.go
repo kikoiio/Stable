@@ -525,12 +525,12 @@ func (s *LifecycleService) AcquireWriter(ctx context.Context, scope Scope, id, r
 	if !ValidID(runID) {
 		return WriterLease{}, ErrOwnership
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	record, err := s.store.Load(ctx, scope, id)
 	if err != nil {
 		return WriterLease{}, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed || s.writers[id].RunID != "" {
 		return WriterLease{}, ErrOwnership
 	}
@@ -552,6 +552,12 @@ func (s *LifecycleService) AcquireWriter(ctx context.Context, scope Scope, id, r
 	updated.Snapshot.WriterRunID = runID
 	updated.Snapshot.Generation++
 	updated.Snapshot.Cursor++
+	updated.Resolution, updated.Discard = nil, nil
+	updated.Snapshot.PreviewID, updated.Snapshot.ResolutionID, updated.Snapshot.DiscardID, updated.Snapshot.DiscardDigest = "", "", "", ""
+	updated.Snapshot.Conflicts, updated.Snapshot.DiscardPaths = nil, nil
+	updated.Snapshot.ConflictCount, updated.Snapshot.ResolvedCount = 0, 0
+	updated.Snapshot.ConflictNext = ""
+	updated.Snapshot.CandidateID = ""
 	updated.Operation = Operation{ID: mustID(), Kind: "writer", Phase: "complete", Generation: updated.Snapshot.Generation, UpdatedAt: time.Now().UTC()}
 	if err := s.store.Save(ctx, scope, updated, record.Snapshot.Generation); err != nil {
 		return WriterLease{}, err
@@ -576,12 +582,22 @@ func (s *LifecycleService) ReleaseCompletedWriter(ctx context.Context, lease Wri
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	current, ok := s.writers[lease.WorkspaceID]
+	if !ok {
+		record, err := s.store.Load(ctx, lease.Scope, lease.WorkspaceID)
+		if err == nil && record.Snapshot.Generation == lease.Generation && record.Snapshot.WriterRunID == "" && (record.Snapshot.State == StateKept || record.Snapshot.State == StateExported) {
+			return record.Snapshot, nil
+		}
+	}
 	if !ok || current.RunID != lease.RunID || current.Generation != lease.Generation || !current.Scope.SameOwner(lease.Scope) {
 		return Snapshot{}, ErrOwnership
 	}
 	record, err := s.store.Load(ctx, lease.Scope, lease.WorkspaceID)
 	if err != nil {
 		return Snapshot{}, err
+	}
+	if record.Snapshot.State == StateStopping && record.Snapshot.WriterRunID == lease.RunID && record.Snapshot.Generation == lease.Generation {
+		// StopWriter owns settlement after its stopper has confirmed exit.
+		return record.Snapshot, nil
 	}
 	if record.Snapshot.State != StateWriting && record.Snapshot.State != StateBlocked || record.Snapshot.WriterRunID != lease.RunID || record.Snapshot.Generation != lease.Generation {
 		return Snapshot{}, ErrOwnership
@@ -707,7 +723,7 @@ func (r *writerWriteReservation) Commit(ctx context.Context) error {
 		r.Release()
 		return err
 	}
-	if record.Snapshot.State != StateWriting || record.Snapshot.WriterRunID != r.lease.RunID || record.Snapshot.Generation != r.lease.Generation {
+	if record.Snapshot.State != StateWriting && record.Snapshot.State != StateStopping || record.Snapshot.WriterRunID != r.lease.RunID || record.Snapshot.Generation != r.lease.Generation {
 		r.Release()
 		return ErrOwnership
 	}
@@ -800,14 +816,29 @@ func (s *LifecycleService) StopWriter(ctx context.Context, scope Scope, id strin
 	if err := s.store.Save(ctx, scope, stopping, record.Snapshot.Generation); err != nil {
 		return Snapshot{}, err
 	}
-	if err := s.deps.Stopper.StopWorkspaceWriter(ctx, lease); err != nil {
+	// Tool settlement and runner completion require this same lock. Persist
+	// stopping before dropping it, so no new tool reservation can begin.
+	s.mu.Unlock()
+	stopCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	stopErr := s.deps.Stopper.StopWorkspaceWriter(stopCtx, lease)
+	cancel()
+	s.mu.Lock()
+	latest, loadErr := s.store.Load(context.Background(), scope, id)
+	if loadErr != nil {
+		return Snapshot{}, loadErr
+	}
+	if latest.Snapshot.Generation != lease.Generation || latest.Snapshot.WriterRunID != lease.RunID {
+		return Snapshot{}, ErrOwnership
+	}
+	stopping = latest
+	if stopErr != nil {
 		blocked := stopping
 		blocked.Snapshot.State = StateBlocked
-		blocked.Snapshot.Error = boundedError(err)
+		blocked.Snapshot.Error = boundedError(stopErr)
 		blocked.Operation.Phase = "blocked"
 		blocked.Operation.UpdatedAt = time.Now().UTC()
 		_ = s.store.Save(context.Background(), scope, blocked, stopping.Snapshot.Generation)
-		return Snapshot{}, err
+		return Snapshot{}, stopErr
 	}
 	stopping.Snapshot.State = StateKept
 	stopping.Snapshot.WriterRunID = ""
@@ -823,10 +854,24 @@ func (s *LifecycleService) StopWriter(ctx context.Context, scope Scope, id strin
 		return Snapshot{}, err
 	}
 	stopping.Snapshot.WorkspaceDigest = manifest.Digest
+	baseline, err := BuildManifest(ctx, paths.Baseline, s.limits)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	stopping.Snapshot.ChangedFiles = changedManifestEntries(baseline.Entries, manifest.Entries)
+	used, err := DiskUsage(ctx, paths.Root, s.limits)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	stopping.UsedBytes = used
 	if err := s.store.Save(ctx, scope, stopping, stopping.Snapshot.Generation); err != nil {
 		return Snapshot{}, err
 	}
 	delete(s.writers, id)
+	if err := s.refreshBudget(ctx); err != nil {
+		s.markBlocked(scope, stopping, err)
+		return Snapshot{}, err
+	}
 	return stopping.Snapshot, nil
 }
 
@@ -837,6 +882,8 @@ func (s *LifecycleService) Export(ctx context.Context, scope Scope, id string) (
 	if _, err := s.StopWriterIfActive(ctx, scope, id); err != nil {
 		return Snapshot{}, err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	record, err := s.store.Load(ctx, scope, id)
 	if err != nil {
 		return Snapshot{}, err
@@ -845,6 +892,17 @@ func (s *LifecycleService) Export(ctx context.Context, scope Scope, id string) (
 		return Snapshot{}, ErrOwnership
 	}
 	if record.Snapshot.State == StateExported && record.Snapshot.CandidateID != "" {
+		paths, err := s.layout.Paths(id)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		preview, err := BuildMergePreview(ctx, paths, s.limits)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		if preview.BaselineDigest != record.Snapshot.BaselineDigest || preview.FormalDigest != record.Snapshot.FormalDigest || preview.WorkspaceDigest != record.Snapshot.WorkspaceDigest {
+			return Snapshot{}, ErrSourceChanged
+		}
 		return record.Snapshot, nil
 	}
 	paths, err := s.layout.Paths(id)
@@ -872,7 +930,12 @@ func (s *LifecycleService) Export(ctx context.Context, scope Scope, id string) (
 	if exported.ID != id || exported.CandidateID == "" || !ValidID(exported.CandidateID) {
 		return Snapshot{}, ErrOwnership
 	}
-	exporting.Snapshot = exported
+	exporting.Snapshot.CandidateID = exported.CandidateID
+	exporting.Snapshot.BaselineDigest = exported.BaselineDigest
+	exporting.Snapshot.FormalDigest = exported.FormalDigest
+	exporting.Snapshot.WorkspaceDigest = exported.WorkspaceDigest
+	exporting.Snapshot.ChangedFiles = exported.ChangedFiles
+	exporting.Snapshot.Error = ""
 	exporting.Snapshot.State = StateExported
 	exporting.Snapshot.SessionID = scope.SessionID
 	exporting.Snapshot.Generation = record.Snapshot.Generation
@@ -896,6 +959,8 @@ func (s *LifecycleService) Preview(ctx context.Context, scope Scope, id string) 
 	if _, err := s.StopWriterIfActive(ctx, scope, id); err != nil {
 		return Snapshot{}, err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	record, err := s.store.Load(ctx, scope, id)
 	if err != nil {
 		return Snapshot{}, err
@@ -920,7 +985,17 @@ func (s *LifecycleService) Preview(ctx context.Context, scope Scope, id string) 
 	preview.Generation = record.Snapshot.Generation
 	preview.Cursor = record.Snapshot.Cursor + 1
 	preview.ChangedFiles = record.Snapshot.ChangedFiles
+	if preview.ConflictCount > len(preview.Conflicts) && len(preview.Conflicts) > 0 {
+		preview.ConflictNext = preview.Conflicts[len(preview.Conflicts)-1]
+	}
 	updated := record
+	preview.PreviewID = mustID()
+	updated.Resolution, updated.Discard = nil, nil
+	if record.Snapshot.PreviewID != "" && record.Snapshot.BaselineDigest == preview.BaselineDigest && record.Snapshot.FormalDigest == preview.FormalDigest && record.Snapshot.WorkspaceDigest == preview.WorkspaceDigest {
+		preview.PreviewID = record.Snapshot.PreviewID
+		preview.ResolutionID, preview.ResolvedCount = record.Snapshot.ResolutionID, record.Snapshot.ResolvedCount
+		updated.Resolution = record.Resolution
+	}
 	updated.Snapshot = preview
 	updated.Operation = Operation{ID: mustID(), Kind: "preview", Phase: "complete", Generation: updated.Snapshot.Generation, UpdatedAt: time.Now().UTC()}
 	if err := s.store.Save(ctx, scope, updated, record.Snapshot.Generation); err != nil {
@@ -954,7 +1029,7 @@ func (s *LifecycleService) StopWriterIfActive(ctx context.Context, scope Scope, 
 func (s *LifecycleService) RemoveClean(ctx context.Context, scope Scope, id string) (Snapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	record, err := s.store.Load(ctx, scope, id)
+	record, err := s.removableRecord(ctx, scope, id)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -984,9 +1059,14 @@ func (s *LifecycleService) RemoveClean(ctx context.Context, scope Scope, id stri
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if manifest.Digest != state.BaselineDigest || record.Snapshot.WorkspaceDigest != "" && record.Snapshot.WorkspaceDigest != state.BaselineDigest {
+	if manifest.Digest != state.BaselineDigest {
 		return Snapshot{}, ErrOwnership
 	}
+	return s.removeRecordLocked(ctx, scope, record)
+}
+
+func (s *LifecycleService) removeRecordLocked(ctx context.Context, scope Scope, record Record) (Snapshot, error) {
+	id := record.Snapshot.ID
 	removing := record
 	removing.Snapshot.State = StateRemoving
 	removing.Snapshot.Cursor++

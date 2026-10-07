@@ -83,7 +83,7 @@ func builtins() map[string]Definition {
 	return map[string]Definition{
 		"explore":         {Name: "explore", Description: "Read-only exploration of project files and architecture.", Model: "inherit", Instruction: "Explore the assigned question using read-only project inspection. Report concrete findings and relevant paths.", Source: "builtin", MaxTurns: MaxTurns},
 		"plan":            {Name: "plan", Description: "Read-only analysis and implementation planning.", Model: "inherit", Instruction: "Inspect the project and develop a concrete plan for the assigned task. Identify affected files, dependencies, risks and validation. Do not modify files.", Source: "builtin", MaxTurns: MaxTurns},
-		"general-purpose": {Name: "general-purpose", Description: "General project investigation, limited to read-only tools in M09-D.", Model: "inherit", Instruction: "Investigate the assigned task using read-only project inspection. Return a concise factual summary. This role has no write, command, network or delegation capability.", Source: "builtin", MaxTurns: MaxTurns},
+		"general-purpose": {Name: "general-purpose", Description: "General investigation with read-only tools by default and controlled file edits in worktree isolation.", Model: "inherit", Instruction: "Investigate the assigned task and return a concise factual summary. Use read-only inspection by default. When the host explicitly grants worktree isolation, edits and isolated commands may affect only the assigned checkout. Never write formal project files, use network access or delegate recursively.", Source: "builtin", MaxTurns: MaxTurns},
 	}
 }
 

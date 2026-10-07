@@ -58,3 +58,19 @@ func TestWorktreeLifecycleAndPreviewProtocolShapes(t *testing.T) {
 		}
 	}
 }
+
+func TestTeamResumeRoleChangeAcceptanceProtocolShape(t *testing.T) {
+	session := "0123456789abcdef0123456789abcdef"
+	run := "1123456789abcdef0123456789abcdef"
+	team := "team-1"
+	member := "member-1"
+	valid := ClientMsg{Op: "team_member_resume", SessionID: session, RunID: run, TeamID: team, TeamMemberID: member, TeamAcceptRoleChange: true}
+	if err := validateClient(valid); err != nil {
+		t.Fatalf("valid explicit role acceptance rejected: %v", err)
+	}
+	invalid := valid
+	invalid.Op = "team_member_spawn"
+	if err := validateClient(invalid); err == nil {
+		t.Fatal("role acceptance flag accepted during spawn")
+	}
+}

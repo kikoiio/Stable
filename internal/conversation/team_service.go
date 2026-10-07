@@ -378,7 +378,13 @@ func (s *Service) CloseTeam(ctx context.Context, request agent.ExecutionRequest,
 	if err != nil {
 		return teams.Team{}, err
 	}
-	return s.closeTeamForSession(ctx, root, request.Work.SessionID, teamID, &request.Work)
+	team, err := s.closeTeamForSession(ctx, root, request.Work.SessionID, teamID, &request.Work)
+	if err == nil && s.teamScheduler != nil {
+		for _, cancel := range s.teamScheduler.invalidateTeam(teamID) {
+			cancel()
+		}
+	}
+	return team, err
 }
 
 func (s *Service) closeTeamForSession(ctx context.Context, root, sessionID, teamID string, work *agent.WorkRef) (teams.Team, error) {
@@ -505,6 +511,11 @@ func (s *Service) handleTeamRequest(ctx context.Context, msg ClientMsg) (ServerM
 		return ServerMsg{Type: msg.Op, Team: &team}, getErr
 	case "team_close":
 		team, closeErr := s.closeTeamForSession(ctx, root, msg.SessionID, msg.TeamID, nil)
+		if closeErr == nil && s.teamScheduler != nil {
+			for _, cancel := range s.teamScheduler.invalidateTeam(msg.TeamID) {
+				cancel()
+			}
+		}
 		return ServerMsg{Type: msg.Op, Team: &team}, closeErr
 	case "team_member_spawn", "team_member_resume":
 		request, err = s.activeRunRequest(msg.SessionID, msg.RunID)
@@ -523,6 +534,7 @@ func (s *Service) handleTeamRequest(ctx context.Context, msg ClientMsg) (ServerM
 			member, spawnErr := s.SpawnTeamMember(ctx, request, TeamMemberSpawnRequest{TeamID: msg.TeamID, Name: msg.TeamMemberName, AgentName: msg.AgentName, Instruction: msg.Text, PlanRequired: msg.TeamPlanRequired, OriginCallID: callID})
 			return ServerMsg{Type: msg.Op, TeamMember: &member}, spawnErr
 		}
+		request.AcceptTeamRoleChange = msg.TeamAcceptRoleChange
 		member, resumeErr := s.ResumeTeamMember(ctx, request, msg.TeamID, msg.TeamMemberID, callID)
 		return ServerMsg{Type: msg.Op, TeamMember: &member}, resumeErr
 	case "team_member_stop":

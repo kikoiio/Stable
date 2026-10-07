@@ -106,6 +106,9 @@ func (l DelegationLimits) narrowed(request DelegationLimits) DelegationLimits {
 }
 
 type ParentRun struct {
+	// ChildRunID is assigned by a trusted named-task host before lease creation.
+	// It is only consumed by single-task admission, never by model arguments.
+	ChildRunID       string
 	TeamTurn         *TeamTurnIdentity
 	TeamLifecycle    *TeamRunLifecycle
 	RoleInstruction  string
@@ -216,6 +219,7 @@ type PoolDelegator struct {
 	cancel          context.CancelFunc
 	submitMu        sync.Mutex
 	closed          bool
+	boundRuns       map[string]bool
 	closeOnce       sync.Once
 }
 
@@ -234,6 +238,7 @@ func NewPoolDelegator(limits DelegationLimits, runner ChildRunner, reporter Prog
 		queueSlots:      make(chan struct{}, limits.QueueCapacity),
 		capacityChanged: make(chan struct{}, 1),
 		newID:           randomDelegationID, life: life, cancel: cancel,
+		boundRuns: make(map[string]bool),
 	}
 	for i := 0; i < limits.Workers; i++ {
 		go d.worker()
@@ -405,7 +410,13 @@ func (d *PoolDelegator) SubmitTaskCommitted(ctx context.Context, parent ParentRu
 	if err != nil {
 		return nil, fmt.Errorf("create delegation batch id: %w", err)
 	}
-	childRunID := ""
+	if parent.ChildRunID != "" {
+		decoded, err := hex.DecodeString(parent.ChildRunID)
+		if err != nil || len(decoded) != 16 || parent.ChildRunID != parent.RunID || parent.TeamTurn != nil || d.boundRuns[parent.ChildRunID] {
+			return nil, errors.New("invalid or active prebound child run ID")
+		}
+	}
+	childRunID := parent.ChildRunID
 	if parent.TeamTurn != nil {
 		childRunID, err = d.newID()
 		if err != nil {
@@ -428,6 +439,9 @@ func (d *PoolDelegator) SubmitTaskCommitted(ctx context.Context, parent ParentRu
 	}
 	workCtx, cancel := context.WithCancel(ctx)
 	results := make(chan DelegationResult, 1)
+	if parent.ChildRunID != "" {
+		d.boundRuns[parent.ChildRunID] = true
+	}
 	d.queue <- delegationWork{parent: parent, parentContext: workCtx, cancel: cancel, batchID: batchID, task: task, childRunID: childRunID, result: results}
 	accepted = true
 	return &TaskHandle{BatchID: batchID, TaskID: task.ID, Results: results, Cancel: cancel}, nil
@@ -533,6 +547,11 @@ func (d *PoolDelegator) publish(parentRunID, sessionID string, event DelegationE
 func (d *PoolDelegator) finishWork(work delegationWork, result DelegationResult) {
 	if work.cancel != nil {
 		work.cancel()
+	}
+	if work.parent.ChildRunID != "" {
+		d.submitMu.Lock()
+		delete(d.boundRuns, work.parent.ChildRunID)
+		d.submitMu.Unlock()
 	}
 	work.result <- result
 	close(work.result)

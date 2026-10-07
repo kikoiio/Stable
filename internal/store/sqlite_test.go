@@ -29,7 +29,7 @@ func newGoalStore(t *testing.T) (*Store, string) {
 func TestOpenV4(t *testing.T) {
 	s, _ := newGoalStore(t)
 	var version int
-	if err := s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 13 {
+	if err := s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 14 {
 		t.Fatalf("database version = %d, err = %v", version, err)
 	}
 	for table, column := range map[string]string{"goals": "dependency_revision", "decisions": "dependency_revision"} {
@@ -99,7 +99,7 @@ func TestMigrateV4(t *testing.T) {
 		t.Fatalf("migration wake event: %+v", snapshot.Events)
 	}
 	var version int
-	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 13 {
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 14 {
 		t.Fatalf("migrated version = %d, err = %v", version, err)
 	}
 }
@@ -804,7 +804,7 @@ func TestEvidenceProvenanceRoundtrip(t *testing.T) {
 	s, path := newGoalStore(t)
 	ctx := context.Background()
 	var version int
-	if err := s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 13 {
+	if err := s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 14 {
 		t.Fatalf("fresh database version %d %v", version, err)
 	}
 	rev := 2

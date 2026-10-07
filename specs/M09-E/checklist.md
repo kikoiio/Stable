@@ -46,8 +46,11 @@ E实现与运行验收进行中。每项完成后记录实际证据；D/A/B/C旧
 |---|---|---|---|
 | Go build + `go test ./...` | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [Go run 37640598695](https://github.com/kikoiio/Stable/actions/runs/37640598695), `build-and-test` | 通过；仅证明该 SHA 的全量 Go 检查通过，E AC1–9 仍未完成逐项验收。 |
 | E2E workflow | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [E2E run 37640598926](https://github.com/kikoiio/Stable/actions/runs/37640598926), `unit`, `e2e-core`, `e2e-m03`, `e2e-m04`, `e2e-sessions`, `cases` | 所有 job 通过；现有 workflow 未单独覆盖 checklist 要求的完整 team 多轮/恢复组合，不能据此勾选 AC9。 |
-| Go package acceptance | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [Go run 37640598695](https://github.com/kikoiio/Stable/actions/runs/37640598695), `test-package` | 记录时仍在依赖初始化阶段，尚无结果。 |
+| Go package acceptance | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [Go run 37640598695](https://github.com/kikoiio/Stable/actions/runs/37640598695), `test-package` | 通过；run 总结由 in_progress 更新为 success，job 完成于 2026-10-07 15:16 UTC。仅是预览改动前 SHA 的结果。 |
+| Preview regression first run / repair | `90ed0d7` → `75594bd2c4279c115c18fb5f22c741f868dcfcb5` | [failed Go run 37643405245](https://github.com/kikoiio/Stable/actions/runs/37643405245), `build-and-test`; [repaired Go run 37644076609](https://github.com/kikoiio/Stable/actions/runs/37644076609), `build-and-test` | 首次单测失败仅因 preview lifecycle fixture 未带可信 authority；修复 fixture 后 build 与 `go test ./...` 通过。package job 与 E2E workflow 仍在运行。 |
 
 | 本地定向检查 | 实际结果 | 覆盖范围与限制 |
 |---|---|---|
 | conversation/sessionlog/workspace 定向 Go 测试 | 通过（2026-10-07）；选择 `TestTeam*`、`TestThreeWay*` | 验证FIFO队首阻塞/硬上限、容量等待重启转 interrupted、提交后发布失败补偿、terminal/member-state恢复间隙、team event 投影与三方合并；不是AC2/AC9或全量验收。首次默认`/tmp`链接因配额失败，改用缓存盘`TMPDIR`后通过。 |
+| team conversation/sessionlog 定向 Go 测试 | 通过（2026-10-07）；`TestTeamMemberContinuesAcrossRestartWithExplicitRoleChangeAcceptance`、`TestTeamRecovery*`、`TestTeamRoleMetadataCanChangeOnlyOnExplicitLeadResume`，`TMPDIR=/home/neo/.cache/tmp GOMAXPROCS=2 go test -p 1` | Fake child runner验证同一成员两轮、摘要与消息延续、角色正文未入日志、重启不自动重跑、角色变化先提示后显式接受；recovery把存活idle/awaiting_plan成员标为interrupted。未覆盖共享池屏障/队满公平、双parent取消和完整AC2/AC6。 |
+| team TUI 定向 Go 测试 | 通过（2026-10-07）；`TestTeamCommands`，`TMPDIR=/home/neo/.cache/tmp GOMAXPROCS=2 go test -p 1` | 验证 `/team ... resume ... --accept-role-change` 编码显式确认；不代表完整client/TUI协作路径或AC9。 |

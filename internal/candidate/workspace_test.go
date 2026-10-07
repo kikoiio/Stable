@@ -431,3 +431,7 @@ func TestAcceptRejectsStalePreview(t *testing.T) {
 		t.Fatal("stale preview accepted")
 	}
 }
+
+func (m *memoryAcceptance) SaveAcceptanceRootIdentities(context.Context, string, string, string) error {
+	return nil
+}

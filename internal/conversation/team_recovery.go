@@ -253,6 +253,14 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 	// recovery never leaves a terminal turn displayed as queued/running.
 	for _, member := range projection.Members {
 		if !member.Status.HasTurn() {
+			if member.Status != teams.MemberIdle && member.Status != teams.MemberAwaitingPlan && member.Status != teams.MemberCreated {
+				continue
+			}
+			member.Status = teams.MemberInterrupted
+			member.Revision++
+			if err := appendTeamFactLocked(root, sessionID, member.TeamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: member.OriginRunID, Member: &member}); err != nil {
+				return err
+			}
 			continue
 		}
 		turn, ok := projection.Turns[member.TurnID]

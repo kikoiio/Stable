@@ -289,8 +289,8 @@ func (st *teamScan) checkEvent(sessionID string, e TeamEvent, at time.Time) erro
 			}
 		}
 		if m.RoleHash != prior.RoleHash || m.Model != prior.Model || !reflect.DeepEqual(m.Tools, prior.Tools) {
-			if e.ActorID != teams.Lead || prior.Status != teams.MemberInterrupted {
-				return errors.New("role metadata changes require explicit interrupted-member resume")
+			if e.ActorID != teams.Lead || (prior.Status != teams.MemberIdle && prior.Status != teams.MemberInterrupted && prior.Status != teams.MemberWaitingCapacity) {
+				return errors.New("role metadata changes require explicit member resume")
 			}
 		}
 		if m.Status == teams.MemberRunning || m.Status == teams.MemberQueued || m.Status == teams.MemberStopping {

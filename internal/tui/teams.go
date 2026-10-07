@@ -141,11 +141,13 @@ func registerTeamCommands(host *commandHost, registry *commands.Registry) {
 			req = spawn
 		case "resume":
 			fields := strings.Fields(rest)
-			if len(fields) != 1 || teams.ValidateID(fields[0]) != nil || m.ActiveRunID == "" {
-				m.Status = "用法：/team <ID> resume <成员ID>（需要活动的 lead run）"
+			acceptRoleChange := len(fields) == 2 && fields[1] == "--accept-role-change"
+			if (len(fields) != 1 && !acceptRoleChange) || teams.ValidateID(fields[0]) != nil || m.ActiveRunID == "" {
+				m.Status = "用法：/team <ID> resume <成员ID> [--accept-role-change]（需要活动的 lead run）"
 				return
 			}
 			base.Op, base.RunID, base.TeamMemberID = "team_member_resume", m.ActiveRunID, fields[0]
+			base.TeamAcceptRoleChange = acceptRoleChange
 			req = base
 		default:
 			m.Status = teamUsage()
@@ -156,7 +158,7 @@ func registerTeamCommands(host *commandHost, registry *commands.Registry) {
 }
 
 func teamUsage() string {
-	return "用法：/team <ID> get | members | spawn <成员名> <角色> <任务> [--plan] | resume <成员ID> | stop <成员ID> | tasks [get ID | create 标题 | update ID REVISION status 状态] | messages [游标 [条数]] | requests | send <成员ID|all> <消息> | respond <请求ID> <REVISION> approve|reject|defer [反馈] | shutdown <成员ID>"
+	return "用法：/team <ID> get | members | spawn <成员名> <角色> <任务> [--plan] | resume <成员ID> [--accept-role-change] | stop <成员ID> | tasks [get ID | create 标题 | update ID REVISION status 状态] | messages [游标 [条数]] | requests | send <成员ID|all> <消息> | respond <请求ID> <REVISION> approve|reject|defer [反馈] | shutdown <成员ID>"
 }
 
 func teamMemberSpawnRequest(base conversation.ClientMsg, args, activeRunID string) (conversation.ClientMsg, error) {

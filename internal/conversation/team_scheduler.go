@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,21 +31,42 @@ type TeamMemberSpawnRequest struct {
 	OriginCallID string
 }
 
+type teamParentGrant struct {
+	Request      agent.ExecutionRequest
+	Scope        teams.Scope
+	TeamID       string
+	MemberID     string
+	OriginCallID string
+	Generation   uint64
+}
+
 type teamScheduler struct {
-	service   *Service
-	submitter agent.CommittedTaskSubmitter
-	mu        sync.Mutex
-	drainMu   sync.Mutex
-	active    map[string]context.CancelFunc
-	roles     map[string]agentcatalog.Definition
-	waiting   []func() error
-	wake      chan struct{}
-	done      chan struct{}
-	closed    bool
+	service         *Service
+	submitter       agent.CommittedTaskSubmitter
+	mu              sync.Mutex
+	drainMu         sync.Mutex
+	active          map[string]context.CancelFunc
+	activeOrigin    map[string]string
+	activeMember    map[string]string
+	activeTeam      map[string]string
+	roles           map[string]agentcatalog.Definition
+	waiting         []func() error
+	grants          map[string]teamParentGrant
+	grantGeneration map[string]uint64
+	ready           []string
+	readySet        map[string]bool
+	readyGeneration map[string]uint64
+	wake            chan struct{}
+	done            chan struct{}
+	closed          bool
 }
 
 func newTeamScheduler(service *Service) *teamScheduler {
-	scheduler := &teamScheduler{service: service, active: map[string]context.CancelFunc{}, roles: map[string]agentcatalog.Definition{}, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	scheduler := &teamScheduler{
+		service: service, active: map[string]context.CancelFunc{}, activeOrigin: map[string]string{}, activeMember: map[string]string{}, activeTeam: map[string]string{},
+		roles: map[string]agentcatalog.Definition{}, grants: map[string]teamParentGrant{}, grantGeneration: map[string]uint64{},
+		readySet: map[string]bool{}, readyGeneration: map[string]uint64{}, wake: make(chan struct{}, 1), done: make(chan struct{}),
+	}
 	if service != nil {
 		scheduler.submitter, _ = service.deps.Delegator.(agent.CommittedTaskSubmitter)
 		if scheduler.submitter != nil {
@@ -69,9 +91,9 @@ func (s *teamScheduler) capacityLoop(ctx context.Context) {
 			if !ok {
 				return
 			}
-			s.drainCapacityQueue()
+			s.drainScheduler()
 		case <-s.wake:
-			s.drainCapacityQueue()
+			s.drainScheduler()
 		}
 	}
 }
@@ -126,6 +148,186 @@ func (s *teamScheduler) drainCapacityQueue() {
 	}
 }
 
+func (s *teamScheduler) drainScheduler() {
+	s.drainCapacityQueue()
+	s.drainReadyQueue()
+}
+
+func (s *teamScheduler) drainReadyQueue() {
+	s.drainMu.Lock()
+	defer s.drainMu.Unlock()
+	for {
+		s.mu.Lock()
+		if s.closed || len(s.ready) == 0 {
+			s.mu.Unlock()
+			return
+		}
+		memberID := s.ready[0]
+		s.ready = s.ready[1:]
+		s.readySet[memberID] = false
+		readyGeneration := s.readyGeneration[memberID]
+		grant, hasGrant := s.grants[memberID]
+		s.mu.Unlock()
+		if !hasGrant {
+			continue
+		}
+		root := grant.Scope.ProjectRoot
+		projection, err := sessionlog.ReplayTeams(root, grant.Scope.SessionID, grant.TeamID)
+		if err != nil {
+			s.clearReady(memberID, readyGeneration)
+			continue
+		}
+		member, ok := projection.Members[memberID]
+		if !ok || member.TeamID != grant.TeamID || projection.Teams[grant.TeamID].Status != teams.TeamOpen || member.Status.IsTerminal() || member.Status == teams.MemberAwaitingPlan {
+			s.clearReady(memberID, readyGeneration)
+			continue
+		}
+		if member.Status.HasTurn() || member.Status == teams.MemberWaitingCapacity {
+			continue
+		}
+		_, err = s.service.resumeTeamMemberWithGrant(grant, false)
+		if err != nil {
+			s.clearReady(memberID, readyGeneration)
+			continue
+		}
+		s.clearReady(memberID, readyGeneration)
+	}
+}
+
+func (s *teamScheduler) clearReady(memberID string, generation uint64) {
+	s.mu.Lock()
+	if s.readyGeneration[memberID] == generation {
+		delete(s.readyGeneration, memberID)
+		s.readySet[memberID] = false
+	}
+	s.mu.Unlock()
+}
+
+func (s *teamScheduler) queueReady(memberID string, newSignal bool) {
+	if s == nil || teams.ValidateID(memberID) != nil {
+		return
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	if newSignal {
+		s.readyGeneration[memberID]++
+	}
+	if !s.readySet[memberID] {
+		s.ready = append(s.ready, memberID)
+		s.readySet[memberID] = true
+	}
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+	s.mu.Unlock()
+}
+
+func cleanTeamParentRequest(request agent.ExecutionRequest) agent.ExecutionRequest {
+	request.Intent = ""
+	request.Messages = nil
+	request.ToolSchemas = nil
+	request.AllowedScope = nil
+	request.ResourceBounds = nil
+	request.TeamTurn = nil
+	request.TeamUser = false
+	request.TeamCoordinator = false
+	request.AcceptTeamRoleChange = false
+	request.PermissionBounds = append(json.RawMessage(nil), request.PermissionBounds...)
+	return request
+}
+
+func (s *teamScheduler) rememberParent(request agent.ExecutionRequest, scope teams.Scope, teamID, memberID, callID string) uint64 {
+	if s == nil || request.RunID == "" || request.TeamTurn != nil || request.TeamUser || scope.Validate() != nil || teams.ValidateID(teamID) != nil || teams.ValidateID(memberID) != nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return 0
+	}
+	s.grantGeneration[memberID]++
+	grant := teamParentGrant{Request: cleanTeamParentRequest(request), Scope: scope, TeamID: teamID, MemberID: memberID, OriginCallID: callID, Generation: s.grantGeneration[memberID]}
+	s.grants[memberID] = grant
+	return grant.Generation
+}
+
+func (s *teamScheduler) currentParent(memberID string, generation uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	grant, ok := s.grants[memberID]
+	return ok && grant.Generation == generation
+}
+
+func (s *teamScheduler) invalidateMember(memberID string) context.CancelFunc {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.grantGeneration[memberID]++
+	delete(s.grants, memberID)
+	s.readyGeneration[memberID]++
+	s.readySet[memberID] = false
+	for turnID, activeMember := range s.activeMember {
+		if activeMember == memberID {
+			return s.active[turnID]
+		}
+	}
+	return nil
+}
+
+func (s *teamScheduler) invalidateTeam(teamID string) []context.CancelFunc {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for memberID, grant := range s.grants {
+		if grant.TeamID == teamID {
+			s.grantGeneration[memberID]++
+			delete(s.grants, memberID)
+			s.readyGeneration[memberID]++
+			s.readySet[memberID] = false
+		}
+	}
+	var cancels []context.CancelFunc
+	for turnID, activeTeam := range s.activeTeam {
+		if activeTeam == teamID {
+			if cancel := s.active[turnID]; cancel != nil {
+				cancels = append(cancels, cancel)
+			}
+		}
+	}
+	return cancels
+}
+
+func (s *teamScheduler) invalidateParentRun(runID string) []context.CancelFunc {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for memberID, grant := range s.grants {
+		if grant.Request.RunID == runID {
+			s.grantGeneration[memberID]++
+			delete(s.grants, memberID)
+			s.readyGeneration[memberID]++
+			s.readySet[memberID] = false
+		}
+	}
+	var cancels []context.CancelFunc
+	for turnID, originRunID := range s.activeOrigin {
+		if originRunID == runID {
+			if cancel := s.active[turnID]; cancel != nil {
+				cancels = append(cancels, cancel)
+			}
+		}
+	}
+	return cancels
+}
+
+func (s *teamScheduler) signalFromLead(request agent.ExecutionRequest, scope teams.Scope, teamID, memberID, callID string) {
+	if request.TeamTurn == nil && !request.TeamUser && request.RunID != "" {
+		s.rememberParent(request, scope, teamID, memberID, callID)
+	}
+	s.queueReady(memberID, true)
+}
+
 func (s *teamScheduler) close() {
 	if s == nil {
 		return
@@ -138,6 +340,10 @@ func (s *teamScheduler) close() {
 	s.closed = true
 	close(s.done)
 	s.waiting = nil
+	s.ready = nil
+	s.readySet = map[string]bool{}
+	s.readyGeneration = map[string]uint64{}
+	s.grants = map[string]teamParentGrant{}
 	cancels := make([]context.CancelFunc, 0, len(s.active))
 	for _, cancel := range s.active {
 		cancels = append(cancels, cancel)
@@ -224,7 +430,7 @@ func (s *Service) SpawnTeamMember(ctx context.Context, request agent.ExecutionRe
 	if err != nil {
 		return teams.Member{}, err
 	}
-	roleHash := sha256.Sum256([]byte(definition.Instruction))
+	roleHash := teamRoleHash(definition)
 	member := teams.Member{
 		ID: memberID, TeamID: team.ID, Name: name, AgentName: definition.Name,
 		RoleHash: hex.EncodeToString(roleHash[:]),
@@ -299,7 +505,7 @@ func (s *Service) SpawnTeamMember(ctx context.Context, request agent.ExecutionRe
 			return nil
 		},
 	}
-	accepted, err := s.submitTeamMember(ctx, root, scope, team, member, request, parent, input, &startedAt, &runSeq, &durableTerminal, &durableResult, false, nil, false)
+	accepted, err := s.submitTeamMember(ctx, root, scope, team, member, request, parent, input, &startedAt, &runSeq, &durableTerminal, &durableResult, false, nil, false, 0)
 	if err != nil {
 		return teams.Member{}, err
 	}
@@ -315,6 +521,19 @@ func (s *Service) SpawnTeamMember(ctx context.Context, request agent.ExecutionRe
 // batch, and persists accepted handoffs before the reserved pool slot is made
 // visible to a worker.
 func (s *Service) ResumeTeamMember(ctx context.Context, request agent.ExecutionRequest, teamID, memberID, originCallID string) (teams.Member, error) {
+	return s.resumeTeamMember(ctx, request, teamID, memberID, originCallID, 0)
+}
+
+func (s *Service) resumeTeamMemberWithGrant(grant teamParentGrant, acceptRoleChange bool) (teams.Member, error) {
+	if s == nil || s.teamScheduler == nil || !s.teamScheduler.currentParent(grant.MemberID, grant.Generation) {
+		return teams.Member{}, teams.ErrPermission
+	}
+	request := grant.Request
+	request.AcceptTeamRoleChange = acceptRoleChange
+	return s.resumeTeamMember(s.lifeCtx, request, grant.TeamID, grant.MemberID, grant.OriginCallID, grant.Generation)
+}
+
+func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionRequest, teamID, memberID, originCallID string, grantGeneration uint64) (teams.Member, error) {
 	if s == nil || s.teamScheduler == nil || s.teamScheduler.submitter == nil {
 		return teams.Member{}, errors.New("team member scheduler is unavailable")
 	}
@@ -324,9 +543,20 @@ func (s *Service) ResumeTeamMember(ctx context.Context, request agent.ExecutionR
 	if request.TeamUser || request.TeamTurn != nil || request.RunID == "" || teams.ValidateText(originCallID, 256, true) != nil {
 		return teams.Member{}, teams.ErrPermission
 	}
-	root, scope, actor, err := s.teamOperationScope(ctx, request)
-	if err != nil || !actor.Lead {
-		return teams.Member{}, teams.ErrPermission
+	var root string
+	var scope teams.Scope
+	var actor teams.Actor
+	if grantGeneration == 0 {
+		root, scope, actor, err = s.teamOperationScope(ctx, request)
+		if err != nil || !actor.Lead {
+			return teams.Member{}, teams.ErrPermission
+		}
+	} else {
+		root, scope, err = s.teamScope(ctx, request)
+		if err != nil || !s.teamScheduler.currentParent(memberID, grantGeneration) {
+			return teams.Member{}, teams.ErrPermission
+		}
+		actor = teams.Actor{Lead: true}
 	}
 	if err := validateTeamLeadAuthority(request, scope); err != nil {
 		return teams.Member{}, err
@@ -345,9 +575,24 @@ func (s *Service) ResumeTeamMember(ctx context.Context, request agent.ExecutionR
 	if err := member.Budget.CanAccept(); err != nil {
 		return teams.Member{}, err
 	}
-	definition, err := s.teamMemberRoleSnapshot(member)
+	if grantGeneration == 0 {
+		grantGeneration = s.teamScheduler.rememberParent(request, scope, team.ID, member.ID, originCallID)
+		if grantGeneration == 0 {
+			return teams.Member{}, teams.ErrPermission
+		}
+	}
+	s.teamScheduler.mu.Lock()
+	readyGeneration := s.teamScheduler.readyGeneration[memberID]
+	s.teamScheduler.mu.Unlock()
+	definition, err := s.teamMemberRoleSnapshot(member, request.AcceptTeamRoleChange)
 	if err != nil {
 		return teams.Member{}, err
+	}
+	roleHash := teamRoleHash(definition)
+	member.RoleHash = hex.EncodeToString(roleHash[:])
+	member.Tools = definition.EffectiveTools()
+	if definition.Model != "" && definition.Model != "inherit" {
+		member.Model = definition.Model
 	}
 	turnID, err := sessionlog.NewID()
 	if err != nil {
@@ -417,7 +662,7 @@ func (s *Service) ResumeTeamMember(ctx context.Context, request agent.ExecutionR
 			return nil
 		},
 	}
-	accepted, err := s.submitTeamMember(ctx, root, scope, team, member, request, parent, task, &startedAt, &runSeq, &durableTerminal, &durableResult, true, handoffs, false)
+	accepted, err := s.submitTeamMember(ctx, root, scope, team, member, request, parent, task, &startedAt, &runSeq, &durableTerminal, &durableResult, true, handoffs, false, grantGeneration)
 	if errors.Is(err, agent.ErrDelegationQueueFull) {
 		waiting, waitErr := s.markMemberWaitingCapacity(root, request.Work.SessionID, team.ID, member)
 		if waitErr != nil {
@@ -434,7 +679,11 @@ func (s *Service) ResumeTeamMember(ctx context.Context, request agent.ExecutionR
 		queuedRequest.ResourceBounds = nil
 		queuedRequest.ToolSchemas = nil
 		deferred := func() error {
-			_, retryErr := s.submitTeamMember(s.lifeCtx, root, scope, team, member, queuedRequest, parent, task, &startedAt, &runSeq, &durableTerminal, &durableResult, true, handoffs, true)
+			if !s.teamScheduler.currentParent(member.ID, grantGeneration) {
+				_ = s.restoreCapacityWaiter(root, queuedRequest.Work.SessionID, team.ID, member.ID)
+				return nil
+			}
+			_, retryErr := s.submitTeamMember(s.lifeCtx, root, scope, team, member, queuedRequest, parent, task, &startedAt, &runSeq, &durableTerminal, &durableResult, true, handoffs, true, grantGeneration)
 			if retryErr != nil && !errors.Is(retryErr, agent.ErrDelegationQueueFull) {
 				_ = s.restoreCapacityWaiter(root, queuedRequest.Work.SessionID, team.ID, member.ID)
 			}
@@ -444,6 +693,7 @@ func (s *Service) ResumeTeamMember(ctx context.Context, request agent.ExecutionR
 			_ = s.restoreCapacityWaiter(root, request.Work.SessionID, team.ID, member.ID)
 			return teams.Member{}, enqueueErr
 		}
+		s.teamScheduler.clearReady(memberID, readyGeneration)
 		return member, nil
 	}
 	if err != nil {
@@ -452,6 +702,7 @@ func (s *Service) ResumeTeamMember(ctx context.Context, request agent.ExecutionR
 	s.teamScheduler.mu.Lock()
 	s.teamScheduler.roles[member.ID] = definition
 	s.teamScheduler.mu.Unlock()
+	s.teamScheduler.clearReady(memberID, readyGeneration)
 	return accepted, nil
 }
 
@@ -463,24 +714,58 @@ func validateTeamLeadAuthority(request agent.ExecutionRequest, scope teams.Scope
 	return nil
 }
 
-func (s *Service) teamMemberRoleSnapshot(member teams.Member) (agentcatalog.Definition, error) {
+func (s *Service) teamMemberRoleSnapshot(member teams.Member, acceptChange bool) (agentcatalog.Definition, error) {
 	s.teamScheduler.mu.Lock()
 	definition, ok := s.teamScheduler.roles[member.ID]
 	s.teamScheduler.mu.Unlock()
-	if !ok {
-		if s.deps.Agents == nil {
-			return agentcatalog.Definition{}, errors.New("original team member role snapshot is unavailable")
-		}
-		definition, ok = s.deps.Agents.Resolve(member.AgentName)
-		if !ok {
-			return agentcatalog.Definition{}, errors.New("original team member role is no longer available")
+	pinned := definition
+	hasPinned := ok
+	if s.deps.Agents != nil {
+		if current, found := s.deps.Agents.Resolve(member.AgentName); found {
+			definition, ok = current, true
 		}
 	}
-	hash := sha256.Sum256([]byte(definition.Instruction))
-	if definition.Name != member.AgentName || hex.EncodeToString(hash[:]) != member.RoleHash || !sameStringList(definition.EffectiveTools(), member.Tools) || (definition.Model != "" && definition.Model != "inherit" && definition.Model != member.Model) {
-		return agentcatalog.Definition{}, errors.New("original team member role changed; spawn a new member to use the updated role")
+	if !ok {
+		return agentcatalog.Definition{}, errors.New("original team member role is no longer available")
+	}
+	if hasPinned {
+		pinnedHash := teamRoleHash(pinned)
+		if hex.EncodeToString(pinnedHash[:]) == member.RoleHash {
+			definition = pinned
+		}
+	}
+	hash := teamRoleHash(definition)
+	changed := hex.EncodeToString(hash[:]) != member.RoleHash || !sameStringList(definition.EffectiveTools(), member.Tools) || (definition.Model != "" && definition.Model != "inherit" && definition.Model != member.Model)
+	if definition.Name != member.AgentName || len(definition.EffectiveTools()) == 0 {
+		return agentcatalog.Definition{}, errors.New("original team member role is unavailable or no longer has permitted inspection tools")
+	}
+	if changed && !acceptChange {
+		model := definition.Model
+		if model == "" || model == "inherit" {
+			model = member.Model
+		}
+		changes := []string{"role definition fingerprint"}
+		if model != member.Model {
+			changes = append(changes, fmt.Sprintf("model %s -> %s", member.Model, model))
+		}
+		if !sameStringList(definition.EffectiveTools(), member.Tools) {
+			changes = append(changes, fmt.Sprintf("tools %v -> %v", member.Tools, definition.EffectiveTools()))
+		}
+		return agentcatalog.Definition{}, fmt.Errorf("team member role changed (%s); role instructions are not persisted, inspect the current %q definition and resume with --accept-role-change to accept it", strings.Join(changes, "; "), member.AgentName)
 	}
 	return definition, nil
+}
+
+func teamRoleHash(definition agentcatalog.Definition) [32]byte {
+	encoded, _ := json.Marshal(struct {
+		Name        string   `json:"name"`
+		Instruction string   `json:"instruction"`
+		Model       string   `json:"model"`
+		Tools       []string `json:"tools"`
+		MaxTurns    int      `json:"max_turns"`
+		Isolation   string   `json:"isolation"`
+	}{definition.Name, definition.Instruction, definition.Model, definition.EffectiveTools(), definition.MaxTurns, definition.Isolation})
+	return sha256.Sum256(encoded)
 }
 
 func sameStringList(left, right []string) bool {
@@ -548,7 +833,7 @@ func resumableMemberTasks(projection sessionlog.TeamProjection, teamID, memberID
 	return out, nil
 }
 
-func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams.Scope, team teams.Team, member teams.Member, request agent.ExecutionRequest, parent agent.ParentRun, task agent.DelegationTask, startedAt *time.Time, runSeq *uint64, durableTerminal *bool, durableResult *agent.ChildRunResult, memberExists bool, handoffs []sessionlog.HandoffFact, waitingRetry bool) (teams.Member, error) {
+func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams.Scope, team teams.Team, member teams.Member, request agent.ExecutionRequest, parent agent.ParentRun, task agent.DelegationTask, startedAt *time.Time, runSeq *uint64, durableTerminal *bool, durableResult *agent.ChildRunResult, memberExists bool, handoffs []sessionlog.HandoffFact, waitingRetry bool, grantGeneration uint64) (teams.Member, error) {
 	turnID := parent.TeamTurn.TurnID
 	messageIDs := make([]string, 0, len(handoffs))
 	for _, handoff := range handoffs {
@@ -579,8 +864,14 @@ func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams
 		if s.teamScheduler.closed {
 			return errors.New("team member scheduler is closed")
 		}
-		if !waitingRetry && !s.activeLeadRun(request) {
+		if grantGeneration == 0 && !waitingRetry && !s.activeLeadRun(request) {
 			return teams.ErrPermission
+		}
+		if grantGeneration != 0 {
+			grant, ok := s.teamScheduler.grants[member.ID]
+			if !ok || grant.Generation != grantGeneration || grant.TeamID != team.ID || !grant.Scope.Matches(scope) || grant.Request.RunID != request.RunID {
+				return teams.ErrPermission
+			}
 		}
 		current, currentProjection, checkErr := s.teamForOperation(root, scope, team.ID, teams.Actor{Lead: true})
 		if checkErr != nil || current.Status != teams.TeamOpen {
@@ -591,6 +882,20 @@ func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams
 			allowedStatus := currentMember.Status == teams.MemberIdle || currentMember.Status == teams.MemberInterrupted || waitingRetry && currentMember.Status == teams.MemberWaitingCapacity
 			if !found || currentMember.Revision != member.Revision || currentMember.Status != member.Status || currentMember.TeamID != team.ID || !allowedStatus {
 				return teams.ErrPermission
+			}
+			roleChanged := currentMember.RoleHash != member.RoleHash || currentMember.Model != member.Model || !sameStringList(currentMember.Tools, member.Tools)
+			if roleChanged {
+				if !request.AcceptTeamRoleChange || (currentMember.Status != teams.MemberIdle && currentMember.Status != teams.MemberInterrupted && currentMember.Status != teams.MemberWaitingCapacity) {
+					return teams.ErrPermission
+				}
+				member.Status = currentMember.Status
+				member.RunID, member.TurnID = currentMember.RunID, currentMember.TurnID
+				member.Revision = currentMember.Revision + 1
+				if err := appendTeamFactLocked(root, scope.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: teams.Lead, ActorRunID: request.RunID, Member: &member}); err != nil {
+					return err
+				}
+			} else {
+				member = currentMember
 			}
 		} else {
 			if found {
@@ -650,9 +955,17 @@ func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams
 	}
 	s.teamScheduler.mu.Lock()
 	s.teamScheduler.active[turnID] = handle.Cancel
+	s.teamScheduler.activeOrigin[turnID] = request.RunID
+	s.teamScheduler.activeMember[turnID] = member.ID
+	s.teamScheduler.activeTeam[turnID] = team.ID
 	closed = s.teamScheduler.closed
+	grantCurrent := grantGeneration == 0
+	if grantGeneration != 0 {
+		grant, ok := s.teamScheduler.grants[member.ID]
+		grantCurrent = ok && grant.Generation == grantGeneration
+	}
 	s.teamScheduler.mu.Unlock()
-	if closed {
+	if closed || !grantCurrent {
 		handle.Cancel()
 	}
 	go s.watchTeamMember(root, scope.SessionID, team.ID, member.ID, turnID, handle, startedAt, durableTerminal, durableResult)
@@ -754,6 +1067,9 @@ func (s *Service) watchTeamMember(root, sessionID, teamID, memberID, turnID stri
 	defer func() {
 		s.teamScheduler.mu.Lock()
 		delete(s.teamScheduler.active, turnID)
+		delete(s.teamScheduler.activeOrigin, turnID)
+		delete(s.teamScheduler.activeMember, turnID)
+		delete(s.teamScheduler.activeTeam, turnID)
 		s.teamScheduler.mu.Unlock()
 	}()
 	_, ok := <-handle.Results

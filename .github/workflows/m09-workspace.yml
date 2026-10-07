@@ -1,0 +1,58 @@
+name: M09 Workspace Linux
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/m09-ef-worktree-validation-20261007']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m09-workspace-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  writer-sandbox-volume:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Install disposable fixture dependencies
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap e2fsprogs
+      - name: Compile fake-model acceptance and real helper
+        run: |
+          mkdir -p "$RUNNER_TEMP/m09-binaries"
+          go build -o "$RUNNER_TEMP/m09-binaries/agentworker" ./cmd/agentworker
+          go test -c -o "$RUNNER_TEMP/m09-binaries/conversation.test" ./internal/conversation
+          go test -c -o "$RUNNER_TEMP/m09-binaries/sandbox.test" ./internal/platform/sandbox
+      - name: Exercise writer isolation and actual bounded disk exhaustion
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture_dir=$(mktemp -d "$RUNNER_TEMP/m09-volume.XXXXXX")
+          fixture_loop=''
+          cleanup() {
+            if mountpoint -q "$fixture_dir/mount"; then sudo umount "$fixture_dir/mount"; fi
+            if [ -n "$fixture_loop" ]; then sudo losetup -d "$fixture_loop"; fi
+            sudo rm -rf "$fixture_dir"
+          }
+          trap cleanup EXIT
+          mkdir "$fixture_dir/mount"
+          truncate -s 96M "$fixture_dir/disk.img"
+          mkfs.ext4 -q -F "$fixture_dir/disk.img"
+          fixture_loop=$(sudo losetup --find --show "$fixture_dir/disk.img")
+          sudo mount -t ext4 -o nodev,nosuid "$fixture_loop" "$fixture_dir/mount"
+          sudo env STABLE_M09_VOLUME="$fixture_dir/mount" \
+            "$RUNNER_TEMP/m09-binaries/sandbox.test" \
+            -test.run '^TestWorkspaceRealVolumeQuotaAndMetadataAttacks$' -test.v -test.timeout 2m
+          sudo env STABLE_M09_VOLUME="$fixture_dir/mount" \
+            STABLE_M09_WRITER_HELPER="$RUNNER_TEMP/m09-binaries/agentworker" \
+            "$RUNNER_TEMP/m09-binaries/conversation.test" \
+            -test.run '^TestWorkspaceWriterRealSyncBackgroundDefinitionAndDirect$' -test.v -test.timeout 6m
+      - name: Verify bounded contracts, stop settlement and compatibility
+        run: go test ./internal/execution ./internal/agent ./internal/agentcatalog ./internal/workspace ./internal/sessionlog ./internal/teams

@@ -136,7 +136,13 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	if _, err = db.Exec(`PRAGMA user_version = 13`); err != nil {
+	if version < 14 {
+		if err = migrateV14(db); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if _, err = db.Exec(`PRAGMA user_version = 14`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -1931,4 +1937,18 @@ func (s *Store) UpdateStatusForToken(ctx context.Context, token core.Verificatio
 		return false, err
 	}
 	return true, nil
+}
+
+func migrateV14(db *sql.DB) error {
+	for _, table := range []string{"acceptance_apply_journal", "rewind_journal"} {
+		for _, column := range []string{"expected_root_identity", "target_root_identity"} {
+			if !hasColumn(db, table, column) {
+				if _, err := db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " TEXT NOT NULL DEFAULT ''"); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	_, err := db.Exec(`PRAGMA user_version=14`)
+	return err
 }

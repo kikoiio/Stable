@@ -96,9 +96,17 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		outcome.Content = "Error: child run only permits read_file, glob, and grep"
 		return e.finish(outcome, started), nil
 	}
-	if e.deps.WorkspaceLease != nil && call.Name != "read_file" && call.Name != "glob" && call.Name != "grep" && call.Name != "write_file" && call.Name != "edit_file" {
-		outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace child only permits bounded file tools"
+	if e.deps.WorkspaceLease != nil && call.Name != "read_file" && call.Name != "glob" && call.Name != "grep" && call.Name != "write_file" && call.Name != "edit_file" && call.Name != "command" {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace child only permits bounded file tools and isolated command"
 		return e.finish(outcome, started), nil
+	}
+	if e.deps.WorkspaceLease != nil {
+		leaseCheck, leaseErr := e.deps.WorkspaceAccounting.ReserveWriterWrite(ctx, *e.deps.WorkspaceLease, 0)
+		if leaseErr != nil {
+			outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace writer lease is stale or blocked"
+			return e.finish(outcome, started), nil
+		}
+		leaseCheck.Release()
 	}
 	if len(call.Arguments) != 0 {
 		if err = json.Unmarshal(call.Arguments, &args); err != nil {
@@ -206,7 +214,7 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 			}
 		}
 		if e.deps.WorkspaceLease != nil {
-			growth, estimateErr := estimateWorkspaceWrite(args, call.Name)
+			growth, estimateErr := e.estimateWorkspaceWrite(args, call.Name, rel)
 			if estimateErr != nil {
 				outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace write exceeds file limits"
 				return e.finish(outcome, started), nil
@@ -216,6 +224,18 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 				outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace quota or writer lease rejected the change"
 				return e.finish(outcome, started), nil
 			}
+		}
+	}
+	if kind == permission.OpCommand && e.deps.WorkspaceLease != nil {
+		used, usageErr := workspace.DiskUsage(ctx, e.deps.WorkspaceLease.Paths.Root, workspace.DefaultLimits())
+		if usageErr != nil {
+			outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace usage unavailable"
+			return e.finish(outcome, started), nil
+		}
+		writeReservation, err = e.deps.WorkspaceAccounting.ReserveWriterWrite(ctx, *e.deps.WorkspaceLease, workspace.DefaultLimits().MaxWorkspaceBytes-used)
+		if err != nil {
+			outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace command budget unavailable"
+			return e.finish(outcome, started), nil
 		}
 	}
 	// Checkpoint the candidate before any file-changing call. A blocked
@@ -241,6 +261,17 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		response, err = e.executeCommand(ctx, args)
 	} else {
 		response, diff, err = e.executeHelper(ctx, call.Name, tool, args, rel)
+	}
+
+	if writeReservation != nil {
+		settleCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		commitErr := writeReservation.Commit(settleCtx)
+		cancel()
+		reservationSettled = true
+		if commitErr != nil {
+			outcome.Status, outcome.Content = agent.ToolFailed, "Error: workspace write settlement failed; writer is blocked"
+			return e.finish(outcome, started), err
+		}
 	}
 	if err != nil {
 		if errors.Is(err, sandbox.ErrUnavailable) {
@@ -272,14 +303,7 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 				outcome.Content += "\nError: post-change snapshot failed; candidate is blocked from further writes and acceptance"
 			}
 		}
-		if kind == permission.OpWrite && !outcome.IsError && writeReservation != nil {
-			if commitErr := writeReservation.Commit(ctx); commitErr != nil {
-				outcome.Status, outcome.IsError = agent.ToolFailed, true
-				outcome.Content += "\nError: workspace usage could not be committed; writer is blocked"
-			} else {
-				reservationSettled = true
-			}
-		}
+
 	}
 	return e.finish(outcome, started), nil
 }
@@ -363,6 +387,12 @@ func (e *toolRunExecutor) mapTool(name string, args map[string]any) (helperName 
 		if command, _ := args["command"].(string); strings.TrimSpace(command) == "" {
 			return "", "", "", "", errors.New("command is required")
 		}
+		if e.deps.WorkspaceLease != nil {
+			lease := e.deps.WorkspaceLease
+			if err := sandbox.BoundedWorkspaceVolume(lease.Paths.Root, lease.Paths.Baseline, lease.Paths.Repository, lease.Paths.Checkout, lease.Paths.Run); err != nil {
+				return "", "", "", "", err
+			}
+		}
 		return "", permission.OpCommand, "Command", "", nil
 	default:
 		return "", "", "", "", fmt.Errorf("unknown tool %q", name)
@@ -409,6 +439,9 @@ func cleanArg(args map[string]any, key, fallback string) (string, error) {
 
 func (e *toolRunExecutor) checkMappedPath(kind permission.OperationKind, rel string) error {
 	root := e.authority.AllowedRoot
+	if e.deps.WorkspaceLease != nil {
+		root = e.authority.CandidateRoot
+	}
 	if kind == permission.OpWrite {
 		root = e.authority.CandidateRoot
 		if e.candidate != nil {
@@ -476,7 +509,7 @@ func (e *toolRunExecutor) ensureCandidate(ctx context.Context) error {
 	return nil
 }
 
-func estimateWorkspaceWrite(args map[string]any, name string) (int64, error) {
+func (e *toolRunExecutor) estimateWorkspaceWrite(args map[string]any, name, rel string) (int64, error) {
 	var size int
 	switch name {
 	case "write_file":
@@ -490,7 +523,23 @@ func estimateWorkspaceWrite(args map[string]any, name string) (int64, error) {
 		if !ok {
 			return 0, workspace.ErrOwnership
 		}
-		size = len(content)
+		old, ok := args["old_string"].(string)
+		if !ok || old == "" {
+			return 0, workspace.ErrOwnership
+		}
+		info, err := os.Lstat(filepath.Join(e.authority.CandidateRoot, rel))
+		if err != nil || !info.Mode().IsRegular() || info.Size() > workspace.DefaultLimits().MaxFileBytes {
+			return 0, workspace.ErrQuota
+		}
+		data, err := os.ReadFile(filepath.Join(e.authority.CandidateRoot, rel))
+		if err != nil {
+			return 0, err
+		}
+		replacements := strings.Count(string(data), old)
+		if all, _ := args["replace_all"].(bool); !all && replacements > 1 {
+			replacements = 1
+		}
+		size = len(data) + replacements*(len(content)-len(old))
 	default:
 		return 0, workspace.ErrOwnership
 	}
@@ -539,12 +588,16 @@ func (e *toolRunExecutor) executeHelper(ctx context.Context, modelName, helper s
 	// persistent session bounds remain unchanged.
 	profileAuthority := e.authority
 	profileAuthority.CandidateRoot = candidateMount
+	if e.deps.WorkspaceLease != nil && (helper == "ReadFile" || helper == "Glob" || helper == "Grep") {
+		profileAuthority.AllowedRoot = e.authority.CandidateRoot
+	}
 	profile, err := OneShotSandboxProfile(ctx, profileAuthority, e.runRoot, helperAbs, toolRunTimeout, 1<<20, nil)
 	if err != nil {
 		return "", nil, err
 	}
-	profile.ReadOnlyMounts = []sandbox.ReadOnlyMount{{HostPath: filepath.Dir(helperAbs), GuestPath: "/workspace/runtime"}}
-	result, err := e.deps.Sandbox.RunIsolated(ctx, profile, []string{"/workspace/runtime/" + filepath.Base(helperAbs), "--stable-tool-exec"}, bytes.NewReader(append(request, '\n')))
+	profile.ReadOnlyFiles = []sandbox.ReadOnlyFileMount{{HostPath: helperAbs, GuestPath: "/workspace/runtime/agentworker"}}
+	profile.WorkspaceIsolation = e.deps.WorkspaceLease != nil
+	result, err := e.deps.Sandbox.RunIsolated(ctx, profile, []string{"/workspace/runtime/agentworker", "--stable-tool-exec"}, bytes.NewReader(append(request, '\n')))
 	if err != nil {
 		return "", nil, err
 	}
@@ -584,9 +637,17 @@ func (e *toolRunExecutor) executeCommand(ctx context.Context, args map[string]an
 			return "", err
 		}
 	}
-	profile, err := OneShotSandboxProfile(ctx, e.authority, e.runRoot, helperPath, commandTimeoutFor(args), 1<<20, nil)
+	timeout := commandTimeoutFor(args)
+	if e.deps.WorkspaceLease != nil {
+		timeout = min(timeout, 90*time.Second)
+	}
+	profile, err := OneShotSandboxProfile(ctx, e.authority, e.runRoot, helperPath, timeout, 1<<20, nil)
 	if err != nil {
 		return "", err
+	}
+	if e.deps.WorkspaceLease != nil {
+		profile.WorkspaceIsolation = true
+		profile.WorkspaceVolumeRoot = e.deps.WorkspaceLease.Paths.Root
 	}
 	result, err := e.deps.Sandbox.RunIsolated(ctx, profile, []string{"bash", "-c", command}, nil)
 	if err != nil {

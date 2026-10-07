@@ -75,12 +75,14 @@ func agentTUIFixture(t *testing.T) Model {
 
 func TestAgentCommandsUseServerOwnedScopeAndPreserveParent(t *testing.T) {
 	for _, tc := range []struct {
-		line, operation, name, instruction, task string
-		after                                    uint64
+		line, operation, name, instruction, task, isolation string
+		after                                               uint64
 	}{
 		{line: "/agents", operation: "agent_list"},
 		{line: "/agents reload", operation: "agent_reload"},
 		{line: "/agent explore inspect\n  the architecture", operation: "agent_task_start", name: "explore", instruction: "inspect\n  the architecture"},
+		{line: "/agent --worktree general-purpose edit the file", operation: "agent_task_start", name: "general-purpose", instruction: "edit the file", isolation: "worktree"},
+		{line: "/agent general-purpose explain --worktree syntax", operation: "agent_task_start", name: "general-purpose", instruction: "explain --worktree syntax"},
 		{line: "/tasks", operation: "agent_task_list"},
 		{line: "/tasks next", operation: "agent_task_list", after: 41},
 		{line: "/tasks get task-1", operation: "agent_task_get", task: "task-1"},
@@ -102,7 +104,7 @@ func TestAgentCommandsUseServerOwnedScopeAndPreserveParent(t *testing.T) {
 				t.Fatal(response.err)
 			}
 			request := agentFixtureRequest(t, requests)
-			if request.Op != tc.operation || request.SessionID != "session" || request.ProjectRoot != "" || request.RunID != "" || request.Run != nil || request.AgentName != tc.name || request.Text != tc.instruction || request.TaskID != tc.task || request.AfterSeq != tc.after {
+			if request.Isolation != tc.isolation || request.Op != tc.operation || request.SessionID != "session" || request.ProjectRoot != "" || request.RunID != "" || request.Run != nil || request.AgentName != tc.name || request.Text != tc.instruction || request.TaskID != tc.task || request.AfterSeq != tc.after {
 				t.Fatalf("command request=%+v", request)
 			}
 			if request.Op == "agent_task_start" && !request.Background {
@@ -113,7 +115,7 @@ func TestAgentCommandsUseServerOwnedScopeAndPreserveParent(t *testing.T) {
 }
 
 func TestAgentCommandsRejectInvalidUsage(t *testing.T) {
-	for _, line := range []string{"/agents unknown", "/agent", "/agent explore", "/tasks invalid", "/tasks stop", "/tasks get a b"} {
+	for _, line := range []string{"/agents unknown", "/agent", "/agent explore", "/agent --worktree", "/agent --worktree builder", "/tasks invalid", "/tasks stop", "/tasks get a b"} {
 		m := agentTUIFixture(t)
 		m.Composer.SetValue(line)
 		updated, command := m.submitComposer()

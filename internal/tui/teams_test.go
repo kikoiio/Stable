@@ -16,6 +16,7 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 		broadcast                                          bool
 		planRequired                                       bool
 		coordinatorOn                                      bool
+		acceptRoleChange                                   bool
 	}{
 		{line: "/teams list", op: "team_list"},
 		{line: "/teams coordinator on", op: "team_coordinator", coordinatorOn: true},
@@ -32,6 +33,7 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 		{line: "/team team-1 shutdown member-1", op: "team_shutdown_request", teamID: "team-1"},
 		{line: "/team team-1 spawn reader explore inspect changes --plan", op: "team_member_spawn", teamID: "team-1", runID: "parent", memberName: "reader", agentName: "explore", text: "inspect changes", planRequired: true},
 		{line: "/team team-1 resume member-1", op: "team_member_resume", teamID: "team-1", runID: "parent", memberID: "member-1"},
+		{line: "/team team-1 resume member-1 --accept-role-change", op: "team_member_resume", teamID: "team-1", runID: "parent", memberID: "member-1", acceptRoleChange: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.line, func(t *testing.T) {
@@ -70,6 +72,9 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 			}
 			if tc.op == "team_member_resume" && request.TeamMemberID != tc.memberID {
 				t.Fatalf("member resume request=%+v", request)
+			}
+			if request.TeamAcceptRoleChange != tc.acceptRoleChange {
+				t.Fatalf("role change acceptance=%v, want %v", request.TeamAcceptRoleChange, tc.acceptRoleChange)
 			}
 			if tc.op == "team_send" {
 				if request.Text != tc.text || request.TeamRecipient != tc.recipient || request.TeamBroadcast != tc.broadcast || request.TeamToken == "" {

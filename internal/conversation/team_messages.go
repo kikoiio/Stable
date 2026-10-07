@@ -114,6 +114,11 @@ func (s *Service) SendTeamMessage(ctx context.Context, request agent.ExecutionRe
 		return teams.Message{}, err
 	}
 	message.Seq = event.Seq
+	if actor.Lead && s.teamScheduler != nil {
+		for _, memberID := range recipients {
+			s.teamScheduler.signalFromLead(request, scope, team.ID, memberID, args.Token)
+		}
+	}
 	return message, nil
 }
 

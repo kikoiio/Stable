@@ -67,7 +67,7 @@ func TestWorktreeIsolationEnablesOnlyBoundedFileTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"edit_file", "glob", "grep", "read_file", "write_file"}
+	want := []string{"command", "edit_file", "glob", "grep", "read_file", "write_file"}
 	if got := d.EffectiveTools(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("effective worktree tools=%v want %v", got, want)
 	}
