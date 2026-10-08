@@ -238,11 +238,28 @@ func TestTeamTaskServicePersistsDependencyGateAndRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	projectedFirst, err := service.GetTeamTask(context.Background(), request, team.ID, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projectedFirst.Blocks) != 1 || projectedFirst.Blocks[0] != second.ID {
+		t.Fatalf("dependency reverse projection missing: first=%+v second=%+v", projectedFirst, second)
+	}
+	if _, err := service.CreateTeamTask(context.Background(), request, team.ID, teams.Task{Title: "unknown dependency", BlockedBy: []string{"missing-task"}}); !errors.Is(err, teams.ErrDependency) {
+		t.Fatalf("unknown dependency create = %v, want dependency error", err)
+	}
+	cycle := []string{second.ID}
+	if _, err := service.UpdateTeamTask(context.Background(), request, team.ID, first.ID, first.Revision, teams.TaskPatch{BlockedBy: &cycle}); !errors.Is(err, teams.ErrDependency) {
+		t.Fatalf("dependency cycle update = %v, want dependency error", err)
+	}
 	inProgress := teams.TaskInProgress
 	if _, err = service.UpdateTeamTask(context.Background(), request, team.ID, second.ID, second.Revision, teams.TaskPatch{Status: &inProgress}); err == nil {
 		t.Fatal("task with an incomplete dependency entered progress")
 	}
 	completed := teams.TaskCompleted
+	if _, err = service.UpdateTeamTask(context.Background(), request, team.ID, second.ID, second.Revision, teams.TaskPatch{Status: &completed}); err == nil {
+		t.Fatal("task with an incomplete dependency was completed")
+	}
 	first, err = service.UpdateTeamTask(context.Background(), request, team.ID, first.ID, first.Revision, teams.TaskPatch{Status: &completed})
 	if err != nil {
 		t.Fatal(err)
@@ -266,6 +283,15 @@ func TestTeamTaskServicePersistsDependencyGateAndRevision(t *testing.T) {
 	}
 	if listedSecond.Status != teams.TaskInProgress || len(listedSecond.BlockedBy) != 1 || listedSecond.BlockedBy[0] != first.ID {
 		t.Fatalf("unexpected durable dependency projection: %+v", listed)
+	}
+	var listedFirst teams.Task
+	for _, task := range listed {
+		if task.ID == first.ID {
+			listedFirst = task
+		}
+	}
+	if len(listedFirst.Blocks) != 1 || listedFirst.Blocks[0] != second.ID {
+		t.Fatalf("replayed blocks projection diverged from blockedBy: %+v", listed)
 	}
 	if _, err = service.UpdateTeamTask(context.Background(), request, team.ID, second.ID, second.Revision-1, teams.TaskPatch{Title: stringPtr("stale")}); !errors.Is(err, teams.ErrRevisionConflict) {
 		t.Fatalf("stale update = %v, want revision conflict", err)
