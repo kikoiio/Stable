@@ -259,6 +259,72 @@ func TestTeamMemberContinuesAcrossRestartWithExplicitRoleChangeAcceptance(t *tes
 	}
 }
 
+func TestTeamMembersReceiveOnlyTheirOwnTurnContext(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	service, request := teamServiceFixture(t, root, "parent-run")
+	request.Model = "model-v1"
+	const parentMarker = "PARENT_HISTORY_SECRET_MARKER"
+	const firstMemberMarker = "FIRST_MEMBER_SECRET_MARKER"
+	const secondMemberMarker = "SECOND_MEMBER_SECRET_MARKER"
+	if _, err := sessionlog.Append(root, request.Work.SessionID, sessionlog.EventMessage, sessionlog.Message{Role: "user", Text: parentMarker}); err != nil {
+		t.Fatal(err)
+	}
+	authority, err := json.Marshal(permission.Authority{RunID: request.RunID, SessionID: request.Work.SessionID, AllowedRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.PermissionBounds = authority
+	role := agentcatalog.Definition{Name: "explore", Instruction: "Inspect only the assigned material.", Model: "inherit", Tools: []string{"read_file"}, MaxTurns: 3}
+	runner := &capturingTeamChildRunner{inputs: make(chan agent.ChildRunInput, 2)}
+	pool, err := agent.NewPoolDelegator(agent.DefaultDelegationLimits(), runner, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.deps.Agents = fixedTeamRoleCatalog{definition: role}
+	service.deps.Delegator = pool
+	service.deps.ForkProvider = forkSkillFixtureProvider{}
+	service.deps.ForkExecutorFactory = forkSkillFixtureExecutorFactory{}
+	service.deps.ForkToolSchemas = []llm.ToolSchema{{Name: "read_file"}}
+	service.deps.ProviderName, service.deps.Model = "fixture", request.Model
+	service.lifeCtx = context.Background()
+	service.teamScheduler = newTeamScheduler(service)
+	t.Cleanup(func() {
+		service.teamScheduler.close()
+		pool.Close()
+	})
+	team, err := service.CreateTeam(t.Context(), request, "isolated-inputs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.SpawnTeamMember(t.Context(), request, TeamMemberSpawnRequest{TeamID: team.ID, Name: "reader-a", AgentName: role.Name, Instruction: firstMemberMarker, OriginCallID: "spawn-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstInput := receiveTeamChildInput(t, runner.inputs)
+	if firstInput.TeamTurn == nil || firstInput.TeamTurn.MemberID != first.ID || !strings.Contains(firstInput.Task.Instruction, firstMemberMarker) {
+		t.Fatalf("first member did not receive its own turn context: %+v", firstInput)
+	}
+	if strings.Contains(firstInput.Task.Instruction, parentMarker) || strings.Contains(firstInput.Task.Instruction, secondMemberMarker) {
+		t.Fatal("first member received parent history or sibling task content")
+	}
+	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, first.ID, teams.MemberIdle)
+	second, err := service.SpawnTeamMember(t.Context(), request, TeamMemberSpawnRequest{TeamID: team.ID, Name: "reader-b", AgentName: role.Name, Instruction: secondMemberMarker, OriginCallID: "spawn-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInput := receiveTeamChildInput(t, runner.inputs)
+	if secondInput.TeamTurn == nil || secondInput.TeamTurn.MemberID != second.ID || !strings.Contains(secondInput.Task.Instruction, secondMemberMarker) {
+		t.Fatalf("second member did not receive its own turn context: %+v", secondInput)
+	}
+	if strings.Contains(secondInput.Task.Instruction, parentMarker) || strings.Contains(secondInput.Task.Instruction, firstMemberMarker) || strings.Contains(secondInput.Task.Instruction, "summary-1") {
+		t.Fatal("second member received parent history or sibling context")
+	}
+	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, second.ID, teams.MemberIdle)
+}
+
 func TestLeadMessageAutomaticallyResumesIdleTeamMember(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "project")
 	if err := os.MkdirAll(root, 0700); err != nil {
