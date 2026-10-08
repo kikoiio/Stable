@@ -286,6 +286,8 @@ func TestTeamTaskServiceConcurrentClaimsPersistOneOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	addTeamMessageMember(t, service, request, team.ID, "member-a", "reader-a")
+	addTeamMessageMember(t, service, request, team.ID, "member-b", "reader-b")
 	results := make(chan error, 2)
 	start := make(chan struct{})
 	for _, memberID := range []string{"member-a", "member-b"} {
