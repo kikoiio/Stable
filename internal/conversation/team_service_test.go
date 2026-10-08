@@ -139,7 +139,7 @@ func TestGoalTeamIsIsolatedByGoalAndWorkItem(t *testing.T) {
 	}
 	service := &Service{deps: Deps{ProjectRoot: root, Store: state}, activeRuns: map[string]string{"goal-run": session.ID}}
 	request := agent.ExecutionRequest{RunID: "goal-run", Work: work}
-	team, err := service.CreateTeam(context.Background(), request, "goal research")
+	team, err := service.CreateTeam(context.Background(), request, "goal-research")
 	if err != nil {
 		t.Fatal(err)
 	}
