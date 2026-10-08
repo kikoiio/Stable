@@ -22,6 +22,8 @@
 
 源文件位于本机 `/home/neo/Projects/mewcode-golang`。核对使用源码读取，未执行源项目、真实 provider 或重型构建。
 
+2026-10-09 增补局部证据：E 的 `TestTeamMessageSentDuringRunningTurnIsHandedOffOnlyToNextTurn` 与 F 的 `TestWorkspaceListClientRequestReturnsOwnedPublicSnapshots` 均通过定向 conversation Go 测试；覆盖范围和限制分别见 [E checklist](../M09-E/checklist.md) 与 [F checklist](../M09-F/checklist.md)。这些测试未改变 E/F AC1–9 未整体验收的状态。
+
 ## 全部完成的条件
 
 - [x] M09-A/B/C 已实现并通过对应 checklist。
