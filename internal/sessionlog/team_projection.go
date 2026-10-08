@@ -842,8 +842,8 @@ func (st *teamScan) checkRequest(e TeamEvent, at time.Time) error {
 	if r.Status != teams.RequestApproved && r.Status != teams.RequestRejected && !(r.Type == teams.RequestShutdown && r.Status == teams.RequestDeferred) {
 		return errors.New("invalid request response decision")
 	}
-	if e.ActorID == "service" && (r.Type != teams.RequestShutdown || r.Status != teams.RequestApproved || m.Status != teams.MemberIdle && m.Status != teams.MemberCreated) {
-		return errors.New("automatic response only approves idle member shutdown")
+	if e.ActorID == "service" && (r.Type != teams.RequestShutdown || r.Status != teams.RequestApproved || m.Status != teams.MemberIdle && m.Status != teams.MemberCreated && !m.Status.HasTurn()) {
+		return errors.New("service response requires an approved shutdown for an idle or active-turn member")
 	}
 	return nil
 }

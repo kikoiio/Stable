@@ -22,12 +22,12 @@
 
 源文件位于本机 `/home/neo/Projects/mewcode-golang`。核对使用源码读取，未执行源项目、真实 provider 或重型构建。
 
-2026-10-09 增补局部证据：E 的 `TestTeamMessageSentDuringRunningTurnIsHandedOffOnlyToNextTurn` 与 F 的 `TestWorkspaceListClientRequestReturnsOwnedPublicSnapshots` 均通过定向 conversation Go 测试；覆盖范围和限制分别见 [E checklist](../M09-E/checklist.md) 与 [F checklist](../M09-F/checklist.md)。这些测试未改变 E/F AC1–9 未整体验收的状态。
+2026-10-09 增补局部证据：E 的运行中消息 handoff、busy-turn force-stop 顺序，以及 F 的 socket workspace list 和 swapped-phase metadata identity replacement 均通过定向测试；其中 force-stop 发现并修正了 service response actor 校验。覆盖范围和限制见 [E checklist](../M09-E/checklist.md) 与 [F checklist](../M09-F/checklist.md)。这些结果未改变 E/F AC1–9 未整体验收的状态。
 
 ## 全部完成的条件
 
 - [x] M09-A/B/C 已实现并通过对应 checklist。
-- [ ] M09-D 的四份规格文档获批，实现与验收通过。
+- [x] M09-D 的四份规格文档获批，实现与验收通过；AC1–9 和完整场景见 [D checklist](../M09-D/checklist.md)。
 - [ ] M09-E 的四份规格文档已获批；实现与验收待完成。
 - [ ] M09-F 的四份规格文档已获批；受控工作树、候选检查与用户接收验收待完成。
 - [ ] 与源端 agent、团队、后台任务、工作树的行为逐项对照；每个差异写明已适配、源端仅解析、平台不适用或尚未完成，不能用目录迁移代替行为验收。

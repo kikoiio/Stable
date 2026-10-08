@@ -285,6 +285,7 @@ func TestProjectMetadataAcceptanceRecoveryEveryMoveBoundary(t *testing.T) {
 		{"swapped", "swapped", 3, 0}, {"git_restored", "swapped", 3, 1},
 		{"service_restored", "swapped", 3, 2}, {"before_finalize", "swapped", 3, 3},
 		{"metadata_destination_conflict", "swapped", 3, 0},
+		{"same_digest_git_pointer_replacement", "swapped", 3, 0},
 		{"same_digest_formal_replacement", "prepared", 0, 0},
 		{"same_digest_candidate_replacement", "prepared", 0, 0},
 		{"same_digest_rollback_replacement", "old_saved", 1, 0},
@@ -292,6 +293,9 @@ func TestProjectMetadataAcceptanceRecoveryEveryMoveBoundary(t *testing.T) {
 	}
 	for _, gitDirectory := range []bool{false, true} {
 		for _, fixture := range cases {
+			if fixture.name == "same_digest_git_pointer_replacement" && gitDirectory {
+				continue
+			}
 			t.Run(fmt.Sprintf("git_directory_%t/%s", gitDirectory, fixture.name), func(t *testing.T) {
 				s, dbPath := newGoalStore(t)
 				ctx := context.Background()
@@ -402,6 +406,35 @@ func TestProjectMetadataAcceptanceRecoveryEveryMoveBoundary(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				if fixture.name == "same_digest_git_pointer_replacement" {
+					formalGit := filepath.Join(formal, ".git")
+					incomingGit := filepath.Join(incoming, ".git")
+					if _, err := os.Lstat(formalGit); !os.IsNotExist(err) {
+						t.Fatalf("formal .git exists before metadata restore: %v", err)
+					}
+					if data, err := os.ReadFile(filepath.Join(formal, "board")); err != nil || string(data) != "new" {
+						t.Fatalf("formal content before recovery=%q err=%v", data, err)
+					}
+					originalInfo, err := os.Lstat(incomingGit)
+					if err != nil || !originalInfo.Mode().IsRegular() {
+						t.Fatalf("incoming .git pointer info=%v err=%v", originalInfo, err)
+					}
+					pointer, err := os.ReadFile(incomingGit)
+					if err != nil {
+						t.Fatal(err)
+					}
+					replacement := filepath.Join(parent, "replacement.git")
+					if err = os.WriteFile(replacement, pointer, 0600); err != nil {
+						t.Fatal(err)
+					}
+					replacementInfo, err := os.Lstat(replacement)
+					if err != nil || os.SameFile(originalInfo, replacementInfo) {
+						t.Fatalf(".git pointer was not replaced: original=%v replacement=%v err=%v", originalInfo, replacementInfo, err)
+					}
+					if err = os.Rename(replacement, incomingGit); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if err = s.Close(); err != nil {
 					t.Fatal(err)
 				}
@@ -463,6 +496,47 @@ func TestProjectMetadataAcceptanceRecoveryEveryMoveBoundary(t *testing.T) {
 					}
 					if err := s.ReconcileAcceptances(ctx); err != nil {
 						t.Fatal(err)
+					}
+					return
+				}
+				if fixture.name == "same_digest_git_pointer_replacement" {
+					if err := s.ReconcileAcceptances(ctx); err == nil {
+						t.Fatal("recovery accepted a byte-identical replacement Git pointer")
+					}
+					data, err := os.ReadFile(filepath.Join(formal, "board"))
+					if err != nil || string(data) != "new" {
+						t.Fatalf("formal=%q err=%v", data, err)
+					}
+					data, err = os.ReadFile(filepath.Join(incoming, ".git"))
+					if err != nil || string(data) != "gitdir: /unmounted/external/private\n" {
+						t.Fatalf("replacement Git pointer=%q err=%v", data, err)
+					}
+					if _, err = os.Lstat(filepath.Join(formal, ".git")); !os.IsNotExist(err) {
+						t.Fatalf("failed recovery changed formal metadata destination: %v", err)
+					}
+					var phase string
+					if err := s.DB().QueryRow(`SELECT phase FROM acceptance_apply_journal WHERE decision_id=?`, d.ID).Scan(&phase); err != nil || phase != "blocked" {
+						t.Fatalf("phase=%s err=%v", phase, err)
+					}
+					if _, ok, err := s.FindAcceptanceReceipt(ctx, d.ID); err != nil || ok {
+						t.Fatalf("blocked acceptance produced receipt: %t %v", ok, err)
+					}
+					if err := s.ReconcileAcceptances(ctx); err != nil {
+						t.Fatalf("repeat blocked recovery: %v", err)
+					}
+					data, err = os.ReadFile(filepath.Join(formal, "board"))
+					if err != nil || string(data) != "new" {
+						t.Fatalf("repeat recovery changed formal content=%q err=%v", data, err)
+					}
+					data, err = os.ReadFile(filepath.Join(incoming, ".git"))
+					if err != nil || string(data) != "gitdir: /unmounted/external/private\n" {
+						t.Fatalf("repeat recovery changed replacement pointer=%q err=%v", data, err)
+					}
+					if err := s.DB().QueryRow(`SELECT phase FROM acceptance_apply_journal WHERE decision_id=?`, d.ID).Scan(&phase); err != nil || phase != "blocked" {
+						t.Fatalf("repeat recovery phase=%s err=%v", phase, err)
+					}
+					if _, ok, err := s.FindAcceptanceReceipt(ctx, d.ID); err != nil || ok {
+						t.Fatalf("repeat blocked recovery produced receipt: %t %v", ok, err)
 					}
 					return
 				}

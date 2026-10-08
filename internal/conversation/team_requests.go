@@ -106,7 +106,15 @@ func (s *Service) StopTeamMember(ctx context.Context, sessionID, teamID, memberI
 		return teams.Member{}, err
 	}
 	member, ok := projection.Members[memberID]
-	if !ok || member.TeamID != teamID || !member.Status.HasTurn() {
+	if !ok || member.TeamID != teamID {
+		s.eventMu.Unlock()
+		return teams.Member{}, teams.ErrNotFound
+	}
+	if member.Status == teams.MemberStopping {
+		s.eventMu.Unlock()
+		return member, nil
+	}
+	if !member.Status.HasTurn() {
 		s.eventMu.Unlock()
 		return teams.Member{}, teams.ErrNotFound
 	}
