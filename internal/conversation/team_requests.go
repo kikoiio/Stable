@@ -157,9 +157,37 @@ func (s *Service) ListTeamRequests(ctx context.Context, request agent.ExecutionR
 	if err != nil {
 		return nil, err
 	}
-	_, projection, err := s.teamForOperation(root, scope, teamID, actor)
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if _, currentScope, currentActor, authErr := s.teamOperationScope(ctx, request); authErr != nil || !currentScope.Matches(scope) || currentActor != actor {
+		return nil, teams.ErrPermission
+	}
+	team, projection, err := s.teamForOperation(root, scope, teamID, actor)
 	if err != nil {
 		return nil, err
+	}
+	due := make([]teams.Request, 0)
+	now := time.Now().UTC()
+	for _, item := range projection.Requests {
+		if (item.Status == teams.RequestPending || item.Status == teams.RequestDeferred) && !now.Before(item.ExpiresAt) {
+			due = append(due, item)
+		}
+	}
+	sort.Slice(due, func(i, j int) bool {
+		if due[i].ExpiresAt.Equal(due[j].ExpiresAt) {
+			return due[i].ID < due[j].ID
+		}
+		return due[i].ExpiresAt.Before(due[j].ExpiresAt)
+	})
+	for _, item := range due {
+		team, item, err = s.expireTeamRequest(root, team, item)
+		if err != nil {
+			return nil, err
+		}
+		projection.Requests[item.ID] = item
 	}
 	out := make([]teams.Request, 0, len(projection.Requests))
 	for _, item := range projection.Requests {
@@ -209,7 +237,14 @@ func (s *Service) RespondTeamRequest(ctx context.Context, request agent.Executio
 	if actor.Lead && prior.Type != teams.RequestPlan || !actor.Lead && (prior.Type != teams.RequestShutdown || prior.MemberID != actor.MemberID) {
 		return teams.Request{}, teams.ErrPermission
 	}
-	if prior.Status != teams.RequestPending && prior.Status != teams.RequestDeferred || !time.Now().Before(prior.ExpiresAt) {
+	if (prior.Status == teams.RequestPending || prior.Status == teams.RequestDeferred) && !time.Now().Before(prior.ExpiresAt) {
+		team, prior, err = s.expireTeamRequest(root, team, prior)
+		if err != nil {
+			return teams.Request{}, err
+		}
+		return prior, errors.New("team request has expired")
+	}
+	if prior.Status != teams.RequestPending && prior.Status != teams.RequestDeferred {
 		return prior, errors.New("team request is no longer answerable")
 	}
 	member := projection.Members[prior.MemberID]
@@ -259,11 +294,15 @@ func (s *Service) RespondTeamRequest(ctx context.Context, request agent.Executio
 }
 
 func (s *Service) createTeamRequest(root string, team teams.Team, runID, requester, memberID string, kind teams.RequestType, body string) (teams.Request, error) {
+	return s.createTeamRequestUntil(root, team, runID, requester, memberID, kind, body, time.Now().UTC().Add(teams.RequestDuration))
+}
+
+func (s *Service) createTeamRequestUntil(root string, team teams.Team, runID, requester, memberID string, kind teams.RequestType, body string, expiresAt time.Time) (teams.Request, error) {
 	id, err := sessionlog.NewID()
 	if err != nil {
 		return teams.Request{}, err
 	}
-	request := teams.Request{ID: id, TeamID: team.ID, MemberID: memberID, Type: kind, Status: teams.RequestPending, RequesterID: requester, Body: redactRunCredential(body, s.deps.ProviderCredential), ExpiresAt: time.Now().UTC().Add(teams.RequestDuration), Revision: 1}
+	request := teams.Request{ID: id, TeamID: team.ID, MemberID: memberID, Type: kind, Status: teams.RequestPending, RequesterID: requester, Body: redactRunCredential(body, s.deps.ProviderCredential), ExpiresAt: expiresAt, Revision: 1}
 	if kind == teams.RequestPlan {
 		request.ResponderID = teams.Lead
 	} else {
@@ -273,6 +312,16 @@ func (s *Service) createTeamRequest(root string, team teams.Team, runID, request
 		return teams.Request{}, err
 	}
 	return request, nil
+}
+
+func (s *Service) expireTeamRequest(root string, team teams.Team, request teams.Request) (teams.Team, teams.Request, error) {
+	request.Status = teams.RequestExpired
+	request.Revision++
+	if err := s.appendTeamRequest(root, team, "", "service", sessionlog.TeamRequestExpired, request); err != nil {
+		return team, teams.Request{}, err
+	}
+	team.Revision++
+	return team, request, nil
 }
 
 func (s *Service) appendTeamRequest(root string, team teams.Team, runID, actor, kind string, request teams.Request) error {
