@@ -272,6 +272,54 @@ func TestTeamTaskServicePersistsDependencyGateAndRevision(t *testing.T) {
 	}
 }
 
+func TestTeamTaskServiceConcurrentClaimsPersistOneOwner(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	service, request := teamServiceFixture(t, root, "run-a")
+	team, err := service.CreateTeam(context.Background(), request, "claim-race")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := service.CreateTeamTask(context.Background(), request, team.ID, teams.Task{Title: "inspect"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 2)
+	start := make(chan struct{})
+	for _, memberID := range []string{"member-a", "member-b"} {
+		memberID := memberID
+		go func() {
+			<-start
+			_, err := service.UpdateTeamTask(context.Background(), request, team.ID, task.ID, task.Revision, teams.TaskPatch{Assignee: &memberID})
+			results <- err
+		}()
+	}
+	close(start)
+	success, conflict := 0, 0
+	for range 2 {
+		err := <-results
+		if err == nil {
+			success++
+		} else if errors.Is(err, teams.ErrRevisionConflict) {
+			conflict++
+		} else {
+			t.Fatalf("concurrent claim failed unexpectedly: %v", err)
+		}
+	}
+	if success != 1 || conflict != 1 {
+		t.Fatalf("service claims success=%d revision conflict=%d, want one of each", success, conflict)
+	}
+	projection, err := sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := projection.Tasks[task.ID]; got.Revision != task.Revision+1 || got.Assignee != "member-a" && got.Assignee != "member-b" {
+		t.Fatalf("concurrent claim did not persist exactly one owner: %+v", got)
+	}
+}
+
 func stringPtr(value string) *string { return &value }
 
 func TestTeamProtocolUsesServerOwnedScope(t *testing.T) {
