@@ -84,6 +84,67 @@ func TestLifecycleServiceCreatesOwnedPrivateGitWorkspace(t *testing.T) {
 	}
 }
 
+func TestLifecycleServiceBindingsAreIndependentPerSession(t *testing.T) {
+	parent := t.TempDir()
+	formal := filepath.Join(parent, "formal")
+	if err := os.Mkdir(formal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formal, "base.txt"), []byte("shared project baseline"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	layout, err := NewLayout(filepath.Join(parent, "state"), formal, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstScope := testScope()
+	firstScope.Authority = permission.Authority{RunID: "run-first", SessionID: firstScope.SessionID, AllowedRoot: formal, FormalRoot: formal, CandidateRoot: filepath.Join(parent, "candidate")}
+	secondScope := firstScope
+	secondScope.SessionID = "session-second"
+	secondScope.Work.SessionID = secondScope.SessionID
+	secondScope.Authority.RunID = "run-second"
+	secondScope.Authority.SessionID = secondScope.SessionID
+	service, err := NewService(layout, Limits{}, ServiceDependencies{IdleGuard: idleWorkspaceGuard{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close(context.Background())
+
+	first, err := service.Create(context.Background(), firstScope, "first session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.Create(context.Background(), secondScope, "second session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Enter(context.Background(), firstScope, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Enter(context.Background(), secondScope, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range []struct {
+		scope Scope
+		own   Snapshot
+		other Snapshot
+	}{
+		{firstScope, first, second},
+		{secondScope, second, first},
+	} {
+		bound, err := service.Binding(fixture.scope)
+		if err != nil || bound != fixture.own.ID {
+			t.Fatalf("session %s binding=%q, err=%v; want %q", fixture.scope.SessionID, bound, err, fixture.own.ID)
+		}
+		if _, err := service.Get(context.Background(), fixture.scope, fixture.other.ID); !errors.Is(err, ErrOwnership) {
+			t.Fatalf("session %s read another session's workspace: %v", fixture.scope.SessionID, err)
+		}
+		if _, err := service.Enter(context.Background(), fixture.scope, fixture.other.ID); !errors.Is(err, ErrOwnership) {
+			t.Fatalf("session %s entered another session's workspace: %v", fixture.scope.SessionID, err)
+		}
+	}
+}
+
 func TestWorkspaceWriterAccountsWritesAndReleasesOnlyAfterCompletion(t *testing.T) {
 	parent := t.TempDir()
 	formal := filepath.Join(parent, "formal")

@@ -10,6 +10,7 @@ import (
 
 	"stable/internal/agent"
 	"stable/internal/sessionlog"
+	"stable/internal/store"
 	"stable/internal/teams"
 )
 
@@ -103,6 +104,54 @@ func TestSameTeamNameIsIsolatedAcrossValidSessions(t *testing.T) {
 		}
 		if _, err := fixture.service.GetTeam(context.Background(), fixture.request, fixture.other.ID); err == nil {
 			t.Fatalf("session %s queried another session's team %s", fixture.request.Work.SessionID, fixture.other.ID)
+		}
+	}
+}
+
+func TestGoalTeamIsIsolatedByGoalAndWorkItem(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	session, err := sessionlog.Create(root, "goal team fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	goalRoot := filepath.Join(root, "goal")
+	if err := os.MkdirAll(goalRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"goal-one", "goal-two"} {
+		goal := coreGoal(id, goalRoot, session.ID)
+		goal.Objective = "team scope fixture"
+		if _, err := state.CreateGoal(context.Background(), goal); err != nil {
+			t.Fatal(err)
+		}
+	}
+	work := agent.WorkRef{Kind: agent.WorkGoal, SessionID: session.ID, GoalID: "goal-one", WorkItemID: "item-one"}
+	if _, err := sessionlog.Append(root, session.ID, sessionlog.EventRunStarted, sessionlog.RunStarted{RunID: "goal-run", WorkKind: string(work.Kind), GoalID: work.GoalID, WorkItemID: work.WorkItemID, Intent: "team scope fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{deps: Deps{ProjectRoot: root, Store: state}, activeRuns: map[string]string{"goal-run": session.ID}}
+	request := agent.ExecutionRequest{RunID: "goal-run", Work: work}
+	team, err := service.CreateTeam(context.Background(), request, "goal research")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.GetTeam(context.Background(), request, team.ID); err != nil {
+		t.Fatalf("matching goal work item could not query its team: %v", err)
+	}
+	for _, forged := range []agent.WorkRef{
+		{Kind: agent.WorkGoal, SessionID: session.ID, GoalID: "goal-one", WorkItemID: "item-two"},
+		{Kind: agent.WorkGoal, SessionID: session.ID, GoalID: "goal-two", WorkItemID: "item-one"},
+	} {
+		if _, err := service.GetTeam(context.Background(), agent.ExecutionRequest{RunID: "goal-run", Work: forged}, team.ID); err == nil {
+			t.Fatalf("goal team was queryable from forged work scope: %+v", forged)
 		}
 	}
 }
