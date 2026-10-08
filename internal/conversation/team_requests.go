@@ -283,6 +283,16 @@ func (s *Service) RespondTeamRequest(ctx context.Context, request agent.Executio
 			s.teamScheduler.signalFromLead(request, scope, team.ID, member.ID, prior.ID)
 		}
 	}
+	if prior.Type == teams.RequestPlan && prior.Status == teams.RequestRejected && member.Status == teams.MemberAwaitingPlan {
+		member.Status = teams.MemberIdle
+		member.Revision++
+		if err := s.appendTeamMemberState(root, team, request.RunID, teams.Lead, member); err != nil {
+			return prior, err
+		}
+		if actor.Lead && s.teamScheduler != nil {
+			s.teamScheduler.signalFromLead(request, scope, team.ID, member.ID, prior.ID)
+		}
+	}
 	if prior.Type == teams.RequestShutdown && prior.Status == teams.RequestApproved {
 		member.Status = teams.MemberStopped
 		member.Revision++

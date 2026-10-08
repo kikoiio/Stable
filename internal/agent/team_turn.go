@@ -44,10 +44,11 @@ func cloneTeamTurnIdentity(identity *TeamTurnIdentity) *TeamTurnIdentity {
 // TeamTurnInput contains only selected reference data for this turn. It cannot
 // carry parent history, a credential, permission bounds or arbitrary schemas.
 type TeamTurnInput struct {
-	Identity TeamTurnIdentity `json:"identity"`
-	Summary  string           `json:"previous_summary,omitempty"`
-	Messages []teams.Message  `json:"messages"`
-	Tasks    []teams.Task     `json:"tasks,omitempty"`
+	Identity     TeamTurnIdentity `json:"identity"`
+	Summary      string           `json:"previous_summary,omitempty"`
+	PlanFeedback string           `json:"plan_feedback,omitempty"`
+	Messages     []teams.Message  `json:"messages"`
+	Tasks        []teams.Task     `json:"tasks,omitempty"`
 }
 
 // BuildTeamTurnTask preserves the full role instruction, validates the chosen
@@ -64,6 +65,9 @@ func BuildTeamTurnTask(taskID, roleInstruction string, input TeamTurnInput) (Del
 	}
 	if teams.ValidateText(input.Summary, teams.MaxSummaryBytes, false) != nil {
 		return task, errors.New("team previous summary is invalid or exceeds its limit")
+	}
+	if teams.ValidateText(input.PlanFeedback, teams.MaxFeedbackBytes, false) != nil {
+		return task, errors.New("team plan feedback is invalid or exceeds its limit")
 	}
 	if len(input.Messages) > teams.MaxBatchMessages {
 		return task, errors.New("team message batch exceeds 8 messages")

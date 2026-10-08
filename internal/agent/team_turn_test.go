@@ -24,6 +24,11 @@ func TestTeamTurnInputIsBoundedReferenceDataAndPreservesFullRole(t *testing.T) {
 	if task.Name != "researcher" || !strings.HasPrefix(task.Instruction, role+"\n") || !strings.Contains(task.Instruction, input.Summary) || !strings.Contains(task.Instruction, input.Messages[0].Body) {
 		t.Fatalf("incorrect team input: %+v", task)
 	}
+	input.PlanFeedback = "Clarify the parser entry point."
+	task, err = BuildTeamTurnTask("task-1", role, input)
+	if err != nil || !strings.Contains(task.Instruction, input.PlanFeedback) {
+		t.Fatalf("plan feedback was not carried as bounded reference data: task=%+v err=%v", task, err)
+	}
 	for _, change := range []func(*TeamTurnInput){
 		func(i *TeamTurnInput) { i.Identity.MemberID = teams.Lead },
 		func(i *TeamTurnInput) { i.Messages[0].TeamID = "team-other" },
@@ -31,6 +36,7 @@ func TestTeamTurnInputIsBoundedReferenceDataAndPreservesFullRole(t *testing.T) {
 		func(i *TeamTurnInput) { i.Messages[0].Body = strings.Repeat("x", teams.MaxMessageBytes+1) },
 		func(i *TeamTurnInput) { i.Messages = append(i.Messages, i.Messages[0]) },
 		func(i *TeamTurnInput) { i.Summary = strings.Repeat("x", teams.MaxSummaryBytes+1) },
+		func(i *TeamTurnInput) { i.PlanFeedback = strings.Repeat("x", teams.MaxFeedbackBytes+1) },
 	} {
 		bad := validTeamTurnInput()
 		change(&bad)

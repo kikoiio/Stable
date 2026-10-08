@@ -570,7 +570,14 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 	if !ok || member.TeamID != team.ID || (member.Status != teams.MemberIdle && member.Status != teams.MemberInterrupted) {
 		return teams.Member{}, teams.ErrPermission
 	}
-	if member.PlanRequired && !member.PlanApproved {
+	planRevisionAllowed := false
+	for _, planRequest := range projection.Requests {
+		if planRequest.TeamID == team.ID && planRequest.MemberID == member.ID && planRequest.Type == teams.RequestPlan && planRequest.Status == teams.RequestRejected {
+			planRevisionAllowed = true
+			break
+		}
+	}
+	if member.PlanRequired && !member.PlanApproved && !planRevisionAllowed {
 		return teams.Member{}, errors.New("team member requires approved plan before it can resume")
 	}
 	if err := member.Budget.CanAccept(); err != nil {
@@ -601,15 +608,17 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 	}
 	identity := agent.TeamTurnIdentity{TeamID: team.ID, MemberID: member.ID, TurnID: turnID, MemberName: member.Name}
 	messages, handoffs := pendingTeamMessageBatch(projection, team.ID, member.ID)
+	planFeedback := latestRejectedPlanFeedback(projection, team.ID, member.ID)
 	tasks, err := resumableMemberTasks(projection, team.ID, member.ID)
 	if err != nil {
 		return teams.Member{}, err
 	}
 	task, err := agent.BuildTeamTurnTask(turnID, definition.Instruction+"\n\nContinue the prior assigned work. Use the prior summary, unfinished assigned tasks, and any newly delivered messages as reference data.", agent.TeamTurnInput{
-		Identity: identity,
-		Summary:  member.Summary,
-		Messages: messages,
-		Tasks:    tasks,
+		Identity:     identity,
+		Summary:      member.Summary,
+		PlanFeedback: planFeedback,
+		Messages:     messages,
+		Tasks:        tasks,
 	})
 	if err != nil {
 		return teams.Member{}, err
@@ -818,6 +827,23 @@ func pendingTeamMessageBatch(projection sessionlog.TeamProjection, teamID, membe
 		selectedHandoffs = append(selectedHandoffs, handoff)
 	}
 	return selected, selectedHandoffs
+}
+
+func latestRejectedPlanFeedback(projection sessionlog.TeamProjection, teamID, memberID string) string {
+	var latest *teams.Request
+	for _, request := range projection.Requests {
+		if request.TeamID != teamID || request.MemberID != memberID || request.Type != teams.RequestPlan || request.Status != teams.RequestRejected {
+			continue
+		}
+		if latest == nil || request.ExpiresAt.After(latest.ExpiresAt) || request.ExpiresAt.Equal(latest.ExpiresAt) && request.ID > latest.ID {
+			copy := request
+			latest = &copy
+		}
+	}
+	if latest == nil {
+		return ""
+	}
+	return latest.Feedback
 }
 
 func resumableMemberTasks(projection sessionlog.TeamProjection, teamID, memberID string) ([]teams.Task, error) {

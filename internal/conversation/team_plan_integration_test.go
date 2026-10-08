@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,11 +104,46 @@ func TestTeamPlanApprovalAutomaticallyStartsReadOnlyFollowUp(t *testing.T) {
 	if runner.childCount() != 1 {
 		t.Fatalf("unapproved member started %d child turns, want only the initial turn", runner.childCount())
 	}
-	approved, err := service.RespondTeamRequest(t.Context(), request, team.ID, submitted.ID, submitted.Revision, string(teams.RequestApproved), "Proceed with the read-only review.")
+	rejected, err := service.RespondTeamRequest(t.Context(), request, team.ID, submitted.ID, submitted.Revision, string(teams.RequestRejected), "Revise the inspection plan to include the parser entry point.")
+	if err != nil || rejected.Status != teams.RequestRejected {
+		t.Fatalf("rejected request = %+v, err=%v", rejected, err)
+	}
+	revision := receiveTeamChildInput(t, runner.inputs)
+	if revision.TeamTurn == nil || revision.TeamTurn.MemberID != member.ID || revision.TeamTurn.TurnID == first.TeamTurn.TurnID {
+		t.Fatalf("plan rejection did not start a fresh revision turn: first=%+v revision=%+v", first.TeamTurn, revision.TeamTurn)
+	}
+	assertTeamPlanToolSchemas(t, revision.ToolSchemas)
+	if !strings.Contains(revision.Task.Instruction, "Revise the inspection plan to include the parser entry point.") {
+		t.Fatalf("revision turn omitted lead feedback: %q", revision.Task.Instruction)
+	}
+	revisionRequest := agent.ExecutionRequest{RunID: revision.ChildRunID, Work: request.Work, TeamTurn: revision.TeamTurn}
+	revisedOutcome, err := service.ExecuteTeamTool(t.Context(), revisionRequest, llm.ToolUse{
+		ID: "call-submit-revised-plan", Name: "team_plan_submit",
+		Arguments: json.RawMessage(`{"team_id":"` + team.ID + `","body":"Inspect the parser entry point and report findings."}`),
+	})
+	if err != nil || revisedOutcome.Status != agent.ToolSucceeded {
+		t.Fatalf("revised plan submission outcome=%+v err=%v", revisedOutcome, err)
+	}
+	runner.release <- struct{}{}
+	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberAwaitingPlan)
+	projection, err = sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if approved.Status != teams.RequestApproved || approved.Revision != submitted.Revision+1 {
+	var revised teams.Request
+	for _, fact := range projection.Requests {
+		if fact.MemberID == member.ID && fact.Type == teams.RequestPlan && fact.Status == teams.RequestPending {
+			revised = fact
+		}
+	}
+	if revised.ID == "" || revised.ID == submitted.ID {
+		t.Fatalf("revised plan request = %+v", revised)
+	}
+	approved, err := service.RespondTeamRequest(t.Context(), request, team.ID, revised.ID, revised.Revision, string(teams.RequestApproved), "Proceed with the read-only review.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.Status != teams.RequestApproved || approved.Revision != revised.Revision+1 {
 		t.Fatalf("approved request = %+v", approved)
 	}
 	projection, err = sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
@@ -118,13 +154,13 @@ func TestTeamPlanApprovalAutomaticallyStartsReadOnlyFollowUp(t *testing.T) {
 	if !memberState.PlanApproved || memberState.Status != teams.MemberIdle && memberState.Status != teams.MemberQueued && memberState.Status != teams.MemberRunning || len(memberState.Tools) != 1 || memberState.Tools[0] != "read_file" {
 		t.Fatalf("plan approval changed member state or tool allowlist unexpectedly: %+v", memberState)
 	}
-	second := receiveTeamChildInput(t, runner.inputs)
-	if second.TeamTurn == nil || second.TeamTurn.MemberID != member.ID || second.TeamTurn.TurnID == first.TeamTurn.TurnID {
-		t.Fatalf("plan approval did not start a fresh turn for the same member: first=%+v second=%+v", first.TeamTurn, second.TeamTurn)
+	third := receiveTeamChildInput(t, runner.inputs)
+	if third.TeamTurn == nil || third.TeamTurn.MemberID != member.ID || third.TeamTurn.TurnID == revision.TeamTurn.TurnID {
+		t.Fatalf("plan approval did not start a fresh turn for the same member: revision=%+v third=%+v", revision.TeamTurn, third.TeamTurn)
 	}
-	assertTeamPlanToolSchemas(t, second.ToolSchemas)
-	if runner.childCount() != 2 {
-		t.Fatalf("plan approval started %d total turns, want two", runner.childCount())
+	assertTeamPlanToolSchemas(t, third.ToolSchemas)
+	if runner.childCount() != 3 {
+		t.Fatalf("plan rejection and approval started %d total turns, want three", runner.childCount())
 	}
 	runner.release <- struct{}{}
 	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberIdle)
