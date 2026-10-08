@@ -197,6 +197,64 @@ func TestWorkspaceWriterAccountsWritesAndReleasesOnlyAfterCompletion(t *testing.
 	}
 }
 
+func TestWorkspaceWriterLeaseIsExclusiveAndGenerationFenced(t *testing.T) {
+	parent := t.TempDir()
+	formal := filepath.Join(parent, "formal")
+	if err := os.Mkdir(formal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formal, "base.txt"), []byte("base"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	layout, err := NewLayout(filepath.Join(parent, "state"), formal, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := testScope()
+	scope.OriginRunID = "lead-run"
+	scope.Authority = permission.Authority{RunID: "lead-run", SessionID: scope.SessionID, AllowedRoot: formal, FormalRoot: formal, CandidateRoot: filepath.Join(parent, "candidate")}
+	service, err := NewService(layout, Limits{}, ServiceDependencies{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close(context.Background())
+	created, err := service.Create(context.Background(), scope, "exclusive writer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.AcquireWriter(context.Background(), scope, created.ID, "child-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AcquireWriter(context.Background(), scope, created.ID, "child-run-two"); !errors.Is(err, ErrOwnership) {
+		t.Fatalf("second writer acquired an active workspace: %v", err)
+	}
+	active, err := service.Get(context.Background(), scope, created.ID)
+	if err != nil || active.State != StateWriting || active.WriterRunID != first.RunID || active.Generation != first.Generation {
+		t.Fatalf("rejected writer changed active lease: snapshot=%+v err=%v; first=%+v", active, err, first)
+	}
+	if _, err := service.ReleaseCompletedWriter(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.AcquireWriter(context.Background(), scope, created.ID, "child-run-two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Generation <= first.Generation {
+		t.Fatalf("writer generation did not advance: first=%d second=%d", first.Generation, second.Generation)
+	}
+	if _, err := service.ReserveWriterWrite(context.Background(), first, 1); !errors.Is(err, ErrOwnership) {
+		t.Fatalf("stale writer reserved a write under the next lease: %v", err)
+	}
+	if _, err := service.ReleaseCompletedWriter(context.Background(), first); !errors.Is(err, ErrOwnership) {
+		t.Fatalf("stale writer released the next lease: %v", err)
+	}
+	current, err := service.Get(context.Background(), scope, created.ID)
+	if err != nil || current.State != StateWriting || current.WriterRunID != second.RunID || current.Generation != second.Generation {
+		t.Fatalf("stale lease changed current writer: snapshot=%+v err=%v; second=%+v", current, err, second)
+	}
+}
+
 func TestWorkspacePreviewPersistsBoundedConflictSummary(t *testing.T) {
 	parent := t.TempDir()
 	formal := filepath.Join(parent, "formal")
