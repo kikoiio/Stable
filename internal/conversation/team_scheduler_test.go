@@ -125,6 +125,10 @@ func TestTeamMemberContinuesAcrossRestartWithExplicitRoleChangeAcceptance(t *tes
 	}
 	service, request := teamServiceFixture(t, root, "parent-run")
 	request.Model = "model-v1"
+	const parentHistoryMarker = "PARENT_HISTORY_SECRET_MARKER"
+	if _, err := sessionlog.Append(root, request.Work.SessionID, sessionlog.EventMessage, sessionlog.Message{Role: "user", Text: parentHistoryMarker}); err != nil {
+		t.Fatal(err)
+	}
 	authority, err := json.Marshal(permission.Authority{RunID: request.RunID, SessionID: request.Work.SessionID, AllowedRoot: root})
 	if err != nil {
 		t.Fatal(err)
@@ -160,6 +164,9 @@ func TestTeamMemberContinuesAcrossRestartWithExplicitRoleChangeAcceptance(t *tes
 	firstInput := receiveTeamChildInput(t, firstRunner.inputs)
 	if firstInput.RoleInstruction != roleV1.Instruction || !strings.Contains(firstInput.Task.Instruction, roleV1.Instruction) {
 		t.Fatalf("first turn did not receive its pinned role: %+v", firstInput)
+	}
+	if strings.Contains(firstInput.Task.Instruction, parentHistoryMarker) {
+		t.Fatal("team member received parent conversation history")
 	}
 	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberIdle)
 	projection, err := sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
@@ -220,6 +227,9 @@ func TestTeamMemberContinuesAcrossRestartWithExplicitRoleChangeAcceptance(t *tes
 	secondInput := receiveTeamChildInput(t, secondRunner.inputs)
 	if secondInput.RoleInstruction != roleV2.Instruction || !strings.Contains(secondInput.Task.Instruction, "summary-1") || !strings.Contains(secondInput.Task.Instruction, "Inspect the second area.") {
 		t.Fatalf("resumed turn did not contain only the continued context and accepted role: %+v", secondInput)
+	}
+	if strings.Contains(secondInput.Task.Instruction, parentHistoryMarker) {
+		t.Fatal("resumed team member received parent conversation history")
 	}
 	if firstInput.TeamTurn == nil || secondInput.TeamTurn == nil || firstInput.TeamTurn.TeamID != secondInput.TeamTurn.TeamID || firstInput.TeamTurn.MemberID != secondInput.TeamTurn.MemberID || firstInput.TeamTurn.TurnID == secondInput.TeamTurn.TurnID {
 		t.Fatalf("follow-up did not preserve the logical member with a fresh turn: first=%+v second=%+v", firstInput.TeamTurn, secondInput.TeamTurn)
