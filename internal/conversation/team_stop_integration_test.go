@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"stable/internal/agent"
 	"stable/internal/agentcatalog"
@@ -76,6 +77,80 @@ func TestStopTeamMemberRemainsStoppingUntilChildExits(t *testing.T) {
 	runner.release <- struct{}{}
 	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberStopped)
 	assertTeamStopFacts(t, root, request.Work.SessionID, team.ID, member.ID, input.TeamTurn.TurnID, true)
+}
+
+func TestCloseTeamWaitsForActualChildExit(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	service, request := teamServiceFixture(t, root, "close-parent")
+	request.PermissionBounds, _ = json.Marshal(permission.Authority{RunID: request.RunID, SessionID: request.Work.SessionID, AllowedRoot: root})
+	service.activeRequests = map[string]agent.ExecutionRequest{request.RunID: request}
+	role := agentcatalog.Definition{Name: "explore", Instruction: "Inspect the assigned area.", Model: "inherit", Tools: []string{"read_file"}, MaxTurns: 3}
+	runner := &gatedTeamChildRunner{inputs: make(chan agent.ChildRunInput, 1), release: make(chan struct{}, 1)}
+	pool, err := agent.NewPoolDelegator(agent.DefaultDelegationLimits(), runner, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.deps.Agents = fixedTeamRoleCatalog{definition: role}
+	service.deps.Delegator = pool
+	service.deps.ForkProvider = forkSkillFixtureProvider{}
+	service.deps.ForkExecutorFactory = forkSkillFixtureExecutorFactory{}
+	service.deps.ForkToolSchemas = []llm.ToolSchema{{Name: "read_file"}}
+	service.deps.ProviderName, service.deps.Model = "fixture", "model-v1"
+	service.lifeCtx = context.Background()
+	service.teamScheduler = newTeamScheduler(service)
+	t.Cleanup(func() {
+		select {
+		case runner.release <- struct{}{}:
+		default:
+		}
+		service.teamScheduler.close()
+		pool.Close()
+	})
+
+	team, err := service.CreateTeam(t.Context(), request, "close-until-exit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := service.SpawnTeamMember(t.Context(), request, TeamMemberSpawnRequest{
+		TeamID: team.ID, Name: "reader", AgentName: role.Name, Instruction: "Inspect the area.", OriginCallID: "call-spawn",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := receiveTeamChildInput(t, runner.inputs)
+	closing, err := service.CloseTeam(t.Context(), request, team.ID)
+	if err != nil || closing.Status != teams.TeamClosing {
+		t.Fatalf("close while child active = %+v, err=%v; want closing", closing, err)
+	}
+	projection, err := sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Teams[team.ID].Status != teams.TeamClosing || projection.Members[member.ID].Status.IsTerminal() || projection.Turns[input.TeamTurn.TurnID].Status == "succeeded" || projection.Turns[input.TeamTurn.TurnID].Status == "canceled" {
+		t.Fatalf("team close wrote terminal facts before child exit: team=%+v member=%+v turn=%+v", projection.Teams[team.ID], projection.Members[member.ID], projection.Turns[input.TeamTurn.TurnID])
+	}
+	runner.release <- struct{}{}
+	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberStopped)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		projection, err = sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if projection.Teams[team.ID].Status == teams.TeamClosed {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if projection.Teams[team.ID].Status != teams.TeamClosed {
+		t.Fatalf("team status after child exit = %s, want closed", projection.Teams[team.ID].Status)
+	}
+	if runner.childCount() != 1 {
+		t.Fatalf("closing team started %d child turns, want one", runner.childCount())
+	}
 }
 
 func assertTeamStopFacts(t *testing.T, root, sessionID, teamID, memberID, turnID string, wantTerminal bool) {
