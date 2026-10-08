@@ -371,6 +371,52 @@ func TestUserDiscardRequiresCurrentPreviewDigestAndGeneration(t *testing.T) {
 	}
 }
 
+func TestRemoveCleanPreservesDirtyUntrackedWorkspace(t *testing.T) {
+	parent := t.TempDir()
+	formal := filepath.Join(parent, "formal")
+	if err := os.Mkdir(formal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formal, "baseline.txt"), []byte("baseline"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	layout, err := NewLayout(filepath.Join(parent, "state"), formal, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := testScope()
+	scope.Authority = permission.Authority{RunID: "run-remove", SessionID: scope.SessionID, AllowedRoot: formal, FormalRoot: formal, CandidateRoot: filepath.Join(parent, "candidate")}
+	service, err := NewService(layout, Limits{}, ServiceDependencies{IdleGuard: idleWorkspaceGuard{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close(context.Background())
+
+	created, err := service.Create(context.Background(), scope, "preserve untracked work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := layout.Paths(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	untracked := filepath.Join(paths.Checkout, "untracked.txt")
+	if err := os.WriteFile(untracked, []byte("user work"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RemoveClean(context.Background(), scope, created.ID); !errors.Is(err, ErrOwnership) {
+		t.Fatalf("clean remove accepted a dirty workspace: %v", err)
+	}
+	retained, err := service.Get(context.Background(), scope, created.ID)
+	if err != nil || retained.State != StateReady {
+		t.Fatalf("dirty workspace state after rejected clean remove=%+v err=%v", retained, err)
+	}
+	content, err := os.ReadFile(untracked)
+	if err != nil || string(content) != "user work" {
+		t.Fatalf("rejected clean remove lost untracked data: content=%q err=%v", content, err)
+	}
+}
+
 func TestLifecycleServiceRecoversInterruptedJournalOperationsConservatively(t *testing.T) {
 	parent := t.TempDir()
 	formal := filepath.Join(parent, "formal")
