@@ -1,6 +1,6 @@
 # M09-E 团队、消息与只读协调器 Checklist
 
-> 状态：规格已批准，实施代码已提交；AC1–9 与完整场景仍按实际证据逐项验收。SHA `108b964` 的 Go build/unit、package 与全量 E2E 全部 jobs 通过；E AC1–9 仍有逐项验收缺口（2026-10-08）。
+> 状态：规格已批准，实施代码已提交；AC1–9 与完整场景仍按实际证据逐项验收。SHA `c0f523d` 的 Go build/unit、package 与全量 E2E 全部 jobs 通过；E AC1–9 仍有逐项验收缺口（2026-10-09）。
 
 ## 功能验收
 
@@ -57,6 +57,7 @@ E实现与运行验收进行中。每项完成后记录实际证据；D/A/B/C旧
 | 最新兼容代码 Go/package + E2E | `ea24f8e9e82225f3d8879c4165d77a0e5077fdfe` | [Go run 37675602216](https://github.com/kikoiio/Stable/actions/runs/37675602216), [E2E run 37675602223](https://github.com/kikoiio/Stable/actions/runs/37675602223) | Go `build-and-test`、`test-package` 与 E2E `unit`、`cases`、`e2e-core`、`e2e-m03`、`e2e-m04`、`e2e-sessions` 全部成功；新增双有效 session 同名 team 隔离测试纳入全量 unit。仍不替代 E AC1–9 完整协作/恢复验收。 |
 | D/E/F 当前组合代码复验 | `8223aaf6915669ff87d15264cef5cbdb85293e24` | [Go run 37677736986](https://github.com/kikoiio/Stable/actions/runs/37677736986), [E2E run 37677737032](https://github.com/kikoiio/Stable/actions/runs/37677737032) | Go build/unit、package 与 E2E 全部 jobs 成功，含新增 E 双 session 同名 team 隔离和 D 独立目标复核测试；E AC1–9 仍未整体验收。 |
 | Goal/WorkItem owner 隔离及当前 E/F 组合回归 | `108b964564d6bce9a08ca7285b5302f733a7a7de` | [Go run 37804001646](https://github.com/kikoiio/Stable/actions/runs/37804001646), [E2E run 37802252496](https://github.com/kikoiio/Stable/actions/runs/37802252496), [M09 Workspace Linux run 37801933759](https://github.com/kikoiio/Stable/actions/runs/37801933759) | Go `build-and-test`/`test-package`、E2E 全部 jobs 和 `writer-sandbox-volume` 成功。首次 Go run 37802254996 的 build/unit 因无关的 `TestLegacyHistoryIsNotReplayedButLiveGoalMessagesBroadcast` socket read 10 分钟超时；单独 Go run 复验通过。新增 Goal/WorkItem 测试只补 AC1 owner 子场景，AC1–9 仍未整体验收。 |
+| Service task claim race 与当前 E/F 组合回归 | `c0f523d40faec92c3682f9f56445b9ce292185ae` | [Go run 37805889376](https://github.com/kikoiio/Stable/actions/runs/37805889376), [E2E run 37805888980](https://github.com/kikoiio/Stable/actions/runs/37805888980), [M09 Workspace Linux run 37807400979](https://github.com/kikoiio/Stable/actions/runs/37807400979) | Go `build-and-test`/`test-package`、E2E 所有 jobs 与 `writer-sandbox-volume` 全部成功。包含并发 service claim/replay 测试；只补 AC4 中同 revision 竞争仅一个持久 owner 的子场景，AC1–9 与完整 task-board 场景仍未整体验收。 |
 
 | 本地定向检查 | 实际结果 | 覆盖范围与限制 |
 |---|---|---|
@@ -65,4 +66,5 @@ E实现与运行验收进行中。每项完成后记录实际证据；D/A/B/C旧
 | `team_send` 协议入口与 idle member handoff | `TestLeadMessageAutomaticallyResumesIdleTeamMember`；最终 SHA `f458c91` 的 E2E `unit` job | `validateClient` 和 `handleTeamRequest` 真实入口返回有序、接收者固定的消息；sessionlog投影与响应一致；同一逻辑member收到消息后仅启动一个新turn。覆盖此子场景，不覆盖 p2p/broadcast 批次恢复、共享池公平或完整 AC2/AC3。 |
 | 双有效 session 同名 team 隔离 | `TestSameTeamNameIsIsolatedAcrossValidSessions`；Go run 37677736986 `build-and-test` 与 E2E run 37677737032 `unit` 成功 | 两个有效 lead run 在同一 project 各自创建 `research`；team ID 独立，两个 session 的 list/get 仅返回本 session 团队并拒绝查询对方 ID。仍未覆盖 Goal/WorkItem owner、跨 session 消息与 stop 全路径，AC1 保持未完成。 |
 | Goal/WorkItem team owner 隔离 | `TestGoalTeamIsIsolatedByGoalAndWorkItem`；E2E run 37802252496 `unit` 与 Go run 37804001646 `build-and-test` 成功 | 同一 session 下，匹配的 Goal/WorkItem 可创建并查询 team；更换 WorkItem 或 Goal 后不能查询原 team。只覆盖查询隔离，不覆盖 Goal 消息/stop、不同授权 root 等完整 AC1。 |
+| Team task service 并发 claim | `TestTeamTaskServiceConcurrentClaimsPersistOneOwner`；Go run 37805889376 `build-and-test`、E2E run 37805888980 `unit` 成功 | 两个 lead 更新以相同 expected revision 指派不同的有效成员；一项更新成功、一项返回 revision conflict，sessionlog replay 仅保留 revision + 1 和一个 assignee。仍未证明取消语义、完整 CRUD/依赖组合或 AC4 全面通过。 |
 | team TUI 定向 Go 测试 | 通过（2026-10-07）；`TestTeamCommands`，`TMPDIR=/home/neo/.cache/tmp GOMAXPROCS=2 go test -p 1` | 验证 `/team ... resume ... --accept-role-change` 编码显式确认；不代表完整client/TUI协作路径或AC9。 |

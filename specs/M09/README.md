@@ -1,6 +1,6 @@
 # M09 并行协作与工作树：范围与进度
 
-> 2026-10-08 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。D/E/F 实现改动已提交并推送。SHA `108b964564d6bce9a08ca7285b5302f733a7a7de` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 全部通过。D/E/F checklist 仍有逐项验收缺口。
+> 2026-10-09 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。D/E/F 实现改动已提交并推送。SHA `c0f523d40faec92c3682f9f56445b9ce292185ae` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 全部通过。D/E/F checklist 仍有逐项验收缺口。
 
 ## 已完成
 
@@ -17,8 +17,8 @@
 | 建议子项 | 源端行为与文件 | 当前缺口 | 实施前置 |
 |---|---|---|---|
 | M09-D agent 定义与后台任务 | `internal/agents/definition.go`、`loader.go`、`agent_tool.go`、`subagent.go`；具名角色、定义覆盖、后台启动、状态/摘要、取消、完成通知 | AC1–9 与完整场景均有逐项证据；候选接受后须独立复核才 verified | SHA `8223aaf` 的 Go build/unit、package 与全量 E2E 通过；[checklist](../M09-D/checklist.md) 保留证据映射 |
-| M09-E 团队与协调器 | `internal/teams` 的 scope/预算/任务图，sessionlog typed facts/projection；shared-pool member 首轮 spawn、多轮显式/消息唤醒、child run 持久化/中断恢复、消息批次 handoff、plan/shutdown 请求、强停/延迟关闭、团队/task 工具与 TUI 命令；coordinator 下一 run 开关持久化、team-only schema 和 executor 硬 allowlist；有界 FIFO capacity 队列与 grant generation 取消/关闭校验 | 实现与自动 lead-message handoff 已接通；新增 Goal/WorkItem owner 隔离测试和全量 Go/E2E 回归通过；服务恢复、取消/关闭和完整 E/TUI 组合仍须逐项按 [checklist](../M09-E/checklist.md) 记录。E AC1–9 尚未整体验收 | SHA `108b964` 的 Go build/unit、package 与 E2E 全部 jobs 通过；规格已批准 |
-| M09-F 受控工作树与并行写入 | `internal/workspace` ownership、manifest、配额预算、私有 Git、materializer、独立 lifecycle service 与 B/F/W 合并；candidate metadata 事务和身份恢复；conversation/TUI 生命周期、按完整 B/F/W digest 绑定的逐路径 conflict resolution、用户 dirty-discard 预览/确认、D named-agent writer lease、受限文件工具和持久配额；CI 使用 disposable ext4 验证真实磁盘上限与 metadata 攻击 | Linux writer/sandbox/quota 组合 workflow 已通过；新增双 session binding 独立性测试；F AC1–9 的私有 Git、生命周期故障、用户决策完整闭环和 Team+F 组合仍需逐项审计，不把单项 workflow 当成整体验收 | SHA `108b964` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 均通过；规格已批准 |
+| M09-E 团队与协调器 | `internal/teams` 的 scope/预算/任务图，sessionlog typed facts/projection；shared-pool member 首轮 spawn、多轮显式/消息唤醒、child run 持久化/中断恢复、消息批次 handoff、plan/shutdown 请求、强停/延迟关闭、团队/task 工具与 TUI 命令；coordinator 下一 run 开关持久化、team-only schema 和 executor 硬 allowlist；有界 FIFO capacity 队列与 grant generation 取消/关闭校验 | 实现与自动 lead-message handoff 已接通；新增 Goal/WorkItem owner 隔离、service task claim race 测试和全量 Go/E2E 回归通过；服务恢复、取消/关闭和完整 E/TUI 组合仍须逐项按 [checklist](../M09-E/checklist.md) 记录。E AC1–9 尚未整体验收 | SHA `c0f523d` 的 Go build/unit、package 与 E2E 全部 jobs 通过；规格已批准 |
+| M09-F 受控工作树与并行写入 | `internal/workspace` ownership、manifest、配额预算、私有 Git、materializer、独立 lifecycle service 与 B/F/W 合并；candidate metadata 事务和身份恢复；conversation/TUI 生命周期、按完整 B/F/W digest 绑定的逐路径 conflict resolution、用户 dirty-discard 预览/确认、D named-agent writer lease、受限文件工具和持久配额；CI 使用 disposable ext4 验证真实磁盘上限与 metadata 攻击 | Linux writer/sandbox/quota 组合 workflow 已通过；新增双 session binding 独立性测试；F AC1–9 的私有 Git、生命周期故障、用户决策完整闭环和 Team+F 组合仍需逐项审计，不把单项 workflow 当成整体验收 | SHA `c0f523d` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 均通过；规格已批准 |
 
 源文件位于本机 `/home/neo/Projects/mewcode-golang`。核对使用源码读取，未执行源项目、真实 provider 或重型构建。
 
