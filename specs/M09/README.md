@@ -22,7 +22,7 @@
 
 源文件位于本机 `/home/neo/Projects/mewcode-golang`。核对使用源码读取，未执行源项目、真实 provider 或重型构建。
 
-2026-10-09 增补局部证据：E 的运行中消息 handoff、busy-turn force-stop 顺序，以及 F 的 socket workspace list 和 swapped-phase metadata identity replacement 均通过定向测试；其中 force-stop 发现并修正了 service response actor 校验。覆盖范围和限制见 [E checklist](../M09-E/checklist.md) 与 [F checklist](../M09-F/checklist.md)。这些结果未改变 E/F AC1–9 未整体验收的状态。
+2026-10-09 增补局部证据：E 的运行中消息 handoff、busy-turn force-stop 顺序与 plan approval 只读续跑，以及 F 的 socket workspace list、swapped-phase metadata identity replacement 和不同文件顺序候选接受均通过定向测试；强停和 plan approval 切片发现并修正了状态/协议问题。覆盖范围和限制见 [E checklist](../M09-E/checklist.md) 与 [F checklist](../M09-F/checklist.md)。新代码 SHA 的云端 Go/package、E2E 与 Workspace Linux 验证正在执行；E/F AC1–9 仍未整体验收。
 
 ## 全部完成的条件
 

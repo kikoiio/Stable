@@ -237,6 +237,9 @@ func (s *Service) RespondTeamRequest(ctx context.Context, request agent.Executio
 	team.Revision++
 	if prior.Type == teams.RequestPlan && prior.Status == teams.RequestApproved {
 		member.PlanApproved = true
+		if member.Status == teams.MemberAwaitingPlan {
+			member.Status = teams.MemberIdle
+		}
 		member.Revision++
 		if err := s.appendTeamMemberState(root, team, request.RunID, teams.Lead, member); err != nil {
 			return prior, err
