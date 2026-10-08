@@ -22,7 +22,7 @@
 
 源文件位于本机 `/home/neo/Projects/mewcode-golang`。核对使用源码读取，未执行源项目、真实 provider 或重型构建。
 
-2026-10-09 增补局部证据：E 的运行中消息 handoff、busy-turn force-stop、plan approval/rejection 的只读续跑、请求过期持久化、busy shutdown defer/reject、双 parent cancel 隔离和 coordinator 模式快照，以及 F 的 socket workspace list、swapped-phase metadata identity replacement、不同文件顺序候选接受、writer lease generation fence 和 active-run binding guard 均通过定向测试；强停、plan request lifecycle 与 request expiry 切片发现并修正了状态/协议缺口。覆盖范围和限制见 [E checklist](../M09-E/checklist.md) 与 [F checklist](../M09-F/checklist.md)。最新组合 SHA 的 Go/package、E2E 与 Workspace Linux 云端验证待本轮提交后确认；E/F AC1–9 仍未整体验收。
+2026-10-09 增补局部证据：E 的运行中消息 handoff、busy-turn force-stop、plan approval/rejection 的只读续跑、请求过期持久化、busy shutdown defer/reject、双 parent cancel 隔离和 coordinator 模式快照，以及 F 的 socket workspace list、swapped-phase metadata identity replacement、顺序候选接受、并发冲突导出幂等、writer lease generation fence 和 active-run binding guard 均通过定向测试；强停、plan request lifecycle 与 request expiry 切片发现并修正了状态/协议缺口。覆盖范围和限制见 [E checklist](../M09-E/checklist.md) 与 [F checklist](../M09-F/checklist.md)。最新组合 SHA 的 Go/package、E2E 与 Workspace Linux 云端验证待本轮提交后确认；E/F AC1–9 仍未整体验收。
 
 ## 全部完成的条件
 

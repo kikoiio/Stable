@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"stable/internal/agent"
@@ -205,13 +206,34 @@ func TestWorkspaceConflictResolutionExportsReviewedCandidateForAcceptance(t *tes
 	if _, err := manager.ResolveUser(ctx, scope, created.ID, "user", preview.PreviewID, preview.Generation, map[string]string{"board.txt": workspace.UseWorkspace}); err != nil {
 		t.Fatal(err)
 	}
-	exported, err := manager.Export(ctx, scope, created.ID)
-	if err != nil || exported.State != workspace.StateExported || exported.CandidateID == "" {
-		t.Fatalf("workspace export=%+v err=%v", exported, err)
+	start := make(chan struct{})
+	type exportResult struct {
+		snapshot workspace.Snapshot
+		err      error
 	}
-	retried, err := manager.Export(ctx, scope, created.ID)
-	if err != nil || retried.CandidateID != exported.CandidateID {
-		t.Fatalf("repeated export=%+v err=%v; first=%+v", retried, err, exported)
+	results := make(chan exportResult, 2)
+	var exports sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		exports.Add(1)
+		go func() {
+			defer exports.Done()
+			<-start
+			snapshot, err := manager.Export(ctx, scope, created.ID)
+			results <- exportResult{snapshot: snapshot, err: err}
+		}()
+	}
+	close(start)
+	exports.Wait()
+	close(results)
+	var exported workspace.Snapshot
+	for result := range results {
+		if result.err != nil || result.snapshot.State != workspace.StateExported || result.snapshot.CandidateID == "" {
+			t.Fatalf("concurrent workspace export=%+v err=%v", result.snapshot, result.err)
+		}
+		if exported.CandidateID != "" && result.snapshot.CandidateID != exported.CandidateID {
+			t.Fatalf("concurrent exports produced different candidates: %q and %q", exported.CandidateID, result.snapshot.CandidateID)
+		}
+		exported = result.snapshot
 	}
 	candidateRecord, err := state.GetCandidate(ctx, exported.CandidateID)
 	if err != nil {
