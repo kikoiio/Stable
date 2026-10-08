@@ -231,6 +231,72 @@ func TestExpiredTeamRequestIsPersistedAndCannotBeAnswered(t *testing.T) {
 	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberAwaitingPlan)
 }
 
+func TestBusyTeamShutdownCanBeDeferredThenRejectedByMember(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	service, request := teamServiceFixture(t, root, "shutdown-parent")
+	request.PermissionBounds, _ = json.Marshal(permission.Authority{RunID: request.RunID, SessionID: request.Work.SessionID, AllowedRoot: root})
+	service.activeRequests = map[string]agent.ExecutionRequest{request.RunID: request}
+	role := agentcatalog.Definition{Name: "explore", Instruction: "Inspect the assigned area.", Model: "inherit", Tools: []string{"read_file"}, MaxTurns: 3}
+	runner := &gatedTeamChildRunner{inputs: make(chan agent.ChildRunInput, 1), release: make(chan struct{}, 1)}
+	pool, err := agent.NewPoolDelegator(agent.DefaultDelegationLimits(), runner, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.deps.Agents = fixedTeamRoleCatalog{definition: role}
+	service.deps.Delegator = pool
+	service.deps.ForkProvider = forkSkillFixtureProvider{}
+	service.deps.ForkExecutorFactory = forkSkillFixtureExecutorFactory{}
+	service.deps.ForkToolSchemas = []llm.ToolSchema{{Name: "read_file"}}
+	service.deps.ProviderName, service.deps.Model = "fixture", "model-v1"
+	service.lifeCtx = context.Background()
+	service.teamScheduler = newTeamScheduler(service)
+	t.Cleanup(func() {
+		runner.release <- struct{}{}
+		service.teamScheduler.close()
+		pool.Close()
+	})
+
+	team, err := service.CreateTeam(t.Context(), request, "busy-shutdown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := service.SpawnTeamMember(t.Context(), request, TeamMemberSpawnRequest{
+		TeamID: team.ID, Name: "reader", AgentName: role.Name, Instruction: "Inspect the area.", OriginCallID: "call-shutdown",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := receiveTeamChildInput(t, runner.inputs)
+	childRequest := agent.ExecutionRequest{RunID: child.ChildRunID, Work: request.Work, TeamTurn: child.TeamTurn}
+	shutdown, err := service.RequestTeamShutdown(t.Context(), request, team.ID, member.ID)
+	if err != nil || shutdown.Status != teams.RequestPending {
+		t.Fatalf("busy shutdown request = %+v, err=%v", shutdown, err)
+	}
+	if _, err := service.RespondTeamRequest(t.Context(), request, team.ID, shutdown.ID, shutdown.Revision, string(teams.RequestApproved), ""); !errors.Is(err, teams.ErrPermission) {
+		t.Fatalf("lead answered member shutdown request: %v", err)
+	}
+	deferred, err := service.RespondTeamRequest(t.Context(), childRequest, team.ID, shutdown.ID, shutdown.Revision, string(teams.RequestDeferred), "Finish the current inspection first.")
+	if err != nil || deferred.Status != teams.RequestDeferred {
+		t.Fatalf("member defer = %+v, err=%v", deferred, err)
+	}
+	projection, err := sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Members[member.ID].Status != teams.MemberRunning || projection.Requests[shutdown.ID].Status != teams.RequestDeferred {
+		t.Fatalf("deferred shutdown changed active member: member=%+v request=%+v", projection.Members[member.ID], projection.Requests[shutdown.ID])
+	}
+	rejected, err := service.RespondTeamRequest(t.Context(), childRequest, team.ID, shutdown.ID, deferred.Revision, string(teams.RequestRejected), "Continue the assigned work.")
+	if err != nil || rejected.Status != teams.RequestRejected {
+		t.Fatalf("member rejection = %+v, err=%v", rejected, err)
+	}
+	runner.release <- struct{}{}
+	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberIdle)
+}
+
 func assertTeamPlanToolSchemas(t *testing.T, schemas []llm.ToolSchema) {
 	t.Helper()
 	allowed := map[string]bool{}
