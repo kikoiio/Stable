@@ -1434,6 +1434,10 @@ func (s *LifecycleService) StopWriterIfActive(ctx context.Context, scope Scope, 
 }
 
 func (s *LifecycleService) RemoveClean(ctx context.Context, scope Scope, id string) (Snapshot, error) {
+	return s.removeCleanWithHooks(ctx, scope, id, removeHooks{})
+}
+
+func (s *LifecycleService) removeCleanWithHooks(ctx context.Context, scope Scope, id string, hooks removeHooks) (Snapshot, error) {
 	unlock, err := s.lockBindingOperation(ctx, scope)
 	if err != nil {
 		return Snapshot{}, err
@@ -1459,30 +1463,45 @@ func (s *LifecycleService) RemoveClean(ctx context.Context, scope Scope, id stri
 	if boundID == id {
 		return Snapshot{}, ErrOwnership
 	}
-	state, err := s.git.ValidateForDiscard(ctx, scope, id)
+	baselineDigest, err := s.cleanRemovalBaselineDigest(ctx, scope, record)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	paths, err := s.layout.Paths(id)
+	hooks.validateBeforeRename = func(validateCtx context.Context) error {
+		current, err := s.cleanRemovalBaselineDigest(validateCtx, scope, record)
+		if err != nil {
+			return err
+		}
+		if current != baselineDigest {
+			return ErrSourceChanged
+		}
+		return nil
+	}
+	return s.removeRecordLockedWithHooks(ctx, scope, record, hooks)
+}
+
+func (s *LifecycleService) cleanRemovalBaselineDigest(ctx context.Context, scope Scope, record Record) (string, error) {
+	state, err := s.git.ValidateForDiscard(ctx, scope, record.Snapshot.ID)
 	if err != nil {
-		return Snapshot{}, err
+		return "", err
+	}
+	paths, err := s.layout.Paths(record.Snapshot.ID)
+	if err != nil {
+		return "", err
 	}
 	manifest, err := BuildManifest(ctx, paths.Checkout, s.limits)
 	if err != nil {
-		return Snapshot{}, err
+		return "", err
 	}
 	if manifest.Digest != state.BaselineDigest {
-		return Snapshot{}, ErrOwnership
+		return "", ErrOwnership
 	}
-	return s.removeRecordLocked(ctx, scope, record)
-}
-
-func (s *LifecycleService) removeRecordLocked(ctx context.Context, scope Scope, record Record) (Snapshot, error) {
-	return s.removeRecordLockedWithHooks(ctx, scope, record, removeHooks{})
+	return state.BaselineDigest, nil
 }
 
 type removeHooks struct {
 	afterIntent            func() error
+	validateBeforeRename   func(context.Context) error
 	afterQuarantine        func(string) error
 	afterQuarantineRemoved func(string) error
 }
@@ -1524,6 +1543,21 @@ func (s *LifecycleService) removeRecordLockedWithHooks(ctx context.Context, scop
 			return Snapshot{}, err
 		}
 		return Snapshot{}, ErrOwnership
+	}
+	if hooks.validateBeforeRename != nil {
+		if err := hooks.validateBeforeRename(ctx); err != nil {
+			project.Close()
+			interrupted := removing
+			interrupted.Snapshot.State = StateInterrupted
+			interrupted.Snapshot.Error = "remove precondition changed after intent; workspace retained"
+			interrupted.Snapshot.Cursor++
+			interrupted.Operation.Phase = "blocked"
+			interrupted.Operation.UpdatedAt = time.Now().UTC()
+			if saveErr := s.store.Save(ctx, scope, interrupted, removing.Snapshot.Generation); saveErr != nil {
+				return Snapshot{}, errors.Join(err, saveErr)
+			}
+			return Snapshot{}, err
+		}
 	}
 	if err := project.Rename(id, quarantineName); err != nil {
 		project.Close()

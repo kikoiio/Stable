@@ -77,3 +77,5 @@ M09-E 增加持久化团队协作、消息、任务和只读协调器；M09-F �
 后续本地回归已覆盖 M09-E TUI 自身的 parent-stream EOF 恢复状态机，以及 M09-F 同内容不同 inode 的 `.stable` 目录替换恢复；两项定向测试通过。当前组合 SHA 的 Go、M09 Workspace Linux 与 E2E 云端结果见 checklist；M09-E/F 仍未完成整体验收。
 
 另补齐 production 默认 128 MiB snapshot 边界拒绝无副作用、64 KiB 完整 team-turn 编码边界，以及 coordinator 对 worktree lifecycle 伪造调用的零副作用拒绝回归；定向测试通过，checklist 记录对应证据。当前云端复验以最新推送 SHA 为准。
+
+SHA `a895665` 的 Go 全量 build/unit + package 与 M09 Workspace Linux 均通过，E2E 仍运行。后续本地修复了 clean/discard remove 的 intent 后内容变更竞态，并以服务内短期 HMAC proof 阻止伪造 `TeamUser` 提权；conversation/workspace 定向回归、gofmt 和 diff-check 通过，待新 SHA 云端复验。

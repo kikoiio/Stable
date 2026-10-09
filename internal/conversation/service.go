@@ -114,6 +114,9 @@ type Service struct {
 	mcpMu           sync.Mutex
 	mcpInstructions map[string]bool
 	teamScheduler   *teamScheduler
+	teamUserMu      sync.Mutex
+	teamUserSecret  [32]byte
+	teamUserReady   bool
 	// teamMemberStateAppender is an optional per-service persistence seam used
 	// to exercise recovery of a failed state append. Nil uses the session log.
 	teamMemberStateAppender func(root string, team teams.Team, runID, actor string, member teams.Member) error

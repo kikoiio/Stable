@@ -96,6 +96,80 @@ func TestRemoveRootReplacementAfterIntentIsRetained(t *testing.T) {
 	}
 }
 
+func TestCleanAndConfirmedDiscardRevalidateAfterDurableIntent(t *testing.T) {
+	for _, mode := range []string{"clean", "discard"} {
+		t.Run(mode, func(t *testing.T) {
+			parent := t.TempDir()
+			formal := filepath.Join(parent, "formal")
+			if err := os.Mkdir(formal, 0700); err != nil {
+				t.Fatal(err)
+			}
+			layout, err := NewLayout(filepath.Join(parent, "state"), formal, "project")
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope := testScope()
+			scope.Authority = permission.Authority{RunID: "remove-content-race", SessionID: scope.SessionID, AllowedRoot: formal, FormalRoot: formal, CandidateRoot: filepath.Join(parent, "candidate")}
+			service, err := NewService(layout, Limits{}, ServiceDependencies{IdleGuard: idleWorkspaceGuard{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer service.Close(context.Background())
+
+			created, err := service.Create(context.Background(), scope, "content changes during remove")
+			if err != nil {
+				t.Fatal(err)
+			}
+			paths, err := layout.Paths(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "discard" {
+				if err := os.WriteFile(filepath.Join(paths.Checkout, "confirmed.txt"), []byte("confirmed dirty content"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			preview := Snapshot{}
+			if mode == "discard" {
+				preview, err = service.PreviewDiscardUser(context.Background(), scope, created.ID, "actual-user")
+				if err != nil {
+					t.Fatalf("preview discard: %v", err)
+				}
+			}
+
+			newData := filepath.Join(paths.Checkout, "arrived-after-confirmation.txt")
+			hooks := removeHooks{afterIntent: func() error {
+				return os.WriteFile(newData, []byte("new user data"), 0600)
+			}}
+			var result Snapshot
+			if mode == "clean" {
+				result, err = service.removeCleanWithHooks(context.Background(), scope, created.ID, hooks)
+			} else {
+				result, err = service.removeDiscardUserWithHooks(context.Background(), scope, created.ID, "actual-user", preview.DiscardID, preview.DiscardDigest, preview.Generation, hooks)
+			}
+			if err == nil || result.State == StateRemoved {
+				t.Fatalf("%s remove result=%+v err=%v; expected changed-content refusal", mode, result, err)
+			}
+			if mode == "discard" && !errors.Is(err, ErrSourceChanged) {
+				t.Fatalf("discard returned %v, want ErrSourceChanged", err)
+			}
+			if mode == "clean" && !errors.Is(err, ErrOwnership) && !errors.Is(err, ErrSourceChanged) {
+				t.Fatalf("clean remove returned %v, want ownership/source-changed error", err)
+			}
+			stored, err := service.store.load(created.ID, false)
+			if err != nil || stored.Snapshot.State != StateInterrupted || stored.Operation.Kind != "remove" || stored.Operation.Phase != "blocked" {
+				t.Fatalf("changed-content removal was not retained as blocked: record=%+v err=%v", stored, err)
+			}
+			if _, err := os.Stat(paths.Root); err != nil {
+				t.Fatalf("workspace root was removed: %v", err)
+			}
+			if content, err := os.ReadFile(newData); err != nil || string(content) != "new user data" {
+				t.Fatalf("post-confirmation data was not retained: content=%q err=%v", content, err)
+			}
+		})
+	}
+}
+
 func TestRemoveQuarantineRecoveryCompletesPinnedOwnedRoot(t *testing.T) {
 	parent := t.TempDir()
 	formal := filepath.Join(parent, "formal")

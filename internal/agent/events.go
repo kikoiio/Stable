@@ -27,6 +27,7 @@ type ExecutionRequest struct {
 	Work                  WorkRef           `json:"work"`
 	TeamTurn              *TeamTurnIdentity `json:"-"`
 	TeamUser              bool              `json:"-"` // trusted local session action; never accepted from wire/model input
+	TeamUserProof         string            `json:"-"` // service signature for a locally reconstructed TeamUser request
 	AcceptTeamRoleChange  bool              `json:"-"` // explicit client resume confirmation; never exposed as a model tool argument
 	TeamCoordinator       bool              `json:"-"` // trusted per-run static team-only tool mode
 	TeamCoordinatorTeamID string            `json:"-"` // trusted team binding for the coordinator mode

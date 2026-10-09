@@ -21,7 +21,7 @@ func (s *Service) teamScope(ctx context.Context, request agent.ExecutionRequest)
 	if err := ctx.Err(); err != nil {
 		return "", zero, err
 	}
-	if request.TeamTurn != nil || request.TeamUser {
+	if request.TeamTurn != nil || request.TeamUser || request.TeamUserProof != "" {
 		return "", zero, teams.ErrPermission
 	}
 	root, err := sessionlog.ProjectRoot(s.deps.ProjectRoot)
@@ -121,7 +121,7 @@ func (s *Service) teamOperationScope(ctx context.Context, request agent.Executio
 		return "", zero, teams.Actor{}, err
 	}
 	if request.TeamUser {
-		if request.TeamTurn != nil || sessionlog.ValidateID(request.Work.SessionID) != nil {
+		if request.TeamTurn != nil || sessionlog.ValidateID(request.Work.SessionID) != nil || !s.validTeamUserRequest(request) {
 			return "", zero, teams.Actor{}, teams.ErrPermission
 		}
 		_, scope, scopeErr := s.scopeForWork(ctx, root, request.Work)
@@ -129,6 +129,9 @@ func (s *Service) teamOperationScope(ctx context.Context, request agent.Executio
 			return "", zero, teams.Actor{}, teams.ErrPermission
 		}
 		return root, scope, teams.Actor{Lead: true}, nil
+	}
+	if request.TeamUserProof != "" {
+		return "", zero, teams.Actor{}, teams.ErrPermission
 	}
 	if sessionlog.ValidateID(request.Work.SessionID) != nil {
 		return "", zero, teams.Actor{}, teams.ErrPermission
@@ -199,7 +202,11 @@ func (s *Service) teamUserRequest(ctx context.Context, sessionID, teamID string)
 	if err != nil || !scope.Matches(team.Scope) {
 		return request, teams.ErrPermission
 	}
-	return agent.ExecutionRequest{Work: work, TeamUser: true}, nil
+	request = agent.ExecutionRequest{Work: work, TeamUser: true}
+	if err := s.signTeamUserRequest(&request); err != nil {
+		return agent.ExecutionRequest{}, err
+	}
+	return request, nil
 }
 
 func (s *Service) CreateTeam(ctx context.Context, request agent.ExecutionRequest, name string) (teams.Team, error) {

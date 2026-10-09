@@ -183,6 +183,10 @@ func (s *LifecycleService) PreviewDiscardUser(ctx context.Context, scope Scope, 
 }
 
 func (s *LifecycleService) RemoveDiscardUser(ctx context.Context, scope Scope, id, userID, decisionID, digest string, generation uint64) (Snapshot, error) {
+	return s.removeDiscardUserWithHooks(ctx, scope, id, userID, decisionID, digest, generation, removeHooks{})
+}
+
+func (s *LifecycleService) removeDiscardUserWithHooks(ctx context.Context, scope Scope, id, userID, decisionID, digest string, generation uint64, hooks removeHooks) (Snapshot, error) {
 	unlock, err := s.lockBindingOperation(ctx, scope)
 	if err != nil {
 		return Snapshot{}, err
@@ -205,7 +209,17 @@ func (s *LifecycleService) RemoveDiscardUser(ctx context.Context, scope Scope, i
 	if current != digest {
 		return Snapshot{}, ErrSourceChanged
 	}
-	return s.removeRecordLocked(ctx, scope, record)
+	hooks.validateBeforeRename = func(validateCtx context.Context) error {
+		current, _, _, err := s.discardFacts(validateCtx, scope, record)
+		if err != nil {
+			return err
+		}
+		if current != digest {
+			return ErrSourceChanged
+		}
+		return nil
+	}
+	return s.removeRecordLockedWithHooks(ctx, scope, record, hooks)
 }
 
 func (s *LifecycleService) removableRecord(ctx context.Context, scope Scope, id string) (Record, error) {
