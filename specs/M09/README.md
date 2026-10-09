@@ -28,6 +28,8 @@
 
 2026-10-09 继续补入 F 的 TUI create→conversation service restart→冲突决策→candidate review/accept 组合测试，SHA `d4f6677` 本地定向 TUI 测试连续 3 次通过。此 SHA 尚无云端 Go/package、E2E 或 Workspace Linux workflow 结果；测试通过临时 fixture 写工作树内容，真实 `run_agent` writer/sandbox 组合仍待补证。M09-E/F AC1–9 仍未整体验收，M09 整体保持未完成。
 
+随后并行补入 E 任务 assignee 归属校验及 F workspace ownership 跨 Project/Goal/WorkItem 伪造 scope 拒绝测试，分别记录于 E/F checklist；定向测试通过。SHA `a156e76` 包含两项实现/测试，需等待该 SHA 的云端组合验证；SHA `23e89f1` 的 Go 与 Workspace Linux workflow 已通过，E2E 仍在运行。E/F 整体验收仍未完成。
+
 ## 全部完成的条件
 
 - [x] M09-A/B/C 已实现并通过对应 checklist。
