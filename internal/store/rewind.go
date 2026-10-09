@@ -214,6 +214,48 @@ func (s *Store) ReconcileRewinds(ctx context.Context) error {
 			return err
 		}
 	}
+	// FinalizeRewind commits the database before Cleanup removes the spent
+	// staging root. If the process stops between those operations, the journal
+	// is no longer unfinished, so recover cleanup from finalized project
+	// journals whose candidate digest proves that the rewind committed.
+	rows, err := s.db.QueryContext(ctx, `SELECT id,candidate_id,snapshot_id,phase,expected_digest,target_digest,staging_dir,reason,created_at,updated_at,transaction_mode,rollback_path,manifest_policy,expected_root_identity,target_root_identity FROM rewind_journal WHERE phase='finalized' AND manifest_policy=? AND expected_root_identity<>'' ORDER BY updated_at,id`, candidate.ManifestPolicyProject)
+	if err != nil {
+		return err
+	}
+	var finalized []RewindJournal
+	for rows.Next() {
+		j, scanErr := scanRewind(rows)
+		if scanErr != nil {
+			rows.Close()
+			return scanErr
+		}
+		finalized = append(finalized, j)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	for _, j := range finalized {
+		rec, getErr := s.GetCandidate(ctx, j.CandidateID)
+		if getErr != nil {
+			return getErr
+		}
+		if rec.Candidate.Status != "ready" || rec.Candidate.CandidateDigest != j.TargetDigest {
+			continue
+		}
+		tx := candidate.DirectoryTransaction{
+			ID: j.ID, Kind: candidate.TransactionRewind, ManifestPolicy: j.ManifestPolicy,
+			ExpectedRootIdentity: j.ExpectedRootIdentity, TargetRootIdentity: j.TargetRootIdentity,
+			CurrentRoot: rec.Candidate.CandidateRoot, IncomingRoot: j.StagingDir, RollbackRoot: j.RollbackPath,
+			ExpectedDigest: j.ExpectedDigest, TargetDigest: j.TargetDigest, Mode: j.TransactionMode,
+		}
+		if err = candidate.NewTransactionCoordinator().Cleanup(ctx, tx); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
