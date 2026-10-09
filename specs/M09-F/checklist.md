@@ -12,7 +12,7 @@
 
 - [ ] workspace ID/label分离，label不用于路径/ref，创建与所有query/lifecycle操作拒绝跨session/project/Goal/WorkItem或伪造根。
 - [ ] 两个session binding及多个独立child同时存在；没有全局cwd切换，单项单writer/generation约束生效。
-- [ ] 活跃run期间禁止变更其binding/authority；默认exit/keep保留变更且确认writer真实退出，父正常完成/断线保持D后台语义。
+- [ ] 活跃run期间禁止变更其binding/authority；默认exit/keep保留变更且确认writer真实退出，父正常完成/断线保持D后台语义。（子项证据：`internal/tui/workspace_active_run_binding_integration_test.go::TestWorktreeTUIEnterIsBlockedAndExitWaitsDuringActiveRun` 经真实 Serve/socket 验证活跃 writer 下 enter 被拒绝且原 lease 保持；exit 等到取消终态后解除 binding。父正常完成/断线语义仍未覆盖。）
 
 ## AC2 私有 Git 与基线
 
