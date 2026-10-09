@@ -148,6 +148,71 @@ func TestRestartBlocksMismatchedTrackedWriterWithoutSignaling(t *testing.T) {
 	}
 }
 
+func TestRestartBlocksReusedWriterPIDWithoutSignaling(t *testing.T) {
+	service, stateRoot, formal, scope, created, lease := writerProcessFixture(t)
+	const token = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	cmd, identity, processDone := startTrackedWriterProcess(t, token)
+	processReaped := false
+	serviceClosed := false
+	t.Cleanup(func() {
+		if !serviceClosed {
+			if err := service.Close(context.Background()); err != nil {
+				t.Errorf("close original workspace service: %v", err)
+			}
+		}
+		if processReaped {
+			return
+		}
+		_ = cmd.Process.Kill()
+		select {
+		case <-processDone:
+		case <-time.After(time.Second):
+			t.Error("could not kill and reap the test-owned writer process")
+		}
+	})
+
+	identity.WorkspaceID, identity.RunID, identity.Generation = lease.WorkspaceID, lease.RunID, lease.Generation
+	actualStartTime := identity.StartTimeTicks
+	identity.StartTimeTicks++ // Simulate a stale journal after this PID was reused.
+	if err := service.RegisterWriterProcess(context.Background(), lease, identity); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	serviceClosed = true
+	recovered := reopenWorkspaceService(t, stateRoot, formal)
+	defer func() {
+		if err := recovered.Close(context.Background()); err != nil {
+			t.Errorf("close recovered workspace service: %v", err)
+		}
+	}()
+
+	got, err := recovered.Get(context.Background(), scope, created.ID)
+	if err != nil || got.State != StateInterrupted || got.WriterRunID != lease.RunID || got.Error == "" {
+		t.Fatalf("reused PID was not retained as interrupted: %+v %v", got, err)
+	}
+	record, err := recovered.store.Load(context.Background(), scope, created.ID)
+	if err != nil || record.Operation.Process == nil || record.Operation.Process.StartTimeTicks != actualStartTime+1 || record.Operation.Phase != "blocked" {
+		t.Fatalf("stale process identity was not retained: %+v err=%v", record.Operation, err)
+	}
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("recovery signaled a process with a different start time: %v", err)
+	}
+	if currentStartTime, err := proc.ProcessStartTime(cmd.Process.Pid); err != nil || currentStartTime != actualStartTime {
+		t.Fatalf("test-owned process identity changed: starttime=%d want=%d err=%v", currentStartTime, actualStartTime, err)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill test-owned writer process: %v", err)
+	}
+	select {
+	case <-processDone:
+		processReaped = true
+	case <-time.After(time.Second):
+		t.Fatal("test-owned writer process was not reaped")
+	}
+}
+
 func TestRestartKeepsWriterWithoutPersistedProcessIdentityInterrupted(t *testing.T) {
 	service, stateRoot, formal, scope, created, lease := writerProcessFixture(t)
 	if err := service.Close(context.Background()); err != nil {
