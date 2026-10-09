@@ -86,6 +86,46 @@ func TestCoordinatorExecutorDeniesForgedDirectMCPInvocation(t *testing.T) {
 	}
 }
 
+func TestCoordinatorExecutorDeniesForgedNonTeamToolsBeforeSideEffects(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := ensureCoordinatorTestDir(root); err != nil {
+		t.Fatal(err)
+	}
+	request := agent.ExecutionRequest{
+		RunID:           "coordinator-direct-tools",
+		Work:            agent.WorkRef{Kind: agent.WorkSession, SessionID: "0123456789abcdef0123456789abcdef"},
+		TeamCoordinator: true,
+	}
+	authority := permission.Authority{
+		RunID: request.RunID, SessionID: request.Work.SessionID,
+		AllowedRoot: root, FormalRoot: root, CandidateRoot: filepath.Join(root, ".candidate"),
+		Mode: permission.ModeDefault,
+	}
+	request.PermissionBounds, _ = json.Marshal(authority)
+	gate, hook, mcp := &coordinatorExecutorGateProbe{}, &coordinatorExecutorHookProbe{}, &coordinatorExecutorMCPProbe{}
+	factory := execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
+		Gate: gate, MCP: mcp,
+	}, execution.WithHookRunner(hook))
+	executor, err := factory.ForRun(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"read_file", "write_file", "glob", "grep", "command", "fetch_url",
+		"run_agent", "delegate_tasks", "todo_write", "task_update",
+	} {
+		outcome, err := executor.Execute(t.Context(), llm.ToolUse{
+			ID: "forged-" + name, Name: name, Arguments: []byte(`{"path":"project","command":"true"}`),
+		})
+		if err != nil || outcome.Status != agent.ToolDenied {
+			t.Fatalf("direct coordinator call %s = %+v, %v; want denied", name, outcome, err)
+		}
+	}
+	if gate.calls != 0 || hook.pre != 0 || hook.post != 0 || mcp.resolve != 0 || mcp.call != 0 {
+		t.Fatalf("denied coordinator calls reached downstream effects: gate=%d hook=%+v MCP=%+v", gate.calls, hook, mcp)
+	}
+}
+
 func ensureCoordinatorTestDir(path string) error {
 	return os.MkdirAll(path, 0700)
 }
