@@ -71,3 +71,5 @@ KiCad GUI 会话进程。
 ## M09-E/F 实施状态
 
 M09-E 增加持久化团队协作、消息、任务和只读协调器；M09-F 增加受控工作树、隔离写入和显式候选接收。两项仍在逐条验收，未整体验收完成。当前状态与可复核证据见 [M09-E checklist](specs/M09-E/checklist.md) 和 [M09-F checklist](specs/M09-F/checklist.md)。
+
+2026-10-10，SHA `c71becd` 修复了团队查询未绑定 RunID 与 WorkRef 的授权缺口，并补充工作树中断恢复、formal root 替换和候选导出竞态回归。该 SHA 的 Go `build-and-test`/`test-package` 与真实 M09 Workspace Linux `writer-sandbox-volume` 通过；E2E run 仍在执行。`cc172cd` 的 Linux 首次失败因 named writer 测试把 baseline 当成 checkout 检查，已用受信 authority 的 `CandidateRoot` 修正并由 c71becd 云端复验。当前工作区还新增了 task/message/request 伪造 WorkRef、coordinator 直接调用拒绝和 stale preview resolution 回归，待下一 SHA CI。M09-E/F 尚未完成整体验收。
