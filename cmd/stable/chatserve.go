@@ -105,6 +105,7 @@ func chatserve(args []string) error {
 		log.Printf("MCP startup: %v", err)
 	}
 	defer mcpManager.Shutdown()
+	workspaceLifecycleHost := execution.NewWorkspaceLifecycleToolHost()
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
 		forkProvider = streamingProvider
 		delegator, err = agent.NewPoolDelegator(agent.DefaultDelegationLimits(), agent.StreamingChildRunner{}, delegationReporter)
@@ -116,7 +117,6 @@ func chatserve(args []string) error {
 		if c.Model.APIKey != "" {
 			credentials = []string{c.Model.APIKey}
 		}
-		workspaceLifecycleHost := execution.NewWorkspaceLifecycleToolHost()
 		snapshotStore, err = candidate.NewSnapshotStore(*projectRoot, c.Snapshots.ProjectBytes(), c.Snapshots.ManifestsPerCandidate(), credentials)
 		if err != nil {
 			return fmt.Errorf("candidate snapshot store: %w", err)
