@@ -146,13 +146,28 @@ func TestGoalTeamIsIsolatedByGoalAndWorkItem(t *testing.T) {
 	if _, err := service.GetTeam(context.Background(), request, team.ID); err != nil {
 		t.Fatalf("matching goal work item could not query its team: %v", err)
 	}
+	addTeamMessageMember(t, service, request, team.ID, "goal-member", "reader")
+	if _, err := service.SendTeamMessage(context.Background(), request, TeamSendRequest{TeamID: team.ID, Recipient: "goal-member", Body: "authorized goal message", Token: "goal-message-valid"}); err != nil {
+		t.Fatalf("matching goal work item could not message its team: %v", err)
+	}
 	for _, forged := range []agent.WorkRef{
 		{Kind: agent.WorkGoal, SessionID: session.ID, GoalID: "goal-one", WorkItemID: "item-two"},
 		{Kind: agent.WorkGoal, SessionID: session.ID, GoalID: "goal-two", WorkItemID: "item-one"},
 	} {
-		if _, err := service.GetTeam(context.Background(), agent.ExecutionRequest{RunID: "goal-run", Work: forged}, team.ID); err == nil {
+		request := agent.ExecutionRequest{RunID: "goal-run", Work: forged}
+		if _, err := service.GetTeam(context.Background(), request, team.ID); err == nil {
 			t.Fatalf("goal team was queryable from forged work scope: %+v", forged)
 		}
+		if _, err := service.SendTeamMessage(context.Background(), request, TeamSendRequest{TeamID: team.ID, Recipient: "goal-member", Body: "forged goal message", Token: "goal-message-forged"}); err == nil {
+			t.Fatalf("goal team accepted a message from forged work scope: %+v", forged)
+		}
+	}
+	messages, err := service.ListTeamMessages(context.Background(), request, team.ID, 0, teams.MaxPageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Body != "authorized goal message" {
+		t.Fatalf("forged goal requests changed the message log: %+v", messages)
 	}
 }
 
