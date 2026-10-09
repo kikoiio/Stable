@@ -1,6 +1,6 @@
 # M09 并行协作与工作树：范围与进度
 
-> 2026-10-09 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。SHA `772e710f6cd8cb61b31f041492198347df8ab0d7` 的 Go build/unit、package、E2E 全部六个 jobs 与 M09 Workspace Linux 均通过（[Go](https://github.com/kikoiio/Stable/actions/runs/37925807851)、[E2E](https://github.com/kikoiio/Stable/actions/runs/37925807759)、[Workspace Linux](https://github.com/kikoiio/Stable/actions/runs/37925807634)）；Go 首次单测因既有 socket-read test 超时失败，重跑失败 job 后通过。其后新补 E/F 用例将随下一 SHA 组合复验；E/F AC1–9 仍未整体验收。
+> 2026-10-09 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。SHA `6e79cf4ed5e02ebce6259ad8cd3009cebea14c56` 的 Go build/unit、package、E2E 全部六个 jobs 与 M09 Workspace Linux 均通过（[Go](https://github.com/kikoiio/Stable/actions/runs/37928211260)、[E2E](https://github.com/kikoiio/Stable/actions/runs/37928211231)、[Workspace Linux](https://github.com/kikoiio/Stable/actions/runs/37928211202)）。其后新增 E/F 定向回归尚未包含在该 SHA，将随下一 SHA 组合复验；E/F AC1–9 仍未整体验收。
 
 ## 已完成
 
@@ -33,6 +33,8 @@
 继续并行补入 E 父 run 正常完成后已接收 child 继续运行、已完成任务拒绝成员认领，以及 F clean-remove 保留 ignored/private Git 数据、活跃 writer/binding 防移除和 manifest 字节配额精确边界测试；对应定向测试通过，记录在 E/F checklist。SHA `b0d994c` 包含这些新增 E/F 证据，待云端复验；M09-E/F 仍有广泛 AC 与组合场景开放。
 
 随后补入 E coordinator 对伪造 direct MCP tool name 的 hard-deny 测试与真实 TUI create→spawn→send→messages→get service 闭环；F 修复 rewind 和 acceptance 在 finalized→cleanup 崩溃窗口留下 spent staging 的问题，并验证 staging identity 被替换时拒绝删除、receipt/formal root 状态一致后才清理。SHA `c74202a` 包含 acceptance cleanup 实现，`eccc28d` 增加 finalize 前后替换 spent root 的负向恢复测试；SHA `b21ece0` 补上 handoff event append 失败的持久补偿与显式重试。SHA `121ccec` 增加 stop failure/deadline 下保留 blocked writer lease，`4ed4544` 增加真实 TUI/service 两轮摘要与待处理消息续接；`4463358` 扩展 coordinator direct-tool 拒绝矩阵，`c0d2262` 覆盖有界消息批次，`f2d6ac4` 覆盖 mode-only 三方合并/冲突，`748cead` 验证 broadcast recipient snapshot。SHA `15371d8` 的云端 Go 因两个测试夹具缺陷失败、Workspace Linux 成功，E2E 因夹具缺陷及 dependency-change runtime 启动失败；夹具已在 `8500c24` 修正。`9d18862` 的云端复验仍在运行。审阅还确认普通 session run 尚未从 workspace binding 派生 writer authority，不能在缺少 lease/quota/accept 闭环时只改根路径。后续提交等待云端验证，M09-E/F 仍未整体验收。
+
+`6e79cf4ed5e02ebce6259ad8cd3009cebea14c56` 的 Go build/unit、package、E2E 六个 jobs 与 Workspace Linux 全部成功。随后并行补入 E 的 Goal/WorkItem 消息列表 scope 拒绝及同一 member 的串行 turn/显式续跑证据；F 的 dirty/untracked/ignored private baseline、rewind 遇未知受保护 metadata 时 blocked 并保留数据、leased file tool 拒绝 checkout symlink 逃逸证据。上述新定向测试及四包合并定向验证均通过，但尚未云端复验。M09-E/F AC1–9 与源端差异、真实 sandbox/恢复组合仍有开放项，整体 M09 保持未完成。
 
 ## 全部完成的条件
 

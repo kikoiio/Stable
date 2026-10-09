@@ -48,6 +48,7 @@ func TestPrivateGitSyntheticBaselineAndLinkedCheckout(t *testing.T) {
 	g, layout, store, scope, id := privateGitFixture(t)
 	formal := layout.FormalRoot()
 	fixtureFile(t, formal, "dirty.txt", "dirty source bytes\n", 0640)
+	fixtureFile(t, formal, "untracked.txt", "untracked source bytes\n", 0600)
 	fixtureFile(t, formal, "ignored.txt", "ignored but preserved", 0600)
 	fixtureFile(t, formal, ".gitignore", "ignored.txt\n", 0600)
 	fixtureFile(t, formal, "scripts/run.sh", "#!/bin/sh\nexit 0\n", 0755)
@@ -105,8 +106,14 @@ func TestPrivateGitSyntheticBaselineAndLinkedCheckout(t *testing.T) {
 	if got := strings.TrimSpace(gitQuery(t, g, paths, paths.Repository, "", "rev-list", "--count", "--all")); got != "1" {
 		t.Fatalf("formal history copied: commit count %q", got)
 	}
-	if got := gitQuery(t, g, paths, paths.Repository, "", "cat-file", "blob", state.BaselineCommit+":dirty.txt"); got != "dirty source bytes\n" {
-		t.Fatalf("attributes changed object bytes: %q", got)
+	for name, want := range map[string]string{
+		"dirty.txt":     "dirty source bytes\n",
+		"untracked.txt": "untracked source bytes\n",
+		"ignored.txt":   "ignored but preserved",
+	} {
+		if got := gitQuery(t, g, paths, paths.Repository, "", "cat-file", "blob", state.BaselineCommit+":"+name); got != want {
+			t.Fatalf("private baseline lost or changed %s bytes: %q", name, got)
+		}
 	}
 	gitDir := filepath.Join(paths.Repository, "worktrees", id)
 	index := gitQuery(t, g, paths, gitDir, paths.Checkout, "ls-files", "--stage", "-z")

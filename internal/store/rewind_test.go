@@ -264,3 +264,62 @@ func TestJournaledRewindRecoveryEveryMoveBoundary(t *testing.T) {
 		}
 	}
 }
+
+func TestReconcileRewindBlocksAndRetainsUnknownProtectedMetadata(t *testing.T) {
+	s, dbPath := newGoalStore(t)
+	ctx := context.Background()
+	root, oldDigest := rewindCandidate(t, s, ctx, map[string]string{"board": "old"})
+	if _, err := s.DB().Exec(`UPDATE candidates SET manifest_policy=? WHERE id='cand'`, candidate.ManifestPolicyProject); err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(t.TempDir(), "staging")
+	if err := os.Mkdir(staging, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "board"), []byte("snapshot"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, targetDigest, err := candidate.BuildManifestForPolicy(staging, candidate.ManifestPolicyProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := RewindJournal{ID: "rw-unknown-metadata", CandidateID: "cand", SnapshotID: "snap", ExpectedDigest: oldDigest, TargetDigest: targetDigest, StagingDir: staging}
+	if err := s.BeginRewind(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+	unknownMetadata := filepath.Join(staging, ".mewcode", "private-state")
+	if err := os.MkdirAll(filepath.Dir(unknownMetadata), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unknownMetadata, []byte("preserve me"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.ReconcileRewinds(ctx); err == nil {
+		t.Fatal("rewind with unexpected protected metadata was accepted")
+	}
+	var phase string
+	if err := s.DB().QueryRow(`SELECT phase FROM rewind_journal WHERE id=?`, j.ID).Scan(&phase); err != nil || phase != RewindBlocked {
+		t.Fatalf("phase=%q err=%v", phase, err)
+	}
+	for path, want := range map[string]string{filepath.Join(root, "board"): "old", filepath.Join(staging, "board"): "snapshot", unknownMetadata: "preserve me"} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("preserved %s=%q want %q err=%v", path, got, want, err)
+		}
+	}
+	if _, err := os.Lstat(j.RollbackPath); !os.IsNotExist(err) {
+		t.Fatalf("unexpected rollback root was created: %v", err)
+	}
+	rec, err := s.GetCandidate(ctx, "cand")
+	if err != nil || rec.Candidate.CandidateDigest != oldDigest || rec.Candidate.Status != "ready" {
+		t.Fatalf("candidate changed by blocked recovery: %+v err=%v", rec, err)
+	}
+}
