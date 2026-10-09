@@ -32,7 +32,7 @@
 
 继续并行补入 E 父 run 正常完成后已接收 child 继续运行、已完成任务拒绝成员认领，以及 F clean-remove 保留 ignored/private Git 数据、活跃 writer/binding 防移除和 manifest 字节配额精确边界测试；对应定向测试通过，记录在 E/F checklist。SHA `b0d994c` 包含这些新增 E/F 证据，待云端复验；M09-E/F 仍有广泛 AC 与组合场景开放。
 
-随后补入 E coordinator 对伪造 direct MCP tool name 的 hard-deny 测试，并修复 F rewind 已 finalized、cleanup 前崩溃会遗留 staging 的恢复缺口；负例还验证 staging identity 被替换时拒绝删除。新增 E 的真实 TUI create→spawn→send→messages→get service 闭环。对应定向测试通过，SHA `256d265` 包含当前此轮 E/F 改动；该 SHA 尚未推送，较早 SHA `89bfc92` 的 Go/E2E/Workspace Linux jobs 正在执行。下一步对当前 SHA 触发完整回归。M09-E/F 仍未整体验收。
+随后补入 E coordinator 对伪造 direct MCP tool name 的 hard-deny 测试与真实 TUI create→spawn→send→messages→get service 闭环；F 修复 rewind 和 acceptance 在 finalized→cleanup 崩溃窗口留下 spent staging 的问题，并分别验证 staging identity 被替换时拒绝删除、receipt/formal root 状态一致后才清理。对应定向测试通过。SHA `c74202a` 包含上述 E/F 代码和测试；将与 E 消息 handoff 写入失败场景合并后推送并做完整云端复验。M09-E/F 仍未整体验收。
 
 ## 全部完成的条件
 
