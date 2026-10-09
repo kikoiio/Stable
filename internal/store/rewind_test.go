@@ -105,6 +105,38 @@ func TestReconcileLegacyRewindCompletesPreparedTransaction(t *testing.T) {
 	}
 }
 
+func TestReconcilePreparedEmptySnapshotInstallsValidTarget(t *testing.T) {
+	s, _ := newGoalStore(t)
+	ctx := context.Background()
+	root, oldDigest := rewindCandidate(t, s, ctx, map[string]string{"board": "original"})
+	staging := filepath.Join(t.TempDir(), "empty-snapshot")
+	if err := os.Mkdir(staging, 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, targetDigest, err := candidate.BuildManifest(staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := RewindJournal{ID: "rw-empty-snapshot", CandidateID: "cand", SnapshotID: "empty-snapshot", ExpectedDigest: oldDigest, TargetDigest: targetDigest, StagingDir: staging}
+	if err := s.BeginRewind(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileRewinds(ctx); err != nil {
+		t.Fatalf("reconcile valid empty target: %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("candidate does not contain the valid empty snapshot: entries=%v err=%v", entries, err)
+	}
+	if _, err := os.Lstat(staging); !os.IsNotExist(err) {
+		t.Fatalf("spent old candidate staging was not cleaned: %v", err)
+	}
+	rec, err := s.GetCandidate(ctx, "cand")
+	if err != nil || rec.Candidate.CandidateDigest != targetDigest || rec.Candidate.Status != "ready" {
+		t.Fatalf("candidate metadata after empty snapshot rewind: %+v err=%v", rec.Candidate, err)
+	}
+}
+
 func TestReconcileLegacyRewindRetainsReplacedStaging(t *testing.T) {
 	s, _ := newGoalStore(t)
 	ctx := context.Background()

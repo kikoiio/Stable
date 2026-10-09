@@ -350,6 +350,12 @@ func (s *Store) discardEmptyPreparedRewind(ctx context.Context, j RewindJournal,
 	if len(entries) != 0 {
 		return false, nil
 	}
+	_, stagedDigest, err := candidate.BuildManifestForPolicy(j.StagingDir, j.ManifestPolicy)
+	if err != nil || stagedDigest == j.TargetDigest {
+		// An empty snapshot is still a valid rewind target. Let the transaction
+		// coordinator install it; only an empty, incomplete root can be dropped.
+		return false, nil
+	}
 	if err := os.Remove(j.StagingDir); err != nil {
 		return false, err
 	}
