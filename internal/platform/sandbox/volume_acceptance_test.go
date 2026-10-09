@@ -28,18 +28,75 @@ func TestWorkspaceRealVolumeQuotaAndMetadataAttacks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(root)
-	p := SandboxProfile{ProjectRoot: filepath.Join(root, "baseline"), CandidateRoot: filepath.Join(root, "checkout"), RunRoot: filepath.Join(root, "run"), WorkspaceIsolation: true, WorkspaceVolumeRoot: root, Timeout: 15 * time.Second}
+	formal := filepath.Join(root, "formal")
+	privateRepo := filepath.Join(root, "private-repo.git")
+	p := SandboxProfile{ProjectRoot: formal, CandidateRoot: filepath.Join(root, "checkout"), RunRoot: filepath.Join(root, "run"), WorkspaceIsolation: true, WorkspaceVolumeRoot: root, Timeout: 15 * time.Second}
 	for _, path := range []string{p.ProjectRoot, p.CandidateRoot, p.RunRoot} {
 		if err := os.Mkdir(path, 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(p.CandidateRoot, ".git"), []byte("gitdir: private repo"), 0600); err != nil {
+	for _, path := range []string{filepath.Join(formal, ".git"), filepath.Join(formal, ".stable"), filepath.Join(privateRepo, "objects"), filepath.Join(p.CandidateRoot, ".stable")} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixtureFiles := map[string]string{
+		filepath.Join(formal, ".git", "config"):             "formal git config",
+		filepath.Join(formal, ".stable", "marker"):          "formal stable marker",
+		filepath.Join(formal, "baseline.txt"):               "baseline",
+		filepath.Join(privateRepo, "objects", "marker"):     "private repo object",
+		filepath.Join(p.CandidateRoot, ".stable", "marker"): "candidate stable marker",
+		filepath.Join(p.CandidateRoot, ".git"):              "gitdir: private repo",
+	}
+	for path, contents := range fixtureFiles {
+		if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// This sentinel lives on the runner's root filesystem, outside the bounded
+	// ext4 volume. The real helper sees the path through the read-only root mount.
+	outsideDir, err := os.MkdirTemp("/var/tmp", "m09-outside-volume-")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(p.ProjectRoot, "baseline.txt"), []byte("baseline"), 0600); err != nil {
+	defer os.RemoveAll(outsideDir)
+	outsideSentinel := filepath.Join(outsideDir, "sentinel")
+	if err := os.WriteFile(outsideSentinel, []byte("outside bounded volume"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	if err := BoundedWorkspaceVolume(volume, outsideDir); err == nil {
+		t.Fatalf("outside sentinel unexpectedly belongs to the bounded volume: %s", outsideDir)
+	}
+	type protectedEntry struct {
+		path string
+		info os.FileInfo
+		data []byte
+	}
+	protected := make([]protectedEntry, 0, len(fixtureFiles)+5)
+	for _, path := range []string{filepath.Join(formal, ".git"), filepath.Join(formal, ".stable"), privateRepo, filepath.Join(p.CandidateRoot, ".stable")} {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		protected = append(protected, protectedEntry{path: path, info: info})
+	}
+	for path := range fixtureFiles {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		protected = append(protected, protectedEntry{path: path, info: info, data: data})
+	}
+	outsideInfo, err := os.Lstat(outsideSentinel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protected = append(protected, protectedEntry{path: outsideSentinel, info: outsideInfo, data: []byte("outside bounded volume")})
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -74,6 +131,19 @@ func TestWorkspaceRealVolumeQuotaAndMetadataAttacks(t *testing.T) {
 		t.Fatalf("workspace command network probe result=%+v error=%v", networkResult, err)
 	}
 	attack := `set -eu
+(
+ if printf child-attack > /workspace/project/baseline.txt 2>/dev/null; then exit 41; fi
+ if printf child-attack > /workspace/project/.git/config 2>/dev/null; then exit 42; fi
+ if printf child-attack > /workspace/project/.stable/marker 2>/dev/null; then exit 43; fi
+ if printf child-attack > .git 2>/dev/null; then exit 44; fi
+ if mkdir .stable/child-attack 2>/dev/null; then exit 45; fi
+ if printf child-attack > /workspace/private-repo.git/objects/marker 2>/dev/null; then exit 46; fi
+ if printf child-attack > "$1" 2>/dev/null; then exit 47; fi
+ printf 'child-process-completed\n' > child-ran
+) &
+child_pid=$!
+wait "$child_pid"
+test "$(cat child-ran)" = child-process-completed
  test ! -s .git
  if printf attack > .git 2>/dev/null; then exit 31; fi
  if mkdir .stable/attack 2>/dev/null; then exit 32; fi
@@ -91,13 +161,21 @@ func TestWorkspaceRealVolumeQuotaAndMetadataAttacks(t *testing.T) {
  test "$size" -lt 134217728
  printf 'quota-enforced metadata-hidden\n'
  `
-	result, err := New().RunIsolated(context.Background(), p, []string{"/bin/sh", "-c", attack}, nil)
+	result, err := New().RunIsolated(context.Background(), p, []string{"/bin/sh", "-c", attack, "m09-volume-attack", outsideSentinel}, nil)
 	if err != nil || result.ExitCode != 0 || !strings.Contains(string(result.Stdout), "quota-enforced metadata-hidden") {
 		t.Fatalf("attack result=%+v error=%v", result, err)
 	}
-	data, err := os.ReadFile(filepath.Join(p.CandidateRoot, ".git"))
-	if err != nil || string(data) != "gitdir: private repo" {
-		t.Fatalf("private git mask changed host: %q %v", data, err)
+	for _, entry := range protected {
+		info, err := os.Lstat(entry.path)
+		if err != nil || !os.SameFile(entry.info, info) {
+			t.Fatalf("protected entry identity changed at %s: before=%v after=%v err=%v", entry.path, entry.info, info, err)
+		}
+		if entry.data != nil {
+			data, err := os.ReadFile(entry.path)
+			if err != nil || string(data) != string(entry.data) {
+				t.Fatalf("protected bytes changed at %s: got=%q want=%q err=%v", entry.path, data, entry.data, err)
+			}
+		}
 	}
 	if _, err := os.Stat(filepath.Join(p.RunRoot, "quota.bin")); !os.IsNotExist(err) {
 		t.Fatalf("quota fixture leaked file: %v", err)
