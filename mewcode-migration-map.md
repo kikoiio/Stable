@@ -47,9 +47,9 @@ mewcode 的 TUI 主文件直接引用二十多个内部模块，涵盖模型、�
 
 源端目录归属核对（对照当前 `internal/` 子目录）：`tui`→M01；`llm`、`conversation`、`agent`、`prompt`→M02/M04/M05；`permissions`、`sandbox`→M03；`tools`、`toolresult`→M04；`session`、`history`、`filehistory`、`compact`→M05；`commands`、`planfile`、`todo`→M06；`mcp`、`skills`、`hooks`→M07；`memory`→M08；`agents`、`teams`、`worktree`→M09；`remote`、`config`、`crashlog`→M10。命令入口 `cmd/mewcode` 的交互、print 与远程启动行为按 M10 归属。跨项目目录按行为归属拆开验收，不能只以文件复制完成判断。
 
-### M09 当前进度（2026-10-08）
+### M09 当前进度（2026-10-09）
 
-M09-A（同步只读协作）、M09-B（fork skill）、M09-C（hook agent）和 M09-D（agent 定义与后台任务 AC1–9）已完成实现与验收；M09-E/F 已实现并提交，但仍有逐项验收缺口，**M09 整体仍未完成**。最新代码验证 SHA `26eafc55aaeaba543282acbdfd467911b8cf43d2` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 全部通过：[Go run 37869857770](https://github.com/kikoiio/Stable/actions/runs/37869857770)、[E2E run 37869857737](https://github.com/kikoiio/Stable/actions/runs/37869857737)、[Workspace Linux run 37869857758](https://github.com/kikoiio/Stable/actions/runs/37869857758)。E2E 首次 core job 因 Launchpad PPA 的 signing key endpoint 暂时返回 500 而在 setup 失败，复跑失败 job 后全绿。此前 apt mirrorlist 选到 Azure HTTP 源导致 setup jobs 挂起，CI action 修正为官方 HTTPS 源后复验通过。
+M09-A（同步只读协作）、M09-B（fork skill）、M09-C（hook agent）和 M09-D（agent 定义与后台任务 AC1–9）已完成实现与验收；M09-E/F 已实现并提交，但仍有逐项验收缺口，**M09 整体仍未完成**。最新代码验证 SHA `e92b321` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 全部通过：[Go run 37873085954](https://github.com/kikoiio/Stable/actions/runs/37873085954)、[E2E run 37873085933](https://github.com/kikoiio/Stable/actions/runs/37873085933)、[Workspace Linux run 37873085983](https://github.com/kikoiio/Stable/actions/runs/37873085983)。此前 E2E 的 Launchpad PPA signing key endpoint 曾暂时返回 500，失败 job 在后续复跑成功。
 
 完整源端对照、已通过证据和剩余完成条件见 [M09 范围与进度](specs/M09/README.md)。D/E/F 的规格均已批准；总体验收以各自 checklist 中的证据和未完成项为准。
 

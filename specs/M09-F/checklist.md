@@ -1,6 +1,6 @@
 # M09-F 受控工作树与并行写入 Checklist
 
-> 状态：规格已批准，实施代码已提交；AC1–9 仍需逐项验收。SHA `26eafc55` 的真实 Linux writer/sandbox/quota workflow、Go build/unit、package 与 E2E 全部 jobs 通过；A/B/C/D旧CI不作为F实现证据（2026-10-09）。
+> 状态：规格已批准，实施代码已提交；AC1–9 仍需逐项验收。最新 SHA `e92b321` 的真实 Linux writer/sandbox/quota workflow、Go build/unit、package 与 E2E 全部 jobs 通过；A/B/C/D旧CI不作为F实现证据（2026-10-09）。
 
 ## 审批与追溯
 
@@ -113,6 +113,7 @@
 | Concurrent conflict export idempotency | `TestWorkspaceConflictResolutionExportsReviewedCandidateForAcceptance`；本地定向 conversation 测试 `-count=2` 通过（2026-10-09） | 用户解决冲突后，两路并发 export 返回相同候选 ID，随后继续既有 review/checker/accept 闭环；未模拟 exporter 中途写盘失败或正式根并发变化，不能单独勾选 AC4。 |
 | Exclusive writer lease generation fence | `TestWorkspaceWriterLeaseIsExclusiveAndGenerationFenced`；定向 workspace Go 测试通过（2026-10-09） | 同一项第二 RunID acquire 被拒，第一 lease 完成后新 generation 增长；旧 lease 无法 reserve 写入或释放新 lease，snapshot 仍由第二 RunID 持有。未覆盖真实 OS writer 退出、活跃 run binding guard 接线或 remove/discard，AC1/2/6 仍需全量审计。 |
 | Concurrent writer leases on independent workspaces | `TestIndependentWorkspacesHoldConcurrentWriterLeases`；本地 `go test ./internal/workspace -run '^TestIndependentWorkspacesHoldConcurrentWriterLeases$' -count=2` 通过（2026-10-09） | 同一 session 的两个独立 workspace 同时保持各自 `StateWriting` lease 与不同 checkout；任一 occupied workspace 拒绝第二 lease；两个 child 分别写入后均独立结算为 `kept` 且变更数正确。未覆盖 `run_agent` 同时执行、sandbox 隔离或并行导出/接收，AC1 仍未整体验收。 |
+| Parallel named writers through real Linux sandbox | `TestParallelWorkspaceWriterAgentsUseIndependentLeases`；M09 Workspace Linux run 37873085983 `writer-sandbox-volume` 通过 | 在 disposable ext4 限额卷与真实 agentworker/bwrap 中同时启动两个 named `isolation: worktree` child；屏障期间两个 run 持有不同 workspace 的 writing lease，各自在同名相对路径写入，均独立完成并保留；正式根未变化。未覆盖并行 export/accept、team child 组合或完整 AC1/AC3。 |
 | Active-run workspace binding guard wiring | `TestWorkspaceServiceBlocksEnterAndExitDuringActiveRun`；定向 conversation Go 测试通过（2026-10-09） | 通过真实 conversation `workspaceService` 注入 IdleGuard；活跃 run 时 Enter/Exit 返回 unavailable 且 binding 保持，run 清除后 Exit 成功并清空。未覆盖 OS child authority/CWD 竞争窗或并发原子性，AC1/2 仍需全量审计。 |
 | Runtime/protocol/TUI 基础接线与冲突预览 | `90ed0d7` | 已接线；[Go run 37644076609](https://github.com/kikoiio/Stable/actions/runs/37644076609) build/unit 通过 | 专用 state root、workspace lifecycle、enter/exit/export 与 `/worktrees preview` 已接线；preview 持久化三方 digest 和最多 100 个冲突路径。后续最终 SHA 的 package/E2E、writer sandbox/quota 与单 session 冲突接收闭环见上方记录；dirty-discard 决策及并行/lifecycle故障组合仍待验收。 |
 | 定向契约/快照/private Git | 待填 | 待填 | 未执行 |
