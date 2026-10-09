@@ -184,6 +184,144 @@ func TestReconcileAcceptanceAfterExchangeBeforeJournalUpdate(t *testing.T) {
 	}
 }
 
+func TestLegacyAcceptanceV12MigrationBlocksGitMetadata(t *testing.T) {
+	s, dbPath := newGoalStore(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	formal := filepath.Join(root, "formal")
+	incoming := filepath.Join(root, "incoming")
+	for _, dir := range []string{formal, incoming} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(formal, "board"), []byte("old formal bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(incoming, "board"), []byte("new incoming bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	metadata := map[string]string{
+		filepath.Join(formal, ".git"):   "gitdir: /external/formal.git\n",
+		filepath.Join(incoming, ".git"): "gitdir: /external/incoming.git\n",
+	}
+	metadataInfo := make(map[string]os.FileInfo, len(metadata))
+	for path, contents := range metadata {
+		if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		metadataInfo[path] = info
+	}
+	_, oldDigest, err := candidate.BuildManifest(formal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, newDigest, err := candidate.BuildManifest(incoming)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := candidate.Candidate{
+		ID: "legacy-v12", ManifestPolicy: candidate.ManifestPolicyLegacy,
+		FormalRoot: formal, CandidateRoot: incoming,
+		BaselineDigest: oldDigest, CandidateDigest: newDigest, Status: "reviewed",
+	}
+	if err = s.SaveCandidate(ctx, CandidateRecord{Candidate: c, ActionID: "legacy-v12-action", GoalID: "goal-1"}); err != nil {
+		t.Fatal(err)
+	}
+	d := candidate.AcceptanceDecision{
+		ID: "legacy-v12-decision", UserID: "user", CandidateID: c.ID,
+		CandidateDigest: newDigest, PreviewDigest: "legacy-preview", FormalDigest: oldDigest,
+		Mode: candidate.AcceptNormal,
+	}
+	if _, err = s.SaveAcceptanceDecision(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restore the v12 schema shape. v13 added manifest policy and protected
+	// metadata facts; v14 added transaction root identities.
+	for _, statement := range []string{
+		`ALTER TABLE candidates DROP COLUMN manifest_policy`,
+		`ALTER TABLE acceptance_apply_journal DROP COLUMN manifest_policy`,
+		`ALTER TABLE acceptance_apply_journal DROP COLUMN protected_metadata_json`,
+		`ALTER TABLE acceptance_apply_journal DROP COLUMN expected_root_identity`,
+		`ALTER TABLE acceptance_apply_journal DROP COLUMN target_root_identity`,
+		`ALTER TABLE rewind_journal DROP COLUMN manifest_policy`,
+		`ALTER TABLE rewind_journal DROP COLUMN expected_root_identity`,
+		`ALTER TABLE rewind_journal DROP COLUMN target_root_identity`,
+		`PRAGMA user_version=12`,
+	} {
+		if _, err = s.DB().Exec(statement); err != nil {
+			t.Fatalf("prepare v12 database with %q: %v", statement, err)
+		}
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = Open(dbPath)
+	if err != nil {
+		t.Fatalf("migrate v12 database: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	var version int
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 14 {
+		t.Fatalf("database version=%d err=%v", version, err)
+	}
+	var candidatePolicy, journalPolicy, protectedMetadata, expectedIdentity, targetIdentity, phase string
+	if err = s.DB().QueryRow(`SELECT manifest_policy FROM candidates WHERE id=?`, c.ID).Scan(&candidatePolicy); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DB().QueryRow(`SELECT manifest_policy,protected_metadata_json,expected_root_identity,target_root_identity,phase FROM acceptance_apply_journal WHERE decision_id=?`, d.ID).Scan(&journalPolicy, &protectedMetadata, &expectedIdentity, &targetIdentity, &phase); err != nil {
+		t.Fatal(err)
+	}
+	if candidatePolicy != candidate.ManifestPolicyLegacy || journalPolicy != candidate.ManifestPolicyLegacy || protectedMetadata != "" || expectedIdentity != "" || targetIdentity != "" || phase != "prepared" {
+		t.Fatalf("migrated legacy candidate/journal was reinterpreted: candidate policy=%q journal policy=%q metadata=%q identities=%q/%q phase=%q", candidatePolicy, journalPolicy, protectedMetadata, expectedIdentity, targetIdentity, phase)
+	}
+
+	if err = s.ReconcileAcceptances(ctx); err == nil {
+		t.Fatal("legacy acceptance with Git metadata was not blocked after migration")
+	}
+	assertLegacyV12AcceptanceRetained(t, s, d.ID, formal, incoming, metadata, metadataInfo, "blocked")
+	if err = s.ReconcileAcceptances(ctx); err != nil {
+		t.Fatalf("repeat blocked recovery: %v", err)
+	}
+	assertLegacyV12AcceptanceRetained(t, s, d.ID, formal, incoming, metadata, metadataInfo, "blocked")
+}
+
+func assertLegacyV12AcceptanceRetained(t *testing.T, s *Store, decisionID, formal, incoming string, metadata map[string]string, metadataInfo map[string]os.FileInfo, wantPhase string) {
+	t.Helper()
+	var phase string
+	if err := s.DB().QueryRow(`SELECT phase FROM acceptance_apply_journal WHERE decision_id=?`, decisionID).Scan(&phase); err != nil || phase != wantPhase {
+		t.Fatalf("acceptance phase=%q want %q err=%v", phase, wantPhase, err)
+	}
+	if _, ok, err := s.FindAcceptanceReceipt(context.Background(), decisionID); err != nil || ok {
+		t.Fatalf("blocked legacy acceptance receipt present=%t err=%v", ok, err)
+	}
+	for path, want := range map[string]string{
+		filepath.Join(formal, "board"):   "old formal bytes",
+		filepath.Join(incoming, "board"): "new incoming bytes",
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("project bytes at %s = %q, want %q, err=%v", path, got, want, err)
+		}
+	}
+	for path, want := range metadata {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("Git metadata at %s = %q, want %q, err=%v", path, got, want, err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil || !os.SameFile(metadataInfo[path], info) {
+			t.Fatalf("Git metadata inode changed at %s: before=%v after=%v err=%v", path, metadataInfo[path], info, err)
+		}
+	}
+}
+
 func TestReconcileAcceptanceConflictBlocks(t *testing.T) {
 	s, _ := newGoalStore(t)
 	ctx := context.Background()
