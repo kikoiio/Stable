@@ -249,6 +249,7 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 		{line: "/teams close team-1", op: "team_close", teamID: "team-1"},
 		{line: "/team team-1 get", op: "team_get", teamID: "team-1"},
 		{line: "/team team-1 tasks", op: "team_task_list", teamID: "team-1"},
+		{line: "/team team-1 tasks list 100", op: "team_task_list", teamID: "team-1", limit: 100},
 		{line: "/team team-1 tasks create write docs", op: "team_task_create", teamID: "team-1", text: "write docs"},
 		{line: "/team team-1 messages after 12 7", op: "team_messages", teamID: "team-1", after: 12, limit: 7},
 		{line: "/team team-1 requests", op: "team_request_list", teamID: "team-1"},
@@ -309,6 +310,9 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 			if tc.op == "team_messages" && (request.AfterSeq != tc.after || request.Limit != int(tc.limit)) {
 				t.Fatalf("message page=%+v", request)
 			}
+			if tc.op == "team_task_list" && request.Limit != int(tc.limit) {
+				t.Fatalf("task page limit=%d, want %d", request.Limit, tc.limit)
+			}
 			if tc.op == "team_task_create" && (request.TaskTitle == nil || *request.TaskTitle != tc.text) {
 				t.Fatalf("task title=%v", request.TaskTitle)
 			}
@@ -325,7 +329,7 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 }
 
 func TestTeamCommandsRejectInvalidUsageAndRequireRunForCreate(t *testing.T) {
-	for _, line := range []string{"/teams", "/teams create", "/teams close", "/teams coordinator", "/teams coordinator yes", "/team", "/team team-1 tasks update task-1 0 status completed", "/team team-1 messages 0 999", "/team team-1 send all", "/team team-1 respond req-1 0 approve", "/team team-1 shutdown", "/team team-1 spawn reader explore inspect", "/team team-1 resume member-1"} {
+	for _, line := range []string{"/teams", "/teams create", "/teams close", "/teams coordinator", "/teams coordinator yes", "/team", "/team team-1 tasks update task-1 0 status completed", "/team team-1 tasks list 101", "/team team-1 messages 0 999", "/team team-1 send all", "/team team-1 respond req-1 0 approve", "/team team-1 shutdown", "/team team-1 spawn reader explore inspect", "/team team-1 resume member-1"} {
 		m := New("", t.TempDir())
 		m.ActiveSession = "session"
 		m.Composer.SetValue(line)

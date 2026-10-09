@@ -146,7 +146,7 @@ func (s *Service) ExecuteTeamTool(ctx context.Context, request agent.ExecutionRe
 	case "team_task_get":
 		result, err = s.GetTeamTask(ctx, request, args.TeamID, args.TaskID)
 	case "team_task_list":
-		result, err = s.ListTeamTasks(ctx, request, args.TeamID)
+		result, err = s.ListTeamTasks(ctx, request, args.TeamID, args.Limit)
 	case "team_task_update":
 		if args.Status != nil {
 			status := teams.TaskStatus(*args.Status)

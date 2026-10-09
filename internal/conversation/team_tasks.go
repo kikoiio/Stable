@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"errors"
 
 	"stable/internal/agent"
 	"stable/internal/sessionlog"
@@ -87,7 +88,14 @@ func (s *Service) GetTeamTask(ctx context.Context, request agent.ExecutionReques
 	return projected, nil
 }
 
-func (s *Service) ListTeamTasks(ctx context.Context, request agent.ExecutionRequest, teamID string) ([]teams.Task, error) {
+func (s *Service) ListTeamTasks(ctx context.Context, request agent.ExecutionRequest, teamID string, requestedLimit ...int) ([]teams.Task, error) {
+	if len(requestedLimit) > 1 {
+		return nil, errors.New("team task query accepts at most one limit")
+	}
+	limit := 0
+	if len(requestedLimit) == 1 {
+		limit = requestedLimit[0]
+	}
 	root, scope, actor, err := s.teamOperationScope(ctx, request)
 	if err != nil {
 		return nil, err
@@ -100,7 +108,12 @@ func (s *Service) ListTeamTasks(ctx context.Context, request agent.ExecutionRequ
 	if err != nil {
 		return nil, err
 	}
-	return graph.List(), nil
+	tasks := graph.List()
+	pageSize := teams.PageSize(limit)
+	if len(tasks) > pageSize {
+		tasks = tasks[:pageSize]
+	}
+	return tasks, nil
 }
 
 func (s *Service) UpdateTeamTask(ctx context.Context, request agent.ExecutionRequest, teamID, taskID string, expectedRevision uint64, patch teams.TaskPatch) (teams.Task, error) {

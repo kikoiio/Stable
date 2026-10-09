@@ -54,7 +54,7 @@ func TeamToolSchemas() []map[string]any {
 		obj("team_shutdown_request", "Ask one team member to shut down through a typed request.", map[string]any{"team_id": stringField("Service-issued team ID"), "member_id": stringField("Service-issued member ID")}, "team_id", "member_id"),
 		obj("team_task_create", "Create a task on a team task board.", map[string]any{"team_id": stringField("Service-issued team ID"), "title": stringField("Task title"), "description": stringField("Task description"), "assignee": stringField("Team member ID or empty"), "blocked_by": arrayString}, "team_id", "title"),
 		obj("team_task_get", "Get a task from a team task board.", map[string]any{"team_id": stringField("Service-issued team ID"), "task_id": stringField("Service-issued task ID")}, "team_id", "task_id"),
-		obj("team_task_list", "List tasks on a team task board.", map[string]any{"team_id": stringField("Service-issued team ID")}, "team_id"),
+		obj("team_task_list", "List a bounded page of team task board entries (default 20, maximum 100).", map[string]any{"team_id": stringField("Service-issued team ID"), "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}, "team_id"),
 		obj("team_task_update", "Update a task using its current revision.", map[string]any{"team_id": stringField("Service-issued team ID"), "task_id": stringField("Service-issued task ID"), "expected_revision": uintField, "title": stringField("Replacement title"), "description": stringField("Replacement description"), "assignee": stringField("Member ID or empty"), "blocked_by": arrayString, "status": map[string]any{"type": "string", "enum": []string{"pending", "blocked", "in_progress", "completed"}}}, "team_id", "task_id", "expected_revision"),
 	}
 }

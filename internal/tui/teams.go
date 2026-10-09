@@ -59,7 +59,7 @@ func registerTeamCommands(host *commandHost, registry *commands.Registry) {
 		sendTeamRequest(host, req, "正在读取团队…")
 	}})
 
-	registry.Register(&commands.Command{Name: "team", Description: "查看团队、任务、消息和请求", ArgPrompt: "ID get|members|tasks|messages|requests|send|respond|shutdown", Kind: commands.KindLocal, Local: func(args string) {
+	registry.Register(&commands.Command{Name: "team", Description: "查看团队、任务、消息和请求", ArgPrompt: "ID get|members|tasks list [limit]|messages|requests|send|respond|shutdown", Kind: commands.KindLocal, Local: func(args string) {
 		m := host.model
 		fields := strings.Fields(args)
 		if m.ActiveSession == "" {
@@ -158,7 +158,7 @@ func registerTeamCommands(host *commandHost, registry *commands.Registry) {
 }
 
 func teamUsage() string {
-	return "用法：/team <ID> get | members | spawn <成员名> <角色> <任务> [--plan] | resume <成员ID> [--accept-role-change] | stop <成员ID> | tasks [get ID | create 标题 | update ID REVISION status 状态] | messages [游标 [条数]] | requests | send <成员ID|all> <消息> | respond <请求ID> <REVISION> approve|reject|defer [反馈] | shutdown <成员ID>"
+	return "用法：/team <ID> get | members | spawn <成员名> <角色> <任务> [--plan] | resume <成员ID> [--accept-role-change] | stop <成员ID> | tasks [list [条数] | get ID | create 标题 | update ID REVISION status 状态] | messages [游标 [条数]] | requests | send <成员ID|all> <消息> | respond <请求ID> <REVISION> approve|reject|defer [反馈] | shutdown <成员ID>"
 }
 
 func teamMemberSpawnRequest(base conversation.ClientMsg, args, activeRunID string) (conversation.ClientMsg, error) {
@@ -194,8 +194,21 @@ func sendTeamRequest(host *commandHost, req conversation.ClientMsg, status strin
 func teamTaskRequest(base conversation.ClientMsg, args string) (conversation.ClientMsg, string) {
 	fields := strings.Fields(args)
 	base.Op = "team_task_list"
-	if len(fields) == 0 || (len(fields) == 1 && fields[0] == "list") {
+	if len(fields) == 0 {
 		return base, "正在读取团队任务…"
+	}
+	if fields[0] == "list" {
+		if len(fields) == 1 {
+			return base, "正在读取团队任务…"
+		}
+		if len(fields) == 2 {
+			limit, err := strconv.Atoi(fields[1])
+			if err == nil && limit >= 1 && limit <= teams.MaxPageSize {
+				base.Limit = limit
+				return base, "正在读取团队任务…"
+			}
+		}
+		return conversation.ClientMsg{}, "用法：/team <ID> tasks list [条数，1-100]"
 	}
 	switch {
 	case len(fields) == 2 && fields[0] == "get" && teams.ValidateID(fields[1]) == nil:

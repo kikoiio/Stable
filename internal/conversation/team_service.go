@@ -608,7 +608,7 @@ func (s *Service) handleTeamRequest(ctx context.Context, msg ClientMsg) (ServerM
 			task, taskErr := s.GetTeamTask(ctx, request, msg.TeamID, msg.TaskID)
 			return ServerMsg{Type: msg.Op, TeamTask: &task}, taskErr
 		case "team_task_list":
-			tasks, taskErr := s.ListTeamTasks(ctx, request, msg.TeamID)
+			tasks, taskErr := s.ListTeamTasks(ctx, request, msg.TeamID, msg.Limit)
 			return ServerMsg{Type: msg.Op, TeamTasks: tasks}, taskErr
 		case "team_task_update":
 			patch := teams.TaskPatch{Title: msg.TaskTitle, Description: msg.TaskDescription, Assignee: msg.TaskAssignee, BlockedBy: msg.TaskBlockedBy}
