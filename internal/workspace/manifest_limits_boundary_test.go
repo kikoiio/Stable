@@ -33,3 +33,31 @@ func TestManifestByteLimitsAtBoundary(t *testing.T) {
 		})
 	}
 }
+
+func TestManifestEntryCountLimitsAtBoundary(t *testing.T) {
+	root := t.TempDir()
+	fixtureFile(t, root, "a", "a", 0600)
+	fixtureFile(t, root, "b", "b", 0600)
+
+	manifest, err := BuildManifest(context.Background(), root, Limits{MaxFiles: 2, MaxEntries: 2})
+	if err != nil {
+		t.Fatalf("manifest exactly at file and entry count limits was rejected: %v", err)
+	}
+	if len(manifest.Entries) != 2 || manifest.Bytes != 2 {
+		t.Fatalf("unexpected manifest at count limits: entries=%d bytes=%d", len(manifest.Entries), manifest.Bytes)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		limits Limits
+	}{
+		{name: "file count one over", limits: Limits{MaxFiles: 1}},
+		{name: "filesystem entry count one over", limits: Limits{MaxEntries: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := BuildManifest(context.Background(), root, tc.limits); !errors.Is(err, ErrQuota) {
+				t.Fatalf("over-limit manifest was not rejected with ErrQuota: %v", err)
+			}
+		})
+	}
+}
