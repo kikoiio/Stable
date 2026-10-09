@@ -79,6 +79,67 @@ func TestStopTeamMemberRemainsStoppingUntilChildExits(t *testing.T) {
 	assertTeamStopFacts(t, root, request.Work.SessionID, team.ID, member.ID, input.TeamTurn.TurnID, true)
 }
 
+func TestIdleTeamMemberShutdownIsApprovedWithoutStartingAnotherTurn(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	service, request := teamServiceFixture(t, root, "idle-shutdown-parent")
+	request.PermissionBounds, _ = json.Marshal(permission.Authority{RunID: request.RunID, SessionID: request.Work.SessionID, AllowedRoot: root})
+	service.activeRequests = map[string]agent.ExecutionRequest{request.RunID: request}
+	role := agentcatalog.Definition{Name: "explore", Instruction: "Inspect the assigned area.", Model: "inherit", Tools: []string{"read_file"}, MaxTurns: 3}
+	runner := &capturingTeamChildRunner{inputs: make(chan agent.ChildRunInput, 2)}
+	pool, err := agent.NewPoolDelegator(agent.DefaultDelegationLimits(), runner, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.deps.Agents = fixedTeamRoleCatalog{definition: role}
+	service.deps.Delegator = pool
+	service.deps.ForkProvider = forkSkillFixtureProvider{}
+	service.deps.ForkExecutorFactory = forkSkillFixtureExecutorFactory{}
+	service.deps.ForkToolSchemas = []llm.ToolSchema{{Name: "read_file"}}
+	service.deps.ProviderName, service.deps.Model = "fixture", "model-v1"
+	service.lifeCtx = context.Background()
+	service.teamScheduler = newTeamScheduler(service)
+	t.Cleanup(func() {
+		service.teamScheduler.close()
+		pool.Close()
+	})
+
+	team, err := service.CreateTeam(t.Context(), request, "idle-shutdown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := service.SpawnTeamMember(t.Context(), request, TeamMemberSpawnRequest{
+		TeamID: team.ID, Name: "reader", AgentName: role.Name, Instruction: "Inspect the area.", OriginCallID: "call-spawn",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input := receiveTeamChildInput(t, runner.inputs); input.TeamTurn == nil || input.TeamTurn.MemberID != member.ID {
+		t.Fatalf("unexpected first child turn: %+v", input.TeamTurn)
+	}
+	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberIdle)
+	if runner.count() != 1 {
+		t.Fatalf("first turn count=%d, want one", runner.count())
+	}
+
+	shutdown, err := service.RequestTeamShutdown(t.Context(), request, team.ID, member.ID)
+	if err != nil || shutdown.Status != teams.RequestApproved {
+		t.Fatalf("idle member shutdown = %+v, err=%v", shutdown, err)
+	}
+	projection, err := sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Members[member.ID].Status != teams.MemberStopped || projection.Requests[shutdown.ID].Status != teams.RequestApproved {
+		t.Fatalf("shutdown replay member=%s request=%s", projection.Members[member.ID].Status, projection.Requests[shutdown.ID].Status)
+	}
+	if runner.count() != 1 {
+		t.Fatalf("idle shutdown started another child turn: count=%d", runner.count())
+	}
+}
+
 func TestCloseTeamWaitsForActualChildExit(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "project")
 	if err := os.MkdirAll(root, 0700); err != nil {
