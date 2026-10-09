@@ -1,6 +1,6 @@
 # M09 并行协作与工作树：范围与进度
 
-> 2026-10-09 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。D/E/F 实现改动已提交并推送。SHA `d6be6bd946b81317608fc3200f92ef84ba223c40` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 全部通过；其间补入消息累计配额/批次边界、工作树删除和候选导出恢复回归。其后的本地提交继续增加 E/F 定向证据，尚待本轮云端组合验证；E/F checklist 仍有逐项验收缺口。
+> 2026-10-09 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。SHA `7413680911db1f4fd8048218204e6e494f015216` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 全部通过。其后本地提交 `9a9873b`、`6be42ec`、`a3f5910` 增加导出/接受串行化、team close 恢复和普通 session lead run 绑定 workspace 的定向证据，尚待最新 SHA 的云端组合验证。E/F checklist 仍有逐项验收缺口。
 
 ## 已完成
 
@@ -51,4 +51,4 @@ Linux 为当前首发平台，源端 iTerm 专用后端不属于本轮 Linux 验
 
 最新验证更新：SHA `dfaf16b` 的 Go `build-and-test`/`test-package` 与 Workspace Linux `writer-sandbox-volume` 全部通过；E2E 的 `e2e-sessions`、`e2e-m03`、`e2e-m04` 与 `cases` 成功，`e2e-core` 和 `unit` 当时仍在运行。随后新增 SHA `69484b3` 的 lead/member 8 KiB 消息边界测试，等待与本轮其他增量一起云端验证。普通 session run 未从 workspace binding 派生 writer authority 仍是 M09-F 未完成项，未将 M09 标记完成。
 
-2026-10-09 后续补入 E 的 32 KiB 消息 handoff、pending aggregate quota、父 run 失败后 child 续行、plan request 冲突重复响应、child terminal credential 脱敏与 stop 不伪完成 task 证据；F 修复候选导出失败残留路径与 remove recovery stale binding 重试，并补 workspace root replacement、writer cancel/restart generation、manifest file-count 和 binding cleanup 边界测试。SHA `d6be6bd` 的 Go build/unit、package、全部 E2E jobs 与 Workspace Linux 均通过；其后本地代码/测试提交 `51051a7`、`670e24e`、`11fdf43`、`f2f6f99`、`8fef6ea` 定向测试通过，尚待推送后的云端验证。标准 session run 仍未从 active workspace binding 获得受信 writer authority；需要完整解决 run admission 锁、writer lease、per-run executor、取消/终态和候选接受路径，不能以单纯 AllowedRoot 改动替代。M09-E/F AC1–9 及组合验收仍开放，M09 整体保持未完成。
+2026-10-09 后续补入 E 的 32 KiB 消息 handoff、pending aggregate quota、父 run 失败后 child 续行、plan request 冲突重复响应、child terminal credential 脱敏与 stop 不伪完成 task 证据；F 修复候选导出失败残留路径与 remove recovery stale binding 重试，并补 workspace root replacement、writer cancel/restart generation、manifest file-count 和 binding cleanup 边界测试。SHA `d6be6bd` 与其后 SHA `7413680` 的 Go build/unit、package、全部 E2E jobs 与 Workspace Linux 均通过；更新后的本地提交等待云端复验。普通 session lead run 现已从 active workspace binding 获取独占 generation lease，通过受信 per-run executor 写入 checkout；RunStarted 保存 workspace ID/generation，取消后等待 runner 实际退出再 settle lease，并在 failure/start 与 service close 路径回收。定向测试覆盖 checkout/formal 隔离、启动失败、恢复、admission race、Keep/Exit 和 Close。该切片尚未云端验证；Goal、AgentTask 和 team writer 不在本次范围。M09-E/F AC1–9 及组合验收仍开放，M09 整体保持未完成。
