@@ -27,6 +27,10 @@ type workspaceCandidateExporter struct {
 	// afterCandidateEntry is an optional observation point for crash-boundary
 	// tests. Production exporters leave it nil; callbacks must not alter files.
 	afterCandidateEntry func(string)
+	// syncCandidateDirectories is a per-exporter fault-injection seam for the
+	// final candidate directory durability boundary. Production exporters leave
+	// it nil; the callback must not alter files.
+	syncCandidateDirectories func(string) error
 }
 
 func (e workspaceCandidateExporter) PreviewWorkspace(ctx context.Context, scope workspace.Scope, record workspace.Record, paths workspace.Paths) (workspace.Snapshot, error) {
@@ -163,6 +167,13 @@ func (e workspaceCandidateExporter) ExportWorkspace(ctx context.Context, scope w
 	if err := installMergedManifestObserved(ctx, created.CandidateRoot, formalRoot, paths.Checkout, formal, working, preview.Manifest, e.afterCandidateEntry); err != nil {
 		return workspace.Snapshot{}, cleanupPartial(err)
 	}
+	syncCandidateDirectories := e.syncCandidateDirectories
+	if syncCandidateDirectories == nil {
+		syncCandidateDirectories = candidate.SyncDirectoryTree
+	}
+	if err := syncCandidateDirectories(created.CandidateRoot); err != nil {
+		return workspace.Snapshot{}, cleanupPartial(err)
+	}
 	if err := workspace.ValidateRootIdentity(formalRoot, record.FormalRootIdentity); err != nil {
 		return workspace.Snapshot{}, cleanupPartial(err)
 	}
@@ -227,7 +238,10 @@ func removeOwnedPartialCandidate(path, expectedIdentity string) error {
 	if err != nil || actualIdentity != expectedIdentity {
 		return workspace.ErrOwnership
 	}
-	return os.RemoveAll(path)
+	if err := os.RemoveAll(path); err != nil {
+		return err
+	}
+	return candidate.SyncDirectory(filepath.Dir(path))
 }
 
 func installMergedManifest(ctx context.Context, target, formalRoot, workspaceRoot string, formal, working, merged workspace.Manifest) error {
@@ -331,6 +345,18 @@ func installMergedManifestObserved(ctx context.Context, target, formalRoot, work
 		}
 		if err := secfile.ChmodRoot(root, filepath.FromSlash(entry.Path), os.FileMode(entry.Mode)); err != nil {
 			return err
+		}
+		modeFile, err := root.OpenFile(filepath.FromSlash(entry.Path), os.O_RDONLY, 0)
+		if err != nil {
+			return err
+		}
+		syncErr := modeFile.Sync()
+		closeErr := modeFile.Close()
+		if syncErr != nil {
+			return syncErr
+		}
+		if closeErr != nil {
+			return closeErr
 		}
 		if afterEntry != nil {
 			afterEntry(entry.Path)

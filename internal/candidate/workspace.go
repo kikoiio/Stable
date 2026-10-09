@@ -158,7 +158,7 @@ func CreateCandidate(id, formalRoot, candidatesParent string) (Candidate, error)
 	return CreateCandidateForPolicy(id, formalRoot, candidatesParent, ManifestPolicyLegacy)
 }
 
-func CreateCandidateForPolicy(id, formalRoot, candidatesParent, policy string) (Candidate, error) {
+func CreateCandidateForPolicy(id, formalRoot, candidatesParent, policy string) (result Candidate, returnErr error) {
 	policy, err := normalizeManifestPolicy(policy)
 	if err != nil {
 		return Candidate{}, err
@@ -176,6 +176,9 @@ func CreateCandidateForPolicy(id, formalRoot, candidatesParent, policy string) (
 		return Candidate{}, err
 	}
 	if err := secfile.MkdirAllPrivate(candidatesParent, 0700); err != nil {
+		return Candidate{}, err
+	}
+	if err := SyncDirectory(filepath.Dir(candidatesParent)); err != nil {
 		return Candidate{}, err
 	}
 	if _, err = secfile.OpenRoot(candidatesParent); err != nil {
@@ -200,6 +203,35 @@ func CreateCandidateForPolicy(id, formalRoot, candidatesParent, policy string) (
 	if err = os.Mkdir(target, 0700); err != nil {
 		return Candidate{}, err
 	}
+	createdIdentity, err := CaptureRootIdentity(target)
+	if err != nil {
+		// Without an identity there is no safe compensation for this path.
+		return Candidate{}, err
+	}
+	rollback := true
+	defer func() {
+		if !rollback {
+			return
+		}
+		currentIdentity, identityErr := CaptureRootIdentity(target)
+		if identityErr != nil || currentIdentity != createdIdentity {
+			returnErr = errors.Join(returnErr, errors.New("candidate cleanup identity mismatch; root retained"))
+			return
+		}
+		if err := os.RemoveAll(target); err != nil {
+			returnErr = errors.Join(returnErr, err)
+			return
+		}
+		if err := SyncDirectory(candidatesParent); err != nil {
+			returnErr = errors.Join(returnErr, err)
+		}
+	}()
+	// Make the new root name durable before any later candidate record can
+	// refer to it. The merged exporter also syncs the completed tree before it
+	// publishes a ready row.
+	if err := SyncDirectory(candidatesParent); err != nil {
+		return Candidate{}, err
+	}
 	rootInfo, err := os.Stat(formalRoot)
 	if err != nil {
 		return Candidate{}, err
@@ -208,12 +240,6 @@ func CreateCandidateForPolicy(id, formalRoot, candidatesParent, policy string) (
 	if err = secfile.ChmodPrivate(target, os.FileMode(rootMode)); err != nil {
 		return Candidate{}, err
 	}
-	rollback := true
-	defer func() {
-		if rollback {
-			_ = os.RemoveAll(target)
-		}
-	}()
 	for _, e := range base {
 		dst := filepath.Join(target, e.Path)
 		if err = secfile.MkdirAllPrivate(filepath.Dir(dst), 0700); err != nil {
@@ -222,6 +248,9 @@ func CreateCandidateForPolicy(id, formalRoot, candidatesParent, policy string) (
 		if err = copyFile(formal, e.Path, dst, os.FileMode(e.Mode)); err != nil {
 			return Candidate{}, err
 		}
+	}
+	if err := SyncDirectoryTree(target); err != nil {
+		return Candidate{}, err
 	}
 	rollback = false
 	return Candidate{ID: id, ManifestPolicy: policy, FormalRoot: formalRoot, CandidateRoot: target, BaselineDigest: digest, CandidateDigest: digest, RootMode: rootMode, Status: "prepared"}, nil
@@ -271,6 +300,9 @@ func copyFile(root secfile.Root, rel, dst string, mode os.FileMode) error {
 		return err
 	}
 	_, copyErr := io.Copy(out, in)
+	if copyErr == nil {
+		copyErr = out.Sync()
+	}
 	closeErr := out.Close()
 	if copyErr != nil {
 		_ = os.Remove(dst)
@@ -279,6 +311,109 @@ func copyFile(root secfile.Root, rel, dst string, mode os.FileMode) error {
 	if closeErr != nil {
 		_ = os.Remove(dst)
 		return closeErr
+	}
+	return nil
+}
+
+// SyncDirectoryTree persists directory entries below root, syncing deepest
+// directories first and root last. File contents must be synced by their
+// writers before this function is called.
+func SyncDirectoryTree(path string) error {
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	identity, err := root.Stat(".")
+	if err != nil {
+		return err
+	}
+	current, err := os.Lstat(path)
+	if err != nil || !current.IsDir() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(identity, current) {
+		return errors.New("candidate root changed before directory sync")
+	}
+	if err := syncDirectoryTree(root, "."); err != nil {
+		return err
+	}
+	current, err = os.Lstat(path)
+	if err != nil || !current.IsDir() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(identity, current) {
+		return errors.New("candidate root changed during directory sync")
+	}
+	return nil
+}
+
+func syncDirectoryTree(root *os.Root, relative string) error {
+	directory, err := root.Open(relative)
+	if err != nil {
+		return err
+	}
+	entries, err := directory.ReadDir(-1)
+	closeErr := directory.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		child := filepath.Join(relative, entry.Name())
+		info, err := root.Lstat(child)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if err := syncDirectoryTree(root, child); err != nil {
+			return err
+		}
+	}
+	directory, err = root.Open(relative)
+	if err != nil {
+		return err
+	}
+	syncErr := directory.Sync()
+	closeErr = directory.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
+}
+
+// SyncDirectory persists entries in a single directory and checks that its
+// pathname still identifies the opened directory after syncing.
+func SyncDirectory(path string) error {
+	directory, err := os.OpenRoot(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	info, err := directory.Stat(".")
+	if err != nil {
+		return err
+	}
+	current, err := os.Lstat(path)
+	if err != nil || !current.IsDir() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, current) {
+		return errors.New("candidate parent changed before directory sync")
+	}
+	file, err := directory.Open(".")
+	if err != nil {
+		return err
+	}
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	current, err = os.Lstat(path)
+	if err != nil || !current.IsDir() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, current) {
+		return errors.New("candidate parent changed during directory sync")
 	}
 	return nil
 }
