@@ -2,7 +2,12 @@ package conversation
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,9 +38,11 @@ type workspaceLifecycleDecisionGate struct {
 }
 
 type workspaceLifecycleCancelRunner struct {
-	done     chan struct{}
-	canceled chan string
-	once     sync.Once
+	done           chan struct{}
+	canceled       chan string
+	once           sync.Once
+	unavailable    bool
+	cancelAttempts int
 }
 
 func (*workspaceLifecycleCancelRunner) Start(context.Context, agent.ExecutionRequest) (*agent.RunHandle, error) {
@@ -43,6 +50,10 @@ func (*workspaceLifecycleCancelRunner) Start(context.Context, agent.ExecutionReq
 }
 
 func (r *workspaceLifecycleCancelRunner) Cancel(runID string) error {
+	r.cancelAttempts++
+	if r.unavailable {
+		return workspace.ErrUnavailable
+	}
 	r.canceled <- runID
 	r.once.Do(func() { close(r.done) })
 	return nil
@@ -629,6 +640,183 @@ func TestWorkspaceLifecycleExportStopsOtherTrustedWriterAfterLeadTerminal(t *tes
 	}
 	if _, err := db.GetCandidate(ctx, snapshot.CandidateID); err != nil {
 		t.Fatalf("deferred export candidate missing: %v", err)
+	}
+}
+
+func TestWorkspaceLifecycleExportUnavailableStopperRetainsPendingAndRetriesOnce(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "formal")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("formal"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	session, err := sessionlog.Create(root, "retry deferred export after stopper unavailable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateRoot := filepath.Join(t.TempDir(), "workspace-state")
+	host := execution.NewWorkspaceLifecycleToolHost()
+	svc := newWorkspaceToolTransitionService(ctx, root, stateRoot, db, host)
+	manager, err := svc.workspaceService(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := manager.Close(context.Background()); err != nil {
+			t.Errorf("close workspace manager: %v", err)
+		}
+	})
+	lead := agent.ExecutionRequest{RunID: "lead-retry-deferred-export", Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: session.ID}, Intent: "retry export after task stop becomes available"}
+	authority, err := BuildAuthority(ctx, db, root, lead, permission.ModeDefault, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lead.PermissionBounds, err = json.Marshal(authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, scope, err := svc.workspaceScope(ctx, ClientMsg{SessionID: session.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope.Authority, scope.OriginRunID = authority, lead.RunID
+	created, err := manager.Create(ctx, scope, "retry after stop unavailable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Enter(ctx, scope, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	writerRunID := "retryable-task-writer"
+	writerRequest := lead
+	writerRequest.RunID = writerRunID
+	writerAuthority, err := BuildAuthority(ctx, db, root, writerRequest, permission.ModeDefault, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writerScope := scope
+	writerScope.Authority, writerScope.OriginRunID = writerAuthority, writerRunID
+	lease, err := manager.AcquireLeadWriter(ctx, writerScope, created.ID, writerRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lease.Paths.Checkout, "file.txt"), []byte("task edit"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessionlog.Append(root, session.ID, sessionlog.EventRunStarted, sessionlog.RunStarted{RunID: lead.RunID, WorkKind: "session", Intent: lead.Intent}); err != nil {
+		t.Fatal(err)
+	}
+	svc.activeRuns[lead.RunID] = session.ID
+	svc.activeRequests[lead.RunID] = lead
+	writerDone := make(chan struct{})
+	runner := &workspaceLifecycleCancelRunner{done: writerDone, canceled: make(chan string, 2), unavailable: true}
+	svc.deps.Runner = runner
+	svc.workspaceRuns[writerRunID] = workspaceLeadRun{lease: lease, manager: manager}
+	svc.runDone[writerRunID] = writerDone
+	factory := execution.NewToolExecutorFactory(execution.ToolExecutorDeps{Gate: workspaceLifecycleAllowGate{}, SessionRoot: root}, execution.WithWorkspaceLifecycleToolHost(host))
+	leadExecutor, err := factory.ForRun(lead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := llm.ToolUse{ID: "retryable-deferred-export", Name: "worktree_export", Arguments: json.RawMessage(`{"workspace_id":"` + created.ID + `"}`)}
+	outcome, err := leadExecutor.Execute(ctx, call)
+	if err != nil || outcome.IsError || outcome.Status != agent.ToolSucceeded || !strings.Contains(outcome.Content, "scheduled") {
+		t.Fatalf("export tool outcome=%+v err=%v", outcome, err)
+	}
+	if err := appendWorkspaceToolTerminal(t, root, session.ID, lead.RunID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.reconcileWorkspaceToolTransitions(ctx, session.ID, false); !errors.Is(err, workspace.ErrUnavailable) {
+		t.Fatalf("first reconcile error=%v, want temporary stopper unavailability", err)
+	}
+	transcript, err := sessionlog.Replay(root, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transitions := latestWorkspaceTransitions(transcript.Events)
+	var transition sessionlog.WorkspaceToolTransition
+	for _, candidate := range transitions {
+		if candidate.CallID == call.ID {
+			transition = candidate
+			break
+		}
+	}
+	if transition.ID == "" || transition.Status != sessionlog.WorkspaceToolTransitionPending {
+		t.Fatalf("temporary stopper failure did not preserve pending transition: %+v", transitions)
+	}
+	blocked, err := manager.Get(ctx, scope, created.ID)
+	if err != nil || blocked.State != workspace.StateBlocked || blocked.WriterRunID != writerRunID || blocked.CandidateID != "" {
+		t.Fatalf("temporary stopper failure did not retain writer lease: snapshot=%+v err=%v", blocked, err)
+	}
+	baseline, err := workspace.BuildManifest(ctx, lease.Paths.Baseline, workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	formal, err := workspace.BuildManifest(ctx, root, workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	working, err := workspace.BuildManifest(ctx, lease.Paths.Checkout, workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := workspace.ThreeWayPreview(baseline, formal, working, workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s\x00%s", created.ID, blocked.Generation, preview.BaselineDigest, preview.FormalDigest, preview.WorkspaceDigest, preview.Manifest.Digest)
+	idDigest := sha256.Sum256([]byte(identity))
+	expectedCandidateID := "worktree-" + hex.EncodeToString(idDigest[:16])
+	if _, err := db.GetCandidate(ctx, expectedCandidateID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("failed first attempt created a candidate record: err=%v", err)
+	}
+	candidateParent := filepath.Join(filepath.Dir(root), ".stable-candidates")
+	if _, err := os.Stat(filepath.Join(candidateParent, expectedCandidateID)); !os.IsNotExist(err) {
+		t.Fatalf("failed first attempt left a candidate tree: stat error=%v", err)
+	}
+
+	runner.unavailable = false
+	if err := svc.reconcileWorkspaceToolTransitions(ctx, session.ID, false); err != nil {
+		t.Fatalf("retry after restoring stopper: %v", err)
+	}
+	select {
+	case canceled := <-runner.canceled:
+		if canceled != writerRunID {
+			t.Fatalf("stopped run=%q, want %q", canceled, writerRunID)
+		}
+	default:
+		t.Fatal("retry did not invoke the trusted writer stopper")
+	}
+	exported, err := manager.Get(ctx, scope, created.ID)
+	if err != nil || exported.State != workspace.StateExported || exported.WriterRunID != "" || exported.CandidateID != expectedCandidateID {
+		t.Fatalf("retry did not finish exactly the expected export: snapshot=%+v err=%v", exported, err)
+	}
+	if _, err := db.GetCandidate(ctx, expectedCandidateID); err != nil {
+		t.Fatalf("retry candidate missing from store: %v", err)
+	}
+	if err := svc.recoverWorkspaceToolTransitions(); err != nil {
+		t.Fatal(err)
+	}
+	if runner.cancelAttempts != 2 {
+		t.Fatalf("repeat recovery retried settled writer stop: cancel attempts=%d want=2", runner.cancelAttempts)
+	}
+	final, err := manager.Get(ctx, scope, created.ID)
+	if err != nil || final.CandidateID != expectedCandidateID || final.State != workspace.StateExported {
+		t.Fatalf("repeated recovery changed export identity: snapshot=%+v err=%v", final, err)
+	}
+	transcript, err = sessionlog.Replay(root, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := latestWorkspaceTransitions(transcript.Events)[transition.ID]; got.Status != sessionlog.WorkspaceToolTransitionApplied || got.CandidateID != expectedCandidateID {
+		t.Fatalf("retried transition did not persist exact applied result: %+v", got)
 	}
 }
 

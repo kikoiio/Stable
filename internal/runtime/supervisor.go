@@ -427,6 +427,7 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sa
 		log.Printf("MCP startup: %v", err)
 	}
 	defer mcpManager.Shutdown()
+	workspaceLifecycleHost := execution.NewWorkspaceLifecycleToolHost()
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
 		forkProvider = streamingProvider
 		delegator, err = agent.NewPoolDelegator(agent.DefaultDelegationLimits(), agent.StreamingChildRunner{}, delegationReporter)
@@ -434,7 +435,6 @@ func runChatService(c appconfig.AppConfig, p paths.Paths, address string, sbx sa
 			return fmt.Errorf("delegation coordinator: %w", err)
 		}
 		defer delegator.Close()
-		workspaceLifecycleHost := execution.NewWorkspaceLifecycleToolHost()
 		snapshotStore, err = candidate.NewSnapshotStore(p.Share, c.Snapshots.ProjectBytes(), c.Snapshots.ManifestsPerCandidate(), snapshotCredentials(c.Model.APIKey))
 		if err != nil {
 			return fmt.Errorf("candidate snapshot store: %w", err)
