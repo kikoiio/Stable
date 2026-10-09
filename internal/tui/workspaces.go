@@ -248,7 +248,9 @@ func (m Model) handleWorktreeDecisionKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		request.Op, request.WorktreePreviewID, request.WorktreeGeneration, request.ConflictChoices = "worktree_resolve", dialog.Snapshot.PreviewID, dialog.Snapshot.Generation, dialog.Choices
-		m.worktreeNextPage = dialog.Snapshot.ConflictNext
+		m.worktreeNextPage = &worktreePageRequest{
+			sessionID: dialog.Snapshot.SessionID, workspaceID: dialog.Snapshot.ID, after: dialog.Snapshot.ConflictNext,
+		}
 		m.WorktreeDialog = nil
 		return m, requestCmd(m.Socket, request)
 	}

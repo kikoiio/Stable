@@ -43,6 +43,7 @@ type TeamEvent struct {
 	OperationID string         `json:"operation_id,omitempty"`
 	Token       string         `json:"token,omitempty"`
 	ArgsDigest  string         `json:"args_digest,omitempty"`
+	Recovery    bool           `json:"recovery,omitempty"`
 	Team        *teams.Team    `json:"team,omitempty"`
 	Member      *teams.Member  `json:"member,omitempty"`
 	Message     *teams.Message `json:"message,omitempty"`

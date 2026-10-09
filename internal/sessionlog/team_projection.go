@@ -141,6 +141,9 @@ func (st *teamScan) checkEvent(sessionID string, e TeamEvent, at time.Time) erro
 			return errors.New("duplicate team mutation token")
 		}
 	}
+	if e.Recovery && (e.ActorID != "service" || e.Kind != TeamMemberState) {
+		return errors.New("recovery marker is restricted to service member-state facts")
+	}
 	count := 0
 	for _, present := range []bool{e.Team != nil, e.Member != nil, e.Message != nil, e.Task != nil, e.Request != nil, e.Turn != nil, e.Handoff != nil} {
 		if present {

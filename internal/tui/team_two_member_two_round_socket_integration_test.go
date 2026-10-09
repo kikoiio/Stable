@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -47,7 +48,7 @@ func TestTeamTUITwoMembersTwoTurnsRoutePrivateHandoffAndKeepParentRun(t *testing
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	childRunner := &twoMemberTwoRoundChildRunner{started: make(chan agent.ChildRunInput, 4), release: make(chan struct{}, 4), calls: make(map[string]int)}
+	childRunner := &twoMemberTwoRoundChildRunner{started: make(chan agent.ChildRunInput, 4), release: make(chan struct{}, 4), calls: make(map[string]int), reportResults: make(chan error, 1)}
 	limits := agent.DefaultDelegationLimits()
 	limits.Workers, limits.QueueCapacity = 2, 2
 	pool, err := agent.NewPoolDelegator(limits, childRunner, nil)
@@ -66,6 +67,7 @@ func TestTeamTUITwoMembersTwoTurnsRoutePrivateHandoffAndKeepParentRun(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	childRunner.service = svc
 	t.Cleanup(func() {
 		for range 4 {
 			select {
@@ -251,13 +253,95 @@ func TestTeamTUITwoMembersTwoTurnsRoutePrivateHandoffAndKeepParentRun(t *testing
 	if !durableMessageFound || !durableHandoffFound {
 		t.Fatalf("durable private message/handoff facts missing: message=%v handoff=%v", durableMessageFound, durableHandoffFound)
 	}
+
+	// A member report must be visible in the lead's team history and enter
+	// exactly the next matching parent run, through the normal run socket path.
+	const memberReport = "Recovery review confirms the retry boundary."
+	childRunner.mu.Lock()
+	childRunner.reportMember, childRunner.reportBody = memberB.ID, memberReport
+	childRunner.mu.Unlock()
+	model, resumeResult := submitAcceptanceTeamCommand(t, model, "/team "+team.ID+" resume "+memberB.ID)
+	resumed := acceptanceTeamResponse(t, resumeResult, "team_member_resume").TeamMember
+	if resumed == nil || (resumed.Status != teams.MemberQueued && resumed.Status != teams.MemberRunning) {
+		t.Fatalf("report turn resume=%+v, want queued/running", resumed)
+	}
+	reportTurn := receiveTwoMemberTwoRoundChild(t, childRunner.started)
+	if reportTurn.TeamTurn == nil || reportTurn.TeamTurn.MemberID != memberB.ID {
+		t.Fatalf("report turn has wrong member identity: %+v", reportTurn.TeamTurn)
+	}
+	childRunner.release <- struct{}{}
+	select {
+	case err := <-childRunner.reportResults:
+		if err != nil {
+			t.Fatalf("member report to lead failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("member report tool did not complete")
+	}
+	model, messagesResult := submitAcceptanceTeamCommand(t, model, "/team "+team.ID+" messages")
+	messages := acceptanceTeamResponse(t, messagesResult, "team_messages").TeamMessages
+	var reportVisible bool
+	for _, message := range messages {
+		if message.Body == memberReport && message.SenderID == memberB.ID && len(message.Recipients) == 1 && message.Recipients[0] == teams.Lead {
+			reportVisible = true
+		}
+	}
+	if !reportVisible {
+		t.Fatalf("TUI team history omitted member-to-lead report: %+v", messages)
+	}
+	waitTwoMemberTwoRoundStatus(t, project, sessionID, team.ID, memberB.ID, teams.MemberIdle)
+
+	parentRun.finish(agent.RunCompleted)
+	for {
+		message, err := parentStream.Receive()
+		if err != nil {
+			t.Fatalf("wait for completed parent run: %v", err)
+		}
+		if message.Type == "run_outcome" {
+			if message.Outcome == nil || message.Outcome.Status != agent.RunCompleted {
+				t.Fatalf("parent run outcome=%+v, want completed", message.Outcome)
+			}
+			break
+		}
+	}
+	matchingParentID, err := sessionlog.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	matchingStream, err := conversation.OpenRun(reqctx, socket, agent.ExecutionRequest{
+		RunID: matchingParentID, Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: sessionID},
+		Intent: "receive member report", Messages: []llm.Message{{Role: "user", Content: "Review team findings."}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer matchingStream.Close()
+	matchingParent := receiveAcceptanceParentRun(t, parentRunner.started)
+	t.Cleanup(func() { matchingParent.finish(agent.RunCompleted) })
+	if started, err := matchingStream.Receive(); err != nil || started.Type != "run_started" {
+		t.Fatalf("matching parent did not start over socket: message=%+v err=%v", started, err)
+	}
+	var noticeFound bool
+	for _, message := range matchingParent.request.Messages {
+		if message.Role == "user" && strings.Contains(message.Content, memberReport) && strings.Contains(message.Content, "untrusted reference data") {
+			noticeFound = true
+		}
+	}
+	if !noticeFound {
+		t.Fatalf("next matching parent run omitted member report: %+v", matchingParent.request.Messages)
+	}
+	matchingParent.finish(agent.RunCompleted)
 }
 
 type twoMemberTwoRoundChildRunner struct {
-	started chan agent.ChildRunInput
-	release chan struct{}
-	mu      sync.Mutex
-	calls   map[string]int
+	started       chan agent.ChildRunInput
+	release       chan struct{}
+	mu            sync.Mutex
+	calls         map[string]int
+	service       *conversation.Service
+	reportMember  string
+	reportBody    string
+	reportResults chan error
 }
 
 func (r *twoMemberTwoRoundChildRunner) Run(ctx context.Context, input agent.ChildRunInput) agent.ChildRunResult {
@@ -267,6 +351,7 @@ func (r *twoMemberTwoRoundChildRunner) Run(ctx context.Context, input agent.Chil
 	r.mu.Lock()
 	r.calls[input.TeamTurn.MemberID]++
 	round := r.calls[input.TeamTurn.MemberID]
+	reportMember, reportBody := r.reportMember, r.reportBody
 	r.mu.Unlock()
 	select {
 	case r.started <- input:
@@ -275,6 +360,21 @@ func (r *twoMemberTwoRoundChildRunner) Run(ctx context.Context, input agent.Chil
 	}
 	select {
 	case <-r.release:
+		if round == 3 && input.TeamTurn.MemberID == reportMember {
+			arguments, err := json.Marshal(map[string]any{
+				"team_id": input.TeamTurn.TeamID, "recipient": teams.Lead, "body": reportBody,
+			})
+			if err == nil {
+				var outcome agent.ToolOutcome
+				outcome, err = r.service.ExecuteTeamTool(ctx, agent.ExecutionRequest{
+					RunID: input.ChildRunID, Work: input.Work, TeamTurn: input.TeamTurn,
+				}, llm.ToolUse{ID: "member-report-to-lead", Name: "team_send", Arguments: arguments})
+				if err == nil && (outcome.Status != agent.ToolSucceeded || outcome.IsError) {
+					err = fmt.Errorf("team_send outcome=%+v", outcome)
+				}
+			}
+			r.reportResults <- err
+		}
 		return agent.ChildRunResult{Status: agent.DelegationSucceeded, Summary: "summary-" + input.TeamTurn.MemberName + "-round-" + strconv.Itoa(round)}
 	case <-ctx.Done():
 		return agent.ChildRunResult{Status: agent.DelegationInterrupted, Error: ctx.Err().Error()}

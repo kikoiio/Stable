@@ -186,18 +186,30 @@ func (s *Service) replayAcceptedWorkspaceRoots(ctx context.Context, manager *wor
 	// Walk the durable acceptance chain backward from the root currently at
 	// the formal path. Rebinding each exact predecessor to this verified final
 	// identity is safe after a crash in the middle of an earlier replay.
-	for i := len(transitions) - 1; i >= 0; i-- {
-		if transitions[i].TargetIdentity != currentToken {
-			continue
+	seen := make(map[string]bool, len(transitions))
+	for range transitions {
+		if seen[currentToken] {
+			return workspace.ErrOwnership
 		}
-		expected, parseErr := workspace.RootIdentityFromToken(transitions[i].ExpectedIdentity)
+		seen[currentToken] = true
+		matched := false
+		for _, transition := range transitions {
+			if transition.TargetIdentity == currentToken {
+				currentToken = transition.ExpectedIdentity
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			break
+		}
+		expected, parseErr := workspace.RootIdentityFromToken(currentToken)
 		if parseErr != nil {
 			return parseErr
 		}
 		if err := manager.RebindAcceptedFormalRoot(ctx, expected, target); err != nil {
 			return err
 		}
-		currentToken = transitions[i].ExpectedIdentity
 	}
 	return nil
 }

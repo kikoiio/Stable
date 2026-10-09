@@ -97,7 +97,7 @@ type Model struct {
 	AgentTasks        []agent.AgentTaskSnapshot
 	Worktrees         []workspace.Snapshot
 	WorktreeDialog    *worktreeDecisionDialog
-	worktreeNextPage  string
+	worktreeNextPage  *worktreePageRequest
 	agentTaskState
 	teamUIState
 	history    *inputhistory.Store
@@ -138,6 +138,12 @@ type resultMsg struct {
 	op        string
 	msgs      []conversation.ServerMsg
 	err       error
+}
+
+type worktreePageRequest struct {
+	sessionID   string
+	workspaceID string
+	after       string
 }
 
 type runStreamStartedMsg struct {
@@ -723,6 +729,14 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 		return m.handleTeamResult(r)
 	}
 	if strings.HasPrefix(r.op, "worktree_") {
+		// Async workspace replies are scoped to the session that issued them.
+		// Do not surface an old session's paths in the currently selected session.
+		if r.sessionID != "" && r.sessionID != m.ActiveSession {
+			if m.WorktreeDialog != nil && m.WorktreeDialog.Snapshot.SessionID == r.sessionID {
+				m.WorktreeDialog = nil
+			}
+			return m, nil
+		}
 		if r.err != nil {
 			m.Err = r.err
 			m.Status = "工作树请求失败：" + r.err.Error()
@@ -730,12 +744,12 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 		}
 		m.Err = nil
 		applyWorktreeMessages(&m, r.op, r.msgs)
-		if r.op == "worktree_resolve" && m.worktreeNextPage != "" {
-			after := m.worktreeNextPage
-			m.worktreeNextPage = ""
+		if r.op == "worktree_resolve" && m.worktreeNextPage != nil && m.worktreeNextPage.sessionID == r.sessionID {
+			nextPage := m.worktreeNextPage
+			m.worktreeNextPage = nil
 			for _, msg := range r.msgs {
-				if msg.Worktree != nil && msg.Worktree.ResolvedCount < msg.Worktree.ConflictCount {
-					return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "worktree_preview", SessionID: m.ActiveSession, ID: msg.Worktree.ID, ConflictAfter: after})
+				if msg.Worktree != nil && msg.Worktree.ID == nextPage.workspaceID && msg.Worktree.ResolvedCount < msg.Worktree.ConflictCount {
+					return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "worktree_preview", SessionID: nextPage.sessionID, ID: nextPage.workspaceID, ConflictAfter: nextPage.after})
 				}
 			}
 		}

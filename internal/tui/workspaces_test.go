@@ -49,6 +49,38 @@ func TestWorktreePreviewCommandRejectsInvalidUsage(t *testing.T) {
 	}
 }
 
+func TestWorktreeLateResponseFromPreviousSessionIsIgnored(t *testing.T) {
+	const oldSession = "0123456789abcdef0123456789abcdef"
+	const activeSession = "2123456789abcdef0123456789abcdef"
+	m := New("", t.TempDir())
+	m.ActiveSession = activeSession
+	m.Worktrees = []workspace.Snapshot{{ID: "3123456789abcdef0123456789abcdef", SessionID: activeSession, Label: "current"}}
+	m.WorktreeDialog = &worktreeDecisionDialog{Mode: "resolve", Snapshot: workspace.Snapshot{
+		ID: "4123456789abcdef0123456789abcdef", SessionID: oldSession, Conflicts: []string{"old/private/path"},
+	}}
+	m.worktreeNextPage = &worktreePageRequest{sessionID: oldSession, workspaceID: "4123456789abcdef0123456789abcdef", after: "old/private/path"}
+
+	updated, command := m.handleResult(resultMsg{
+		op: "worktree_resolve", sessionID: oldSession,
+		msgs: []conversation.ServerMsg{{Type: "worktree", Worktree: &workspace.Snapshot{
+			ID: "4123456789abcdef0123456789abcdef", SessionID: oldSession, Label: "old", Conflicts: []string{"old/private/path"},
+		}}},
+	})
+	got := updated.(Model)
+	if command != nil {
+		t.Fatal("stale workspace response started a continuation request")
+	}
+	if len(got.Worktrees) != 1 || got.Worktrees[0].SessionID != activeSession || got.Worktrees[0].Label != "current" {
+		t.Fatalf("stale response changed the active session workspace list: %+v", got.Worktrees)
+	}
+	if got.WorktreeDialog != nil {
+		t.Fatalf("stale conflict paths remained visible in the active session: %+v", got.WorktreeDialog)
+	}
+	if got.worktreeNextPage == nil || got.worktreeNextPage.sessionID != oldSession {
+		t.Fatalf("stale pagination state was lost or rebound: %+v", got.worktreeNextPage)
+	}
+}
+
 func TestWorktreeCommandsDispatchSessionScopedLifecycleRequests(t *testing.T) {
 	const sessionID = "0123456789abcdef0123456789abcdef"
 	const workspaceID = "1123456789abcdef0123456789abcdef"

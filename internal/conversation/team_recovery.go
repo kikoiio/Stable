@@ -53,6 +53,7 @@ func recoverTeamRuns(root string) error {
 func recoverTeamSession(root, sessionID string, events []sessionlog.Event, projection sessionlog.TeamProjection) error {
 	started := make(map[string]sessionlog.RunStarted)
 	terminal := make(map[string]bool)
+	recoveredMembers := make(map[string]bool)
 	lastRunSeq := make(map[string]uint64)
 	delegations := make(map[string]sessionlog.AgentTaskDelegation)
 	runStartedAt := make(map[string]time.Time)
@@ -86,6 +87,11 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 						runFinishedAt[runEvent.RunID] = runEvent.At
 					}
 				}
+			}
+		case sessionlog.EventTeam:
+			var fact sessionlog.TeamEvent
+			if decodeSessionData(event.Data, &fact) == nil && fact.Recovery && fact.Kind == sessionlog.TeamMemberState && fact.Member != nil {
+				recoveredMembers[fact.Member.ID] = true
 			}
 		}
 	}
@@ -244,7 +250,7 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 		}
 		member.Revision++
 		member.RunID, member.TurnID = turn.RunID, turn.ID
-		if err := appendTeamFactLocked(root, sessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: turn.OriginRunID, Member: &member}); err != nil {
+		if err := appendTeamFactLocked(root, sessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: turn.OriginRunID, Member: &member, Recovery: true}); err != nil {
 			return err
 		}
 		projection, err = sessionlog.ReplayTeams(root, sessionID, team.ID)
@@ -261,7 +267,7 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 	// recovery never leaves a terminal turn displayed as queued/running.
 	for _, member := range projection.Members {
 		if !member.Status.HasTurn() {
-			if reconciledTurnIDs[member.TurnID] {
+			if recoveredMembers[member.ID] || reconciledTurnIDs[member.TurnID] {
 				// The turn loop above already reconciled this member from the
 				// durable child outcome. Do not reinterpret its newly idle state
 				// as a live member that needs interruption.
@@ -272,7 +278,7 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 			}
 			member.Status = teams.MemberInterrupted
 			member.Revision++
-			if err := appendTeamFactLocked(root, sessionID, member.TeamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: member.OriginRunID, Member: &member}); err != nil {
+			if err := appendTeamFactLocked(root, sessionID, member.TeamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: member.OriginRunID, Member: &member, Recovery: true}); err != nil {
 				return err
 			}
 			continue
