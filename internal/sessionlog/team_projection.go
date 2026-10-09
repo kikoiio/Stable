@@ -399,6 +399,15 @@ func (st *teamScan) checkTurn(e TeamEvent) error {
 	if teams.ValidateText(t.OriginCallID, 256, false) != nil || t.OriginCallID != "" && t.OriginRunID == "" {
 		return errors.New("turn origin call requires bounded audit ID and origin run")
 	}
+	if teams.ValidateText(t.PlanRequestID, 256, false) != nil {
+		return errors.New("turn plan request ID exceeds bounds")
+	}
+	if t.PlanRequestID != "" {
+		request, ok := st.Requests[t.PlanRequestID]
+		if !ok || request.TeamID != e.TeamID || request.MemberID != t.MemberID || request.Type != teams.RequestPlan || (request.Status != teams.RequestApproved && request.Status != teams.RequestRejected) {
+			return errors.New("turn plan trigger must reference a responded plan request for its member")
+		}
+	}
 	prior, exists := st.Turns[t.ID]
 	switch e.Kind {
 	case TeamTurnIntent:

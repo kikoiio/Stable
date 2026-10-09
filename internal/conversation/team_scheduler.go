@@ -36,12 +36,13 @@ type TeamMemberSpawnRequest struct {
 }
 
 type teamParentGrant struct {
-	Request      agent.ExecutionRequest
-	Scope        teams.Scope
-	TeamID       string
-	MemberID     string
-	OriginCallID string
-	Generation   uint64
+	Request       agent.ExecutionRequest
+	Scope         teams.Scope
+	TeamID        string
+	MemberID      string
+	OriginCallID  string
+	PlanRequestID string
+	Generation    uint64
 }
 
 type teamWorkspaceRun struct {
@@ -421,6 +422,32 @@ func (s *teamScheduler) currentParent(memberID string, generation uint64) bool {
 	return ok && grant.Generation == generation
 }
 
+func (s *Service) teamPlanTrigger(memberID, runID, teamID string, scope teams.Scope, grantGeneration uint64) string {
+	if s == nil || s.teamScheduler == nil {
+		return ""
+	}
+	s.teamScheduler.mu.Lock()
+	defer s.teamScheduler.mu.Unlock()
+	grant, ok := s.teamScheduler.grants[memberID]
+	if !ok || grant.Request.RunID != runID || grant.TeamID != teamID || !grant.Scope.Matches(scope) || grantGeneration != 0 && grant.Generation != grantGeneration {
+		return ""
+	}
+	return grant.PlanRequestID
+}
+
+func (s *teamScheduler) consumePlanTrigger(memberID, runID, teamID string, scope teams.Scope, grantGeneration uint64, requestID string) {
+	if s == nil || requestID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	grant, ok := s.grants[memberID]
+	if ok && grant.Request.RunID == runID && grant.TeamID == teamID && grant.Scope.Matches(scope) && (grantGeneration == 0 || grant.Generation == grantGeneration) && grant.PlanRequestID == requestID {
+		grant.PlanRequestID = ""
+		s.grants[memberID] = grant
+	}
+}
+
 func (s *teamScheduler) invalidateMember(memberID string) context.CancelFunc {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -482,7 +509,39 @@ func (s *teamScheduler) invalidateParentRun(runID string) []context.CancelFunc {
 
 func (s *teamScheduler) signalFromLead(request agent.ExecutionRequest, scope teams.Scope, teamID, memberID, callID string) {
 	if request.TeamTurn == nil && !request.TeamUser && request.RunID != "" {
-		s.rememberParent(request, scope, teamID, memberID, callID)
+		generation := s.rememberParent(request, scope, teamID, memberID, callID)
+		if generation != 0 {
+			s.mu.Lock()
+			if grant, ok := s.grants[memberID]; ok && grant.Generation == generation {
+				grant.PlanRequestID = ""
+				s.grants[memberID] = grant
+			}
+			s.mu.Unlock()
+		}
+	}
+	s.queueReady(memberID, true)
+}
+
+func (s *teamScheduler) signalPlanResponse(request agent.ExecutionRequest, scope teams.Scope, teamID, memberID, requestID string) {
+	if request.TeamTurn == nil {
+		generation := uint64(0)
+		if request.RunID != "" && !request.TeamUser {
+			generation = s.rememberParent(request, scope, teamID, memberID, requestID)
+		} else if s != nil {
+			s.mu.Lock()
+			if grant, ok := s.grants[memberID]; ok && grant.TeamID == teamID && grant.Scope.Matches(scope) {
+				generation = grant.Generation
+			}
+			s.mu.Unlock()
+		}
+		if generation != 0 {
+			s.mu.Lock()
+			if grant, ok := s.grants[memberID]; ok && grant.Generation == generation {
+				grant.PlanRequestID = requestID
+				s.grants[memberID] = grant
+			}
+			s.mu.Unlock()
+		}
 	}
 	s.queueReady(memberID, true)
 }
@@ -690,7 +749,7 @@ func (s *Service) SpawnTeamMember(ctx context.Context, request agent.ExecutionRe
 			return nil
 		},
 	}
-	accepted, err := s.submitTeamMember(ctx, root, scope, team, member, request, parent, input, &startedAt, &runSeq, &durableTerminal, &durableResult, false, nil, false, 0, memberWorkspace, writerLease)
+	accepted, err := s.submitTeamMember(ctx, root, scope, team, member, request, parent, input, &startedAt, &runSeq, &durableTerminal, &durableResult, false, nil, false, 0, "", memberWorkspace, writerLease)
 	if err != nil {
 		if writerLease != nil {
 			cleanupTeamMemberWorkspaceUnlessReferenced(root, request.Work.SessionID, team.ID, member.ID, memberWorkspace, *writerLease, workspaceCreated)
@@ -763,6 +822,16 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 	member, ok := projection.Members[memberID]
 	if !ok || member.TeamID != team.ID {
 		return teams.Member{}, teams.ErrPermission
+	}
+	planRequestID := s.teamPlanTrigger(member.ID, request.RunID, team.ID, scope, grantGeneration)
+	if planRequestID != "" && member.TurnID != "" {
+		if turn, exists := projection.Turns[member.TurnID]; exists && turn.MemberID == member.ID && turn.PlanRequestID == planRequestID && turn.Status != "intent" && turn.Status != "aborted" {
+			// A plan response is a one-shot scheduler trigger. If its follow-up
+			// already ran before an explicit resume arrives, the request has been
+			// satisfied even though its turn is now terminal.
+			s.teamScheduler.consumePlanTrigger(member.ID, request.RunID, team.ID, scope, grantGeneration, planRequestID)
+			return member, nil
+		}
 	}
 	// A persisted worktree member can write on every resumed turn. Keep the
 	// same server-side team binding required for its initial spawn; callers
@@ -908,7 +977,7 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 			return nil
 		},
 	}
-	accepted, err := s.submitTeamMember(ctx, root, scope, team, member, request, parent, task, &startedAt, &runSeq, &durableTerminal, &durableResult, true, handoffs, false, grantGeneration, memberWorkspace, writerLease)
+	accepted, err := s.submitTeamMember(ctx, root, scope, team, member, request, parent, task, &startedAt, &runSeq, &durableTerminal, &durableResult, true, handoffs, false, grantGeneration, planRequestID, memberWorkspace, writerLease)
 	if errors.Is(err, agent.ErrDelegationQueueFull) {
 		waiting, waitErr := s.markMemberWaitingCapacity(root, request.Work.SessionID, team.ID, member)
 		if waitErr != nil {
@@ -946,7 +1015,7 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 					return err
 				}
 			}
-			_, retryErr := s.submitTeamMember(s.lifeCtx, root, scope, team, member, queuedRequest, parent, task, &startedAt, &runSeq, &durableTerminal, &durableResult, true, handoffs, true, grantGeneration, memberWorkspace, writerLease)
+			_, retryErr := s.submitTeamMember(s.lifeCtx, root, scope, team, member, queuedRequest, parent, task, &startedAt, &runSeq, &durableTerminal, &durableResult, true, handoffs, true, grantGeneration, planRequestID, memberWorkspace, writerLease)
 			if errors.Is(retryErr, agent.ErrDelegationQueueFull) {
 				// Keep the durable capacity-waiting state while this FIFO head
 				// remains queued. A later pool-capacity event retries it; changing
@@ -1132,13 +1201,13 @@ func resumableMemberTasks(projection sessionlog.TeamProjection, teamID, memberID
 	return out, nil
 }
 
-func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams.Scope, team teams.Team, member teams.Member, request agent.ExecutionRequest, parent agent.ParentRun, task agent.DelegationTask, startedAt *time.Time, runSeq *uint64, durableTerminal *bool, durableResult *agent.ChildRunResult, memberExists bool, handoffs []sessionlog.HandoffFact, waitingRetry bool, grantGeneration uint64, memberWorkspace *workspace.LifecycleService, writerLease *workspace.WriterLease) (teams.Member, error) {
+func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams.Scope, team teams.Team, member teams.Member, request agent.ExecutionRequest, parent agent.ParentRun, task agent.DelegationTask, startedAt *time.Time, runSeq *uint64, durableTerminal *bool, durableResult *agent.ChildRunResult, memberExists bool, handoffs []sessionlog.HandoffFact, waitingRetry bool, grantGeneration uint64, planRequestID string, memberWorkspace *workspace.LifecycleService, writerLease *workspace.WriterLease) (teams.Member, error) {
 	turnID := parent.TeamTurn.TurnID
 	messageIDs := make([]string, 0, len(handoffs))
 	for _, handoff := range handoffs {
 		messageIDs = append(messageIDs, handoff.MessageID)
 	}
-	turn := sessionlog.TurnFact{ID: turnID, MemberID: member.ID, TaskID: task.ID, MessageIDs: messageIDs, OriginRunID: request.RunID, OriginCallID: parent.ToolCallID, Status: "intent"}
+	turn := sessionlog.TurnFact{ID: turnID, MemberID: member.ID, TaskID: task.ID, MessageIDs: messageIDs, OriginRunID: request.RunID, OriginCallID: parent.ToolCallID, PlanRequestID: planRequestID, Status: "intent"}
 	if writerLease != nil {
 		turn.WorkspaceID, turn.WorkspaceGeneration = writerLease.WorkspaceID, writerLease.Generation
 	}

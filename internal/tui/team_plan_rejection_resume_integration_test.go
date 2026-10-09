@@ -135,8 +135,8 @@ func TestTeamPlanTUIRejectReviseApproveAndReadOnlyResume(t *testing.T) {
 	}
 	model.ActiveRunID = parentRunID
 	_, reviseResumeResult := submitAcceptanceTeamCommand(t, model, "/team "+team.ID+" resume "+member.ID)
-	if resumed := acceptanceTeamResponse(t, reviseResumeResult, "team_member_resume").TeamMember; resumed == nil || resumed.Status != teams.MemberQueued {
-		t.Fatalf("resume after rejection=%+v, want queued revision turn", resumed)
+	if resumed := acceptanceTeamResponse(t, reviseResumeResult, "team_member_resume").TeamMember; resumed == nil || (resumed.Status != teams.MemberQueued && resumed.Status != teams.MemberRunning && resumed.Status != teams.MemberAwaitingPlan) {
+		t.Fatalf("resume after rejection=%+v, want the revision turn to be queued or already submitted", resumed)
 	}
 	second := receivePlanRevisionStageFor(t, childRunner.stages, project, sessionID, team.ID, member.ID)
 	if second.index != 2 || second.err != nil || second.input.TeamTurn == nil || second.input.TeamTurn.MemberID != member.ID {
@@ -155,8 +155,8 @@ func TestTeamPlanTUIRejectReviseApproveAndReadOnlyResume(t *testing.T) {
 		t.Fatalf("lead approval=%+v, want approved revision 2", approved)
 	}
 	_, approvedResumeResult := submitAcceptanceTeamCommand(t, model, "/team "+team.ID+" resume "+member.ID)
-	if resumed := acceptanceTeamResponse(t, approvedResumeResult, "team_member_resume").TeamMember; resumed == nil || resumed.Status != teams.MemberQueued {
-		t.Fatalf("resume after approval=%+v, want queued read-only follow-up", resumed)
+	if resumed := acceptanceTeamResponse(t, approvedResumeResult, "team_member_resume").TeamMember; resumed == nil || (resumed.Status != teams.MemberQueued && resumed.Status != teams.MemberRunning && resumed.Status != teams.MemberIdle) {
+		t.Fatalf("resume after approval=%+v, want the follow-up to be queued or already completed", resumed)
 	}
 	third := receivePlanRevisionStage(t, childRunner.stages)
 	if third.index != 3 || third.err != nil || third.input.TeamTurn == nil || third.input.TeamTurn.MemberID != member.ID {
@@ -179,6 +179,18 @@ func TestTeamPlanTUIRejectReviseApproveAndReadOnlyResume(t *testing.T) {
 	}
 	if got := projection.Members[member.ID]; !got.PlanApproved || got.Status != teams.MemberIdle || got.Summary != "read-only follow-up completed" {
 		t.Fatalf("member projection after approved follow-up=%+v", got)
+	}
+	if got := projection.Members[member.ID].Budget.AcceptedTurns; got != 3 {
+		t.Fatalf("member accepted %d turns, want exactly three plan/revision/follow-up turns", got)
+	}
+	turns := 0
+	for _, turn := range projection.Turns {
+		if turn.MemberID == member.ID {
+			turns++
+		}
+	}
+	if turns != 3 {
+		t.Fatalf("member has %d durable turns, want exactly three", turns)
 	}
 }
 
@@ -366,7 +378,7 @@ func waitPlanRevisionMemberStatus(t *testing.T, root, sessionID, teamID, memberI
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Fatalf("member status=%q, want %q", projection.Members[memberID].Status, want)
+	t.Fatalf("member status=%q, want %q; member=%+v turns=%+v requests=%+v", projection.Members[memberID].Status, want, projection.Members[memberID], projection.Turns, projection.Requests)
 }
 
 func mustJSONForPlanRunner(value string) string {

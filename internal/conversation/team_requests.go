@@ -320,7 +320,7 @@ func (s *Service) RespondTeamRequest(ctx context.Context, request agent.Executio
 			return prior, err
 		}
 		if actor.Lead && s.teamScheduler != nil {
-			s.teamScheduler.signalFromLead(request, scope, team.ID, member.ID, prior.ID)
+			s.teamScheduler.signalPlanResponse(request, scope, team.ID, member.ID, prior.ID)
 		}
 	}
 	if prior.Type == teams.RequestPlan && prior.Status == teams.RequestRejected && member.Status == teams.MemberAwaitingPlan {
@@ -330,7 +330,7 @@ func (s *Service) RespondTeamRequest(ctx context.Context, request agent.Executio
 			return prior, err
 		}
 		if actor.Lead && s.teamScheduler != nil {
-			s.teamScheduler.signalFromLead(request, scope, team.ID, member.ID, prior.ID)
+			s.teamScheduler.signalPlanResponse(request, scope, team.ID, member.ID, prior.ID)
 		}
 	}
 	if prior.Type == teams.RequestShutdown && prior.Status == teams.RequestApproved {

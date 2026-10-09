@@ -61,6 +61,7 @@ type TurnFact struct {
 	WorkspaceGeneration uint64        `json:"workspace_generation,omitempty"`
 	OriginRunID         string        `json:"origin_run_id,omitempty"`
 	OriginCallID        string        `json:"origin_call_id,omitempty"`
+	PlanRequestID       string        `json:"plan_request_id,omitempty"`
 	MessageIDs          []string      `json:"message_ids,omitempty"`
 	Status              string        `json:"status"`
 	Elapsed             time.Duration `json:"elapsed,omitempty"`
