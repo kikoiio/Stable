@@ -52,6 +52,7 @@ type ClientMsg struct {
 	AfterTaskID          string                  `json:"after_task_id,omitempty"`
 	ExpectedRevision     uint64                  `json:"expected_revision,omitempty"`
 	TeamID               string                  `json:"team_id,omitempty"`
+	AfterTeamID          string                  `json:"after_team_id,omitempty"`
 	TeamName             string                  `json:"team_name,omitempty"`
 	TeamRecipient        string                  `json:"team_recipient,omitempty"`
 	TeamToken            string                  `json:"team_token,omitempty"`
@@ -358,11 +359,11 @@ func validateClient(m ClientMsg) error {
 		if m.Run != nil || m.ProjectRoot != "" {
 			return fmt.Errorf("team operations use the persisted run scope and server-bound project root")
 		}
-		if m.Op == "team_list" && (m.Limit < 0 || m.Limit > teams.MaxPageSize) {
-			return fmt.Errorf("team_list page size exceeds the maximum")
+		if m.Op == "team_list" && (m.Limit < 0 || m.Limit > teams.MaxPageSize || m.AfterTeamID != "" && teams.ValidateID(m.AfterTeamID) != nil) {
+			return fmt.Errorf("team_list requires a bounded page and valid cursor")
 		}
-		if m.Op != "team_list" && m.Limit != 0 {
-			return fmt.Errorf("limit is only accepted by team_list")
+		if m.Op != "team_list" && (m.Limit != 0 || m.AfterTeamID != "") {
+			return fmt.Errorf("limit and after_team_id are only accepted by team_list")
 		}
 		if m.Op == "team_create" && (m.TeamName == "" || m.RunID == "") {
 			return fmt.Errorf("op team_create requires team_name and active lead run_id")

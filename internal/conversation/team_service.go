@@ -308,6 +308,14 @@ func (s *Service) ListTeams(ctx context.Context, request agent.ExecutionRequest,
 	if len(requestedLimit) == 1 {
 		limit = requestedLimit[0]
 	}
+	return s.ListTeamsPage(ctx, request, "", limit)
+}
+
+// ListTeamsPage returns a bounded created-time/ID-ordered page after a visible team ID.
+func (s *Service) ListTeamsPage(ctx context.Context, request agent.ExecutionRequest, afterTeamID string, limit int) ([]teams.Team, error) {
+	if afterTeamID != "" && teams.ValidateID(afterTeamID) != nil {
+		return nil, errors.New("team list cursor is invalid")
+	}
 	root, _, err := s.scopeForWork(ctx, currentProjectRoot(s.deps.ProjectRoot), request.Work)
 	if err != nil {
 		return nil, err
@@ -315,6 +323,23 @@ func (s *Service) ListTeams(ctx context.Context, request agent.ExecutionRequest,
 	list, err := s.listTeamsForSession(ctx, root, request.Work.SessionID, &request.Work)
 	if err != nil {
 		return nil, err
+	}
+	return pageTeams(list, afterTeamID, limit)
+}
+
+func pageTeams(list []teams.Team, afterTeamID string, limit int) ([]teams.Team, error) {
+	if afterTeamID != "" {
+		cursorIndex := -1
+		for i := range list {
+			if list[i].ID == afterTeamID {
+				cursorIndex = i
+				break
+			}
+		}
+		if cursorIndex < 0 {
+			return nil, teams.ErrNotFound
+		}
+		list = list[cursorIndex+1:]
 	}
 	pageSize := teams.PageSize(limit)
 	if len(list) > pageSize {
@@ -526,10 +551,7 @@ func (s *Service) handleTeamRequest(ctx context.Context, msg ClientMsg) (ServerM
 	case "team_list":
 		list, listErr := s.listTeamsForSession(ctx, root, msg.SessionID, nil)
 		if listErr == nil {
-			pageSize := teams.PageSize(msg.Limit)
-			if len(list) > pageSize {
-				list = list[:pageSize]
-			}
+			list, listErr = pageTeams(list, msg.AfterTeamID, msg.Limit)
 		}
 		return ServerMsg{Type: msg.Op, Teams: list}, listErr
 	case "team_get":

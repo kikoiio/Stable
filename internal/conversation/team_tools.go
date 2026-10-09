@@ -37,6 +37,7 @@ func (s *Service) ExecuteTeamTool(ctx context.Context, request agent.ExecutionRe
 		Broadcast          bool      `json:"broadcast"`
 		AfterSeq           uint64    `json:"after_seq"`
 		AfterTaskID        string    `json:"after_task_id"`
+		AfterTeamID        string    `json:"after_team_id"`
 		Limit              int       `json:"limit"`
 		RequestID          string    `json:"request_id"`
 		AfterTeamRequestID string    `json:"after_team_request_id"`
@@ -78,7 +79,7 @@ func (s *Service) ExecuteTeamTool(ctx context.Context, request agent.ExecutionRe
 			result, err = s.ResumeTeamMember(ctx, request, args.TeamID, args.MemberID, call.ID)
 		}
 	case "team_list":
-		result, err = s.ListTeams(ctx, request, args.Limit)
+		result, err = s.ListTeamsPage(ctx, request, args.AfterTeamID, args.Limit)
 	case "team_get":
 		if args.TeamID == "" {
 			err = teams.ErrNotFound
