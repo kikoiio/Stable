@@ -23,6 +23,8 @@
 
 增量证据：`copySnapshot` 在完成文件权限后重新同步文件数据，按目录自底向上同步 checkout/baseline 目录项，并同步目标父目录；所有打开的目录均用 root-scoped handle 与捕获的 inode 身份复核。`TestPrivateGitMaterializeDirectorySyncFailureRollsBackWithoutReceipt` 注入 checkout 根目录 fsync 失败，验证错误返回、仅回滚本次身份匹配的 baseline/repository/checkout、无 `git-state.json` receipt 且 workspace 仍为 Creating；定向测试本地通过（2026-10-10）。本项完整 dirty snapshot、Git隔离和其它故障边界仍开放。
 
+纵向保全证据：`TestWorktreeTeamMemberFlowsThroughExportReviewAndAcceptance` 现用真实正式 Git 仓库走成员工作树创建、writer修改、候选导出、review 与显式接收；全过程对比 `.git/HEAD`、config、index、refs 与 hooks 的文件内容/inode，确认仅工作文件随接收变化，正式 Git 元数据不变。定向conversation测试本地通过（2026-10-10）；AC2 完整矩阵仍开放。
+
 ## AC3 受控 child 写与 command
 
 - [ ] `run_agent`同步、后台、definition isolation三入口分别验证真实workspace/lease；缺省D、explore/plan和A/B/C仍只读，角色工具规则与父权限交集生效。

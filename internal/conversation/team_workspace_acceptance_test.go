@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -24,6 +25,74 @@ import (
 type worktreeTeamWriterRunner struct {
 	started  chan agent.ChildRunInput
 	finished chan agent.ChildRunResult
+}
+
+type formalGitFileSnapshot struct {
+	content []byte
+	info    os.FileInfo
+}
+
+func snapshotFormalGitFiles(t *testing.T, formal string) map[string]formalGitFileSnapshot {
+	t.Helper()
+	gitRoot := filepath.Join(formal, ".git")
+	wanted := map[string]struct{}{"HEAD": {}, "config": {}, "index": {}}
+	for _, subtree := range []string{"refs", "hooks"} {
+		root := filepath.Join(gitRoot, subtree)
+		err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			relative, err := filepath.Rel(gitRoot, path)
+			if err != nil {
+				return err
+			}
+			wanted[relative] = struct{}{}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk formal Git %s: %v", subtree, err)
+		}
+	}
+	snapshot := make(map[string]formalGitFileSnapshot, len(wanted))
+	for relative := range wanted {
+		path := filepath.Join(gitRoot, relative)
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatalf("stat formal Git metadata %q: %v", relative, err)
+		}
+		if !info.Mode().IsRegular() {
+			t.Fatalf("formal Git metadata %q is not a regular file: %s", relative, info.Mode())
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read formal Git metadata %q: %v", relative, err)
+		}
+		snapshot[relative] = formalGitFileSnapshot{content: content, info: info}
+	}
+	return snapshot
+}
+
+func assertFormalGitFilesUnchanged(t *testing.T, formal string, before map[string]formalGitFileSnapshot) {
+	t.Helper()
+	after := snapshotFormalGitFiles(t, formal)
+	if len(after) != len(before) {
+		t.Fatalf("formal Git metadata file count changed: before=%d after=%d", len(before), len(after))
+	}
+	for relative, saved := range before {
+		current, ok := after[relative]
+		if !ok {
+			t.Fatalf("formal Git metadata file disappeared: %q", relative)
+		}
+		if !os.SameFile(saved.info, current.info) {
+			t.Fatalf("formal Git metadata inode changed: %q", relative)
+		}
+		if string(current.content) != string(saved.content) {
+			t.Fatalf("formal Git metadata content changed: %q", relative)
+		}
+	}
 }
 
 func (r *worktreeTeamWriterRunner) Run(ctx context.Context, input agent.ChildRunInput) (result agent.ChildRunResult) {
@@ -56,6 +125,24 @@ func TestWorktreeTeamMemberFlowsThroughExportReviewAndAcceptance(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(formal, "team-result.txt"), []byte("formal baseline"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	runGit := func(args ...string) {
+		t.Helper()
+		command := exec.Command("git", args...)
+		command.Dir = formal
+		command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	runGit("init", "--quiet", "--initial-branch=main")
+	runGit("config", "user.name", "M09 Fixture")
+	runGit("config", "user.email", "m09-fixture@example.invalid")
+	runGit("add", "--", "team-result.txt")
+	runGit("commit", "--quiet", "-m", "formal baseline")
+	if err := os.WriteFile(filepath.Join(formal, ".git", "hooks", "post-commit"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	formalGitBefore := snapshotFormalGitFiles(t, formal)
 	service, request := teamServiceFixture(t, formal, "team-worktree-parent")
 	formal, err := filepath.Abs(formal)
 	if err != nil {
@@ -223,4 +310,5 @@ func TestWorktreeTeamMemberFlowsThroughExportReviewAndAcceptance(t *testing.T) {
 	if got, err := os.ReadFile(filepath.Join(formal, "team-result.txt")); err != nil || string(got) != "team candidate bytes" {
 		t.Fatalf("explicitly accepted member result was not installed: %q err=%v", got, err)
 	}
+	assertFormalGitFilesUnchanged(t, formal, formalGitBefore)
 }

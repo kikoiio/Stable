@@ -105,7 +105,7 @@ func TestNamedRunAgentWriterFactoryEnforcesPermissionRoleAndLease(t *testing.T) 
 	}, execution.WithAgentTaskService(svc.deps.AgentTasks))
 	parent.ExecutorFactory = baseFactory
 	parent.ToolSchemas = []llm.ToolSchema{{Name: "run_agent"}}
-	parentRequest := agent.ExecutionRequest{RunID: parent.RunID, Work: parent.Work, PermissionBounds: parent.PermissionBounds}
+	parentRequest := agent.ExecutionRequest{RunID: parent.RunID, Work: parent.Work, ProviderName: parent.ProviderName, Model: parent.Model, PermissionBounds: parent.PermissionBounds}
 	parentExecutor, err := baseFactory.ForRun(parentRequest)
 	if err != nil {
 		t.Fatal(err)
