@@ -1,6 +1,6 @@
 # M09 并行协作与工作树：范围与进度
 
-> 2026-10-09 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。最新已完成组合 CI 基线为 SHA `3aebca97780704391cc1050b4f9ce75cbff72814`：Go build/unit 重跑成功（首次在 `TestLegacyHistoryIsNotReplayedButLiveGoalMessagesBroadcast` 的 10 分钟 socket-read deadline 超时）、package 成功、E2E 全部六个 jobs 与 M09 Workspace Linux 成功。SHA `772e710f6cd8cb61b31f041492198347df8ab0d7` 已推送，Go/E2E/Workspace Linux 新 workflow 正在验证新增 E/F 证据；E/F AC1–9 仍未整体验收。
+> 2026-10-09 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。SHA `772e710f6cd8cb61b31f041492198347df8ab0d7` 的 Go build/unit、package、E2E 全部六个 jobs 与 M09 Workspace Linux 均通过（[Go](https://github.com/kikoiio/Stable/actions/runs/37925807851)、[E2E](https://github.com/kikoiio/Stable/actions/runs/37925807759)、[Workspace Linux](https://github.com/kikoiio/Stable/actions/runs/37925807634)）；Go 首次单测因既有 socket-read test 超时失败，重跑失败 job 后通过。其后新补 E/F 用例将随下一 SHA 组合复验；E/F AC1–9 仍未整体验收。
 
 ## 已完成
 
@@ -57,4 +57,4 @@ Linux 为当前首发平台，源端 iTerm 专用后端不属于本轮 Linux 验
 
 SHA `21d66d7061a31b43f72a24ea79810c52e3584798` 的 Go build/unit、package、全部 E2E jobs 与 Workspace Linux 均通过；`database is locked` 未在复验中重现。随后新增 `c8c5797` 的真实 TUI plan-request approval service 路径，定向本地测试 `-count=3` 通过，尚待最新 SHA 云端复验。该增量仍只补 E AC5/AC9 子场景；E/F 的 AC1–9 与 M09 全局组合验收尚未完成。
 
-随后继续推进 E/F：team task/request/team/member 历史查询补齐稳定排序、100 项上限和 cursor 续读；增加成员发消息给 lead 不自动起新 lead run、单个 member stop 不影响 sibling、parent cancellation 不伪完成 task 的 E 证据。F 增加后台 writer 在 requester disconnect/parent completion 后保留 generation lease、workspace chmod 经 export/review/accept 保留 mode、checkout 变化使旧 conflict resolution 失效、stale writer executor 跨 generation 写入被拒、linked `.git` pointer acceptance 后 inode/内容保全等测试。以上定向本地测试通过并记录在 E/F checklist。SHA `772e710f6cd8cb61b31f041492198347df8ab0d7` 已推送，Go/E2E/Workspace Linux 组合 workflow 正在运行；M09-E/F AC1–9 与全局源端差异和组合验收仍开放，整体 M09 未完成。
+随后继续推进 E/F：team task/request/team/member 历史查询补齐稳定排序、100 项上限和 cursor 续读；增加成员发消息给 lead 不自动起新 lead run、单个 member stop 不影响 sibling、parent cancellation 不伪完成 task 的 E 证据。F 增加后台 writer 在 requester disconnect/parent completion 后保留 generation lease、workspace chmod 经 export/review/accept 保留 mode、checkout 变化使旧 conflict resolution 失效、stale writer executor 跨 generation 写入被拒、linked `.git` pointer acceptance 后 inode/内容保全等测试。其后又新增 E 的跨 team request 拒绝、member 不得增建成员、stale plan revision no-op、parent failure 下双 sibling 续行；F 的 TUI blocked-writer reason/checkout 保留与 stop retry service 闭环。以上定向本地测试通过并记录在 E/F checklist。SHA `772e710f6cd8cb61b31f041492198347df8ab0d7` 的 Go/package、E2E 全部 jobs 与 Workspace Linux 已通过；其后代码提交待下一轮组合云端验证。M09-E/F AC1–9 与全局源端差异和组合验收仍开放，整体 M09 未完成。
