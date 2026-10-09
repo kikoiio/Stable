@@ -59,28 +59,29 @@ type teamExpiryScope struct {
 }
 
 type teamScheduler struct {
-	service         *Service
-	submitter       agent.CommittedTaskSubmitter
-	appendHandoff   func(root, sessionID, teamID string, handoff sessionlog.HandoffFact) error
-	mu              sync.Mutex
-	drainMu         sync.Mutex
-	active          map[string]context.CancelFunc
-	activeOrigin    map[string]string
-	activeMember    map[string]string
-	activeTeam      map[string]string
-	workspaceRuns   map[string]teamWorkspaceRun
-	roles           map[string]agentcatalog.Definition
-	waiting         []func() error
-	grants          map[string]teamParentGrant
-	grantGeneration map[string]uint64
-	ready           []string
-	readySet        map[string]bool
-	readyGeneration map[string]uint64
-	expiryScopes    map[teamExpiryScope]struct{}
-	wake            chan struct{}
-	expiryWake      chan struct{}
-	done            chan struct{}
-	closed          bool
+	service            *Service
+	submitter          agent.CommittedTaskSubmitter
+	appendHandoff      func(root, sessionID, teamID string, handoff sessionlog.HandoffFact) error
+	appendTurnTerminal func(root, sessionID, teamID string, fact sessionlog.TeamEvent) error
+	mu                 sync.Mutex
+	drainMu            sync.Mutex
+	active             map[string]context.CancelFunc
+	activeOrigin       map[string]string
+	activeMember       map[string]string
+	activeTeam         map[string]string
+	workspaceRuns      map[string]teamWorkspaceRun
+	roles              map[string]agentcatalog.Definition
+	waiting            []func() error
+	grants             map[string]teamParentGrant
+	grantGeneration    map[string]uint64
+	ready              []string
+	readySet           map[string]bool
+	readyGeneration    map[string]uint64
+	expiryScopes       map[teamExpiryScope]struct{}
+	wake               chan struct{}
+	expiryWake         chan struct{}
+	done               chan struct{}
+	closed             bool
 }
 
 func newTeamScheduler(service *Service) *teamScheduler {
@@ -1657,18 +1658,20 @@ func (s *Service) watchTeamMember(root, sessionID, teamID, memberID, turnID stri
 		}
 	}
 	s.eventMu.Lock()
-	defer s.eventMu.Unlock()
 	projection, err := sessionlog.ReplayTeams(root, sessionID, teamID)
 	if err != nil {
+		s.eventMu.Unlock()
 		return
 	}
 	turn, exists := projection.Turns[turnID]
 	if !exists || turnTerminalTeamStatus(turn.Status) {
+		s.eventMu.Unlock()
 		return
 	}
 	if !*durableTerminal {
 		// Child run durability is written by the lifecycle callback. If it
 		// failed, leave the accepted turn for startup recovery to mark interrupted.
+		s.eventMu.Unlock()
 		return
 	}
 	elapsed := time.Duration(0)
@@ -1684,9 +1687,60 @@ func (s *Service) watchTeamMember(root, sessionID, teamID, memberID, turnID stri
 	terminal.Status, terminal.Elapsed = status, elapsed
 	terminal.Summary = truncateDelegationText(redactRunCredential(durableResult.Summary, s.deps.ProviderCredential), teams.MaxSummaryBytes)
 	terminal.Error = truncateDelegationText(redactRunCredential(durableResult.Error, s.deps.ProviderCredential), teams.MaxErrorBytes)
-	if appendTeamFactLocked(root, sessionID, teamID, sessionlog.TeamEvent{Kind: sessionlog.TeamTurnTerminal, ActorID: "service", ActorRunID: turn.OriginRunID, Turn: &terminal}) != nil {
-		return
+	terminalFact := sessionlog.TeamEvent{Kind: sessionlog.TeamTurnTerminal, ActorID: "service", ActorRunID: turn.OriginRunID, Turn: &terminal}
+	for {
+		appendTerminal := s.teamScheduler.appendTurnTerminal
+		if appendTerminal == nil {
+			appendTerminal = appendTeamFactLocked
+		}
+		if appendErr := appendTerminal(root, sessionID, teamID, terminalFact); appendErr == nil {
+			break
+		}
+		// The child result is already durable. Keep its accepted turn available
+		// for this watcher to finish when storage recovers, while yielding the
+		// service event lock between bounded retries. Service shutdown interrupts
+		// the retry so startup recovery can reconcile the durable child outcome.
+		s.eventMu.Unlock()
+		timer := time.NewTimer(100 * time.Millisecond)
+		var serviceDone <-chan struct{}
+		if s.lifeCtx != nil {
+			serviceDone = s.lifeCtx.Done()
+		}
+		var schedulerDone <-chan struct{}
+		if s.teamScheduler != nil {
+			schedulerDone = s.teamScheduler.done
+		}
+		select {
+		case <-timer.C:
+			s.eventMu.Lock()
+			projection, err = sessionlog.ReplayTeams(root, sessionID, teamID)
+			if err != nil {
+				s.eventMu.Unlock()
+				return
+			}
+			if current, ok := projection.Turns[turnID]; !ok || turnTerminalTeamStatus(current.Status) {
+				s.eventMu.Unlock()
+				return
+			}
+		case <-serviceDone:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return
+		case <-schedulerDone:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return
+		}
 	}
+	defer s.eventMu.Unlock()
 	// Request expiry is an independent durable fact. If its append fails, keep
 	// committing the child terminal/member state; the single expiry timer retries
 	// the request and reconciles an awaiting-plan member after the write recovers.

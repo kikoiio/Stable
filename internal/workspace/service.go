@@ -60,18 +60,19 @@ type ServiceDependencies struct {
 // authority. Binding files are private service facts, independent of process
 // cwd and the active run's already-derived authority.
 type LifecycleService struct {
-	mu           sync.Mutex
-	layout       *Layout
-	store        *OwnershipStore
-	git          *PrivateGit
-	materializer *Materializer
-	budget       *Budget
-	limits       Limits
-	deps         ServiceDependencies
-	writers      map[string]WriterLease
-	bindings     *os.Root
-	bindingInfo  os.FileInfo
-	closed       bool
+	mu                  sync.Mutex
+	layout              *Layout
+	store               *OwnershipStore
+	git                 *PrivateGit
+	materializer        *Materializer
+	budget              *Budget
+	limits              Limits
+	deps                ServiceDependencies
+	writers             map[string]WriterLease
+	bindings            *os.Root
+	bindingInfo         os.FileInfo
+	unknownRootIdentity bool
+	closed              bool
 }
 
 var _ Service = (*LifecycleService)(nil)
@@ -170,6 +171,25 @@ func (s *LifecycleService) reconcileUsage(ctx context.Context, records []Record)
 		if err != nil {
 			return err
 		}
+		if hasUnknownCreatingRootIdentity(record) {
+			s.mu.Lock()
+			s.unknownRootIdentity = true
+			s.mu.Unlock()
+			// Never open or scan a root whose physical identity was not saved.
+			// Reserve the whole project budget so this unknown resource cannot
+			// enable writes that exceed the project limit.
+			used := s.limits.MaxProjectBytes
+			if used != record.UsedBytes {
+				updated := record
+				updated.UsedBytes = used
+				updated.Snapshot.Cursor++
+				updated.Operation.UpdatedAt = time.Now().UTC()
+				if err := s.store.Save(ctx, record.Scope, updated, record.Snapshot.Generation); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		if record.Snapshot.State == StateInterrupted && record.RootIdentity.Inode == 0 {
 			if _, err := os.Lstat(paths.Root); errors.Is(err, os.ErrNotExist) {
 				continue
@@ -263,6 +283,21 @@ func (s *LifecycleService) recoverInterruptedOperations(ctx context.Context, rec
 			continue
 		}
 		_, statErr := os.Lstat(paths.Root)
+		if record.Snapshot.State == StateCreating && record.RootIdentity == (RootIdentity{}) && statErr == nil {
+			// Allocate creates the root before its device/inode is durably saved.
+			// If the service died in that narrow window, keep the path unknown:
+			// do not adopt or delete it, but persist a queryable fail-closed fact.
+			interrupted := record
+			interrupted.Snapshot.State = StateInterrupted
+			interrupted.Snapshot.Error = unknownCreatingRootIdentityReason
+			interrupted.Snapshot.Cursor++
+			interrupted.Operation.Phase = "blocked"
+			interrupted.Operation.UpdatedAt = time.Now().UTC()
+			if err := s.store.Save(ctx, record.Scope, interrupted, record.Snapshot.Generation); err != nil {
+				return err
+			}
+			continue
+		}
 		if record.Snapshot.State == StateRemoving && errors.Is(statErr, os.ErrNotExist) {
 			// Resolve the session binding before finalizing the removal. If the
 			// binding cannot be read or removed, leave the journal in removing so
@@ -376,6 +411,10 @@ func (s *LifecycleService) create(ctx context.Context, scope Scope, label, reque
 	if s.closed {
 		s.mu.Unlock()
 		return Snapshot{}, ErrClosed
+	}
+	if s.unknownRootIdentity {
+		s.mu.Unlock()
+		return Snapshot{}, ErrQuota
 	}
 	id := requestedID
 	if id == "" {

@@ -19,6 +19,8 @@ import (
 const journalVersion = 1
 const maxJournalBytes = 2 << 20
 
+const unknownCreatingRootIdentityReason = "workspace create was interrupted before root identity was persisted; the unknown root is retained and lifecycle changes are blocked"
+
 // RootIdentity identifies a physical directory, separately from stable project
 // identity. Directory replacement must never let a journal adopt a new root.
 type RootIdentity struct {
@@ -242,7 +244,17 @@ func (s *OwnershipStore) Save(ctx context.Context, scope Scope, record Record, e
 		if err != nil {
 			return err
 		}
-		if _, err := os.Lstat(paths.Root); err == nil {
+		if hasUnknownCreatingRootIdentity(record) {
+			if previous.Snapshot.State != StateCreating && !hasUnknownCreatingRootIdentity(previous) {
+				return ErrOwnership
+			}
+			if record.Operation.Kind != "create" || record.Operation.Phase != "blocked" {
+				return ErrOwnership
+			}
+			if _, err := os.Lstat(paths.Root); err != nil {
+				return err
+			}
+		} else if _, err := os.Lstat(paths.Root); err == nil {
 			return ErrOwnership
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -270,6 +282,9 @@ func validateRecord(record Record) error {
 		return ErrOwnership
 	}
 	if !ValidID(record.Operation.ID) || !ValidID(record.Operation.Kind) || record.Operation.Generation != record.Snapshot.Generation {
+		return ErrOwnership
+	}
+	if record.Snapshot.Error == unknownCreatingRootIdentityReason && !hasUnknownCreatingRootIdentity(record) {
 		return ErrOwnership
 	}
 	if process := record.Operation.Process; process != nil {
@@ -397,12 +412,18 @@ func (s *OwnershipStore) load(id string, verify bool) (Record, error) {
 	if record.Scope.ProjectID != s.layout.ProjectID() || record.Snapshot.ID != id {
 		return Record{}, ErrOwnership
 	}
-	if verify && record.Snapshot.State != StateRemoved {
+	if verify && record.Snapshot.State != StateRemoved && !hasUnknownCreatingRootIdentity(record) {
 		if err := s.verifyRoot(record); err != nil {
 			return Record{}, err
 		}
 	}
 	return record, nil
+}
+
+func hasUnknownCreatingRootIdentity(record Record) bool {
+	return record.Snapshot.Error == unknownCreatingRootIdentityReason &&
+		record.Snapshot.State == StateInterrupted && record.RootIdentity == (RootIdentity{}) &&
+		record.Operation.Kind == "create" && record.Operation.Phase == "blocked" && record.Operation.Process == nil
 }
 
 func validatePrivateFile(info os.FileInfo, path string) error {
