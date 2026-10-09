@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"stable/internal/agent"
 	"stable/internal/candidate"
@@ -16,6 +17,28 @@ import (
 	"stable/internal/sessionlog"
 	"stable/internal/workspace"
 )
+
+const workspaceQueryTimeout = 30 * time.Second
+
+func isWorkspaceQuery(op string) bool {
+	switch op {
+	case "worktree_list", "worktree_get", "worktree_preview":
+		return true
+	// worktree_discard_preview persists a user-bound discard decision and is
+	// therefore a lifecycle mutation rather than a read-only query.
+	default:
+		return false
+	}
+}
+
+func withWorkspaceQuery[T any](ctx context.Context, op string, query func(context.Context) (T, error)) (T, error) {
+	if !isWorkspaceQuery(op) {
+		return query(ctx)
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, workspaceQueryTimeout)
+	defer cancel()
+	return query(queryCtx)
+}
 
 // CanSwitchWorkspace keeps persisted workspace bindings stable while any run
 // from the owning session may still be using its authority. Switching a
@@ -235,6 +258,12 @@ func (s *Service) workspaceScope(ctx context.Context, msg ClientMsg) (string, wo
 }
 
 func (s *Service) handleWorkspaceRequest(ctx context.Context, msg ClientMsg) (ServerMsg, error) {
+	return withWorkspaceQuery(ctx, msg.Op, func(queryCtx context.Context) (ServerMsg, error) {
+		return s.handleWorkspaceRequestWithContext(queryCtx, msg)
+	})
+}
+
+func (s *Service) handleWorkspaceRequestWithContext(ctx context.Context, msg ClientMsg) (ServerMsg, error) {
 	if err := ctx.Err(); err != nil {
 		return ServerMsg{}, err
 	}
