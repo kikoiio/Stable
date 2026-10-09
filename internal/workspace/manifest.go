@@ -393,6 +393,15 @@ func CopySnapshot(ctx context.Context, source, target string, limits Limits) (Ma
 }
 
 func copySnapshot(ctx context.Context, source, target string, limits Limits, allocated func(os.FileInfo) error) (Manifest, error) {
+	return copySnapshotWithSync(ctx, source, target, limits, allocated, nil)
+}
+
+// snapshotDirectorySync is a narrow fault-injection seam for materialization
+// durability tests. The callback receives an already identity-checked open
+// directory; production callers leave it nil and use File.Sync directly.
+type snapshotDirectorySync func(rootPath, relative string, directory *os.File) error
+
+func copySnapshotWithSync(ctx context.Context, source, target string, limits Limits, allocated func(os.FileInfo) error, syncDirectory snapshotDirectorySync) (Manifest, error) {
 	limits = limits.Normalized()
 	source, err := filepath.Abs(source)
 	if err != nil {
@@ -432,6 +441,9 @@ func copySnapshot(ctx context.Context, source, target string, limits Limits, all
 		if err := allocated(targetIdentity); err != nil {
 			return Manifest{}, err
 		}
+	}
+	if err := syncSnapshotDirectory(parent, filepath.Dir(target), parentIdentity); err != nil {
+		return Manifest{}, err
 	}
 	input, sourceIdentity, err := openVerifiedRoot(source)
 	if err != nil {
@@ -479,6 +491,9 @@ func copySnapshot(ctx context.Context, source, target string, limits Limits, all
 		if err := secfile.ChmodRoot(destination, entry.Path, os.FileMode(entry.Mode)); err != nil {
 			return Manifest{}, err
 		}
+		if err := syncSnapshotFile(destination, entry.Path); err != nil {
+			return Manifest{}, err
+		}
 	}
 	if err := revalidateRoot(source, sourceIdentity); err != nil {
 		return Manifest{}, err
@@ -497,5 +512,164 @@ func copySnapshot(ctx context.Context, source, target string, limits Limits, all
 	if after.Digest != manifest.Digest || copied.Digest != manifest.Digest {
 		return Manifest{}, ErrSourceChanged
 	}
+	if err := syncSnapshotDirectoryTree(destination, target, targetIdentity, syncDirectory); err != nil {
+		return Manifest{}, err
+	}
+	if err := syncSnapshotDirectory(parent, filepath.Dir(target), parentIdentity); err != nil {
+		return Manifest{}, err
+	}
 	return copied, nil
+}
+
+func syncSnapshotDirectoryTree(root *os.Root, rootPath string, identity os.FileInfo, syncDirectory snapshotDirectorySync) error {
+	if err := revalidateRoot(rootPath, identity); err != nil {
+		return err
+	}
+	var syncTree func(string, os.FileInfo) error
+	syncTree = func(relative string, expected os.FileInfo) error {
+		directory, err := root.Open(relative)
+		if err != nil {
+			return err
+		}
+		opened, err := directory.Stat()
+		if err != nil || !opened.IsDir() || !os.SameFile(opened, expected) {
+			directory.Close()
+			if err != nil {
+				return err
+			}
+			return ErrSourceChanged
+		}
+		current, err := root.Lstat(relative)
+		if err != nil || !current.IsDir() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, current) {
+			directory.Close()
+			if err != nil {
+				return err
+			}
+			return ErrSourceChanged
+		}
+		entries, err := directory.ReadDir(-1)
+		closeErr := directory.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			child := filepath.Join(relative, entry.Name())
+			childInfo, err := root.Lstat(child)
+			if err != nil {
+				return err
+			}
+			if !childInfo.IsDir() || childInfo.Mode()&os.ModeSymlink != 0 {
+				return ErrSourceChanged
+			}
+			if err := syncTree(child, childInfo); err != nil {
+				return err
+			}
+		}
+		directory, err = root.Open(relative)
+		if err != nil {
+			return err
+		}
+		opened, err = directory.Stat()
+		current, statErr := root.Lstat(relative)
+		if err != nil || statErr != nil || !current.IsDir() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, current) || !os.SameFile(opened, expected) {
+			directory.Close()
+			if err != nil {
+				return err
+			}
+			if statErr != nil {
+				return statErr
+			}
+			return ErrSourceChanged
+		}
+		if syncDirectory == nil {
+			err = directory.Sync()
+		} else {
+			err = syncDirectory(rootPath, relative, directory)
+		}
+		closeErr = directory.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		return nil
+	}
+	if err := syncTree(".", identity); err != nil {
+		return err
+	}
+	return revalidateRoot(rootPath, identity)
+}
+
+func syncSnapshotFile(root *os.Root, relative string) error {
+	expected, err := root.Lstat(relative)
+	if err != nil || !expected.Mode().IsRegular() || expected.Mode()&os.ModeSymlink != 0 {
+		if err != nil {
+			return err
+		}
+		return ErrSourceChanged
+	}
+	file, err := root.Open(relative)
+	if err != nil {
+		return err
+	}
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(opened, expected) {
+		file.Close()
+		if err != nil {
+			return err
+		}
+		return ErrSourceChanged
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	current, err := root.Lstat(relative)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(expected, current) {
+		return ErrSourceChanged
+	}
+	return nil
+}
+
+func syncSnapshotDirectory(root *os.Root, path string, identity os.FileInfo) error {
+	if err := revalidateRoot(path, identity); err != nil {
+		return err
+	}
+	directory, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	opened, err := directory.Stat()
+	current, statErr := root.Lstat(".")
+	if err != nil || statErr != nil || !current.IsDir() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, current) {
+		directory.Close()
+		if err != nil {
+			return err
+		}
+		if statErr != nil {
+			return statErr
+		}
+		return ErrSourceChanged
+	}
+	if err := directory.Sync(); err != nil {
+		directory.Close()
+		return err
+	}
+	if err := directory.Close(); err != nil {
+		return err
+	}
+	return revalidateRoot(path, identity)
 }

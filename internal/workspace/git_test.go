@@ -398,6 +398,38 @@ func TestPrivateGitSourceChangeAndPartialRollback(t *testing.T) {
 	}
 }
 
+func TestPrivateGitMaterializeDirectorySyncFailureRollsBackWithoutReceipt(t *testing.T) {
+	g, layout, store, scope, id := privateGitFixture(t)
+	fixtureFile(t, layout.FormalRoot(), "nested/data", "durable bytes\n", 0600)
+	paths, err := layout.Paths(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected snapshot directory sync failure")
+	g.syncSnapshotDir = func(rootPath, relative string, directory *os.File) error {
+		if filepath.Clean(rootPath) == filepath.Clean(paths.Checkout) && relative == "." {
+			return injected
+		}
+		return directory.Sync()
+	}
+	_, err = g.Materialize(context.Background(), scope, id)
+	if !errors.Is(err, injected) {
+		t.Fatalf("directory sync failure not propagated: %v", err)
+	}
+	for _, name := range []string{"baseline", "repo.git", "checkout", "run", gitStateName} {
+		if _, statErr := os.Lstat(filepath.Join(paths.Root, name)); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("failed materialization left owned resource %q: %v", name, statErr)
+		}
+	}
+	record, err := store.Load(context.Background(), scope, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Snapshot.State != StateCreating {
+		t.Fatalf("failed materialization published ready state: %+v", record.Snapshot)
+	}
+}
+
 func TestPrivateGitRollbackPreservesUnknownReplacement(t *testing.T) {
 	g, layout, _, scope, id := privateGitFixture(t)
 	fixtureFile(t, layout.FormalRoot(), "data", "initial", 0600)

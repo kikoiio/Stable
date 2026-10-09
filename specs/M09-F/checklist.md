@@ -21,6 +21,8 @@
 - [ ] 私有bare/commonDir在本项service-owned目录；无remotes/alternates/replace/external hooks、objects hardlinks、共享兄弟refs，Git净化env/config与属性攻击fixture通过。
 - [ ] 根metadata不复制，嵌套Git/submodule/symlink/hardlink/specialfile拒绝，未执行source settings/.worktreeinclude/hooks或自动依赖安装。
 
+增量证据：`copySnapshot` 在完成文件权限后重新同步文件数据，按目录自底向上同步 checkout/baseline 目录项，并同步目标父目录；所有打开的目录均用 root-scoped handle 与捕获的 inode 身份复核。`TestPrivateGitMaterializeDirectorySyncFailureRollsBackWithoutReceipt` 注入 checkout 根目录 fsync 失败，验证错误返回、仅回滚本次身份匹配的 baseline/repository/checkout、无 `git-state.json` receipt 且 workspace 仍为 Creating；定向测试本地通过（2026-10-10）。本项完整 dirty snapshot、Git隔离和其它故障边界仍开放。
+
 ## AC3 受控 child 写与 command
 
 - [ ] `run_agent`同步、后台、definition isolation三入口分别验证真实workspace/lease；缺省D、explore/plan和A/B/C仍只读，角色工具规则与父权限交集生效。
@@ -28,6 +30,8 @@
 - [ ] command的真实Linux隔离覆盖子进程、根替换/软链接/硬链接/`.git/.stable`mask攻击，无formal/state/bare挂载，无凭据/网络/递归分派。增量证据：`TestWorkspaceWriterCommandUsesBoundedLeaseProfile` 验证 executeCommand 生成 profile 时 root 绑定 lease 的 baseline/checkout/run/workspace volume、启用 isolation、禁用 network grants，并提供进程身份字段及 durable callbacks；fixture 不满足真实受限volume前提。SHA `1ca0506b07d817dcf620883629b11dda485cd1a1` 的 [M09 Workspace Linux run 37978878762](https://github.com/kikoiio/Stable/actions/runs/37978878762) `writer-sandbox-volume` job 通过，执行真实 writer isolation、磁盘耗尽及 bounded-contract/stop-settlement 检查；command完整攻击矩阵与AC3其余入口仍未整体验收。
 - [ ] 无sandbox失败关闭；hard磁盘quota无能力时command unavailable而不是裸执行/仅监控假上限；未擅改本机quota/mount/tmpfs。
 - [ ] plan模式和权限deny仍先于写执行；definition permissionMode/remote/工具参数扩权拒绝。
+
+增量证据：`TestNamedRunAgentWriterFactoryEnforcesPermissionRoleAndLease` 新增父 `run_agent` 权限拒绝且无副作用、授权后真实 named child role schema/lease 约束、角色禁止的 `command` 不执行以及获准 `write_file` 只写入 checkout 的组合用例。本机因缺少 bwrap helper 与 disposable bounded volume 而跳过运行体；已加入 M09 Workspace Linux workflow 的真实 writer 测试列表，云端验证待当前提交 SHA 执行。AC3 其余真实 sandbox 攻击矩阵仍开放。
 
 ## AC4 三方导出、冲突与用户接收
 

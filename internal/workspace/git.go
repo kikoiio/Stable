@@ -62,12 +62,13 @@ type gitInvocation struct {
 // private repository. It cannot fetch, open the formal repository, or execute
 // project commands, hooks, attributes, credential helpers or model argv.
 type PrivateGit struct {
-	layout *Layout
-	store  *OwnershipStore
-	limits Limits
-	binary string
-	runGit func(context.Context, gitInvocation) ([]byte, error)
-	mu     sync.Mutex
+	layout          *Layout
+	store           *OwnershipStore
+	limits          Limits
+	binary          string
+	runGit          func(context.Context, gitInvocation) ([]byte, error)
+	syncSnapshotDir snapshotDirectorySync
+	mu              sync.Mutex
 }
 
 func NewPrivateGit(layout *Layout, store *OwnershipStore, limits Limits) (*PrivateGit, error) {
@@ -175,10 +176,10 @@ func (g *PrivateGit) Materialize(ctx context.Context, scope Scope, id string) (r
 	if err := g.checkEstimatedUsage(root, expected); err != nil {
 		return GitState{}, err
 	}
-	baseline, err := copySnapshot(ctx, g.layout.FormalRoot(), paths.Baseline, g.limits, func(info os.FileInfo) error {
+	baseline, err := copySnapshotWithSync(ctx, g.layout.FormalRoot(), paths.Baseline, g.limits, func(info os.FileInfo) error {
 		created["baseline"] = info
 		return nil
-	})
+	}, g.syncSnapshotDir)
 	if err != nil {
 		return GitState{}, err
 	}
@@ -219,10 +220,10 @@ func (g *PrivateGit) Materialize(ctx context.Context, scope Scope, id string) (r
 	if _, err := DiskUsage(ctx, paths.Root, g.limits); err != nil {
 		return GitState{}, err
 	}
-	checkout, err := copySnapshot(ctx, paths.Baseline, paths.Checkout, g.limits, func(info os.FileInfo) error {
+	checkout, err := copySnapshotWithSync(ctx, paths.Baseline, paths.Checkout, g.limits, func(info os.FileInfo) error {
 		created["checkout"] = info
 		return nil
-	})
+	}, g.syncSnapshotDir)
 	if err != nil {
 		return GitState{}, err
 	}

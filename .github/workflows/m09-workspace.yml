@@ -53,6 +53,6 @@ jobs:
           sudo env STABLE_M09_VOLUME="$fixture_dir/mount" \
             STABLE_M09_WRITER_HELPER="$RUNNER_TEMP/m09-binaries/agentworker" \
             "$RUNNER_TEMP/m09-binaries/conversation.test" \
-            -test.run '^(TestWorkspaceWriterRealSyncBackgroundDefinitionAndDirect|TestParallelWorkspaceWriterAgentsUseIndependentLeases|TestWorkspaceWriterAbruptBwrapDeathRecoversJournalIdempotently)$' -test.v -test.timeout 6m
+            -test.run '^(TestWorkspaceWriterRealSyncBackgroundDefinitionAndDirect|TestParallelWorkspaceWriterAgentsUseIndependentLeases|TestWorkspaceWriterAbruptBwrapDeathRecoversJournalIdempotently|TestNamedRunAgentWriterFactoryEnforcesPermissionRoleAndLease)$' -test.v -test.timeout 6m
       - name: Verify bounded contracts, stop settlement and compatibility
         run: go test ./internal/execution ./internal/agent ./internal/agentcatalog ./internal/workspace ./internal/sessionlog ./internal/teams
