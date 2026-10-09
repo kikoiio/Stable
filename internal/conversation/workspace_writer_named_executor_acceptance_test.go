@@ -137,9 +137,15 @@ func TestNamedRunAgentWriterFactoryEnforcesPermissionRoleAndLease(t *testing.T) 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	authorizedCall := llm.ToolUse{ID: "allowed-parent-dispatch", Name: "run_agent", Arguments: json.RawMessage(`{"agent_name":"builder","instruction":"write the assigned file","isolation":"worktree"}`)}
+	if _, err := sessionlog.Append(svc.deps.ProjectRoot, session, sessionlog.EventToolCall, sessionlog.ToolCall{RunID: parent.RunID, CallID: authorizedCall.ID, Name: authorizedCall.Name, Input: map[string]any{"agent_name": "builder", "instruction": "write the assigned file", "isolation": "worktree"}}); err != nil {
+		t.Fatal(err)
+	}
 	dispatched, err := parentExecutor.Execute(ctx, authorizedCall)
 	if err != nil || dispatched.Status != agent.ToolSucceeded || dispatched.IsError {
 		t.Fatalf("authorized parent dispatch outcome=%+v err=%v", dispatched, err)
+	}
+	if _, err := sessionlog.Append(svc.deps.ProjectRoot, session, sessionlog.EventToolResult, sessionlog.ToolResult{CallID: authorizedCall.ID, Result: dispatched.Content}); err != nil {
+		t.Fatal(err)
 	}
 	var task agent.AgentTaskSnapshot
 	if err := json.Unmarshal([]byte(dispatched.Content), &task); err != nil {
