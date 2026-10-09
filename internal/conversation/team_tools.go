@@ -36,6 +36,7 @@ func (s *Service) ExecuteTeamTool(ctx context.Context, request agent.ExecutionRe
 		Body             string    `json:"body"`
 		Broadcast        bool      `json:"broadcast"`
 		AfterSeq         uint64    `json:"after_seq"`
+		AfterTaskID      string    `json:"after_task_id"`
 		Limit            int       `json:"limit"`
 		RequestID        string    `json:"request_id"`
 		Decision         string    `json:"decision"`
@@ -144,7 +145,7 @@ func (s *Service) ExecuteTeamTool(ctx context.Context, request agent.ExecutionRe
 	case "team_task_get":
 		result, err = s.GetTeamTask(ctx, request, args.TeamID, args.TaskID)
 	case "team_task_list":
-		result, err = s.ListTeamTasks(ctx, request, args.TeamID, args.Limit)
+		result, err = s.ListTeamTasksPage(ctx, request, args.TeamID, args.AfterTaskID, args.Limit)
 	case "team_task_update":
 		if args.Status != nil {
 			status := teams.TaskStatus(*args.Status)

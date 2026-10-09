@@ -237,6 +237,7 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 	cases := []struct {
 		line, op, teamID, runID, text, recipient, decision string
 		memberID, memberName, agentName                    string
+		afterTaskID                                        string
 		after, limit                                       uint64
 		broadcast                                          bool
 		planRequired                                       bool
@@ -251,6 +252,7 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 		{line: "/team team-1 get", op: "team_get", teamID: "team-1"},
 		{line: "/team team-1 tasks", op: "team_task_list", teamID: "team-1"},
 		{line: "/team team-1 tasks list 100", op: "team_task_list", teamID: "team-1", limit: 100},
+		{line: "/team team-1 tasks list 100 task-9", op: "team_task_list", teamID: "team-1", limit: 100, afterTaskID: "task-9"},
 		{line: "/team team-1 tasks create write docs", op: "team_task_create", teamID: "team-1", text: "write docs"},
 		{line: "/team team-1 messages after 12 7", op: "team_messages", teamID: "team-1", after: 12, limit: 7},
 		{line: "/team team-1 requests", op: "team_request_list", teamID: "team-1"},
@@ -315,6 +317,9 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 			if tc.op == "team_task_list" && request.Limit != int(tc.limit) {
 				t.Fatalf("task page limit=%d, want %d", request.Limit, tc.limit)
 			}
+			if tc.op == "team_task_list" && request.AfterTaskID != tc.afterTaskID {
+				t.Fatalf("task page cursor=%q, want %q", request.AfterTaskID, tc.afterTaskID)
+			}
 			if tc.op == "team_list" && request.Limit != int(tc.limit) {
 				t.Fatalf("team page limit=%d, want %d", request.Limit, tc.limit)
 			}
@@ -337,7 +342,7 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 }
 
 func TestTeamCommandsRejectInvalidUsageAndRequireRunForCreate(t *testing.T) {
-	for _, line := range []string{"/teams", "/teams list 0", "/teams list 101", "/teams create", "/teams close", "/teams coordinator", "/teams coordinator yes", "/team", "/team team-1 requests list 0", "/team team-1 requests list 101", "/team team-1 tasks update task-1 0 status completed", "/team team-1 tasks list 101", "/team team-1 messages 0 999", "/team team-1 send all", "/team team-1 respond req-1 0 approve", "/team team-1 shutdown", "/team team-1 spawn reader explore inspect", "/team team-1 resume member-1"} {
+	for _, line := range []string{"/teams", "/teams list 0", "/teams list 101", "/teams create", "/teams close", "/teams coordinator", "/teams coordinator yes", "/team", "/team team-1 requests list 0", "/team team-1 requests list 101", "/team team-1 tasks update task-1 0 status completed", "/team team-1 tasks list 101", "/team team-1 tasks list 10 bad/cursor", "/team team-1 messages 0 999", "/team team-1 send all", "/team team-1 respond req-1 0 approve", "/team team-1 shutdown", "/team team-1 spawn reader explore inspect", "/team team-1 resume member-1"} {
 		m := New("", t.TempDir())
 		m.ActiveSession = "session"
 		m.Composer.SetValue(line)

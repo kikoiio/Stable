@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"errors"
+	"sort"
 
 	"stable/internal/agent"
 	"stable/internal/sessionlog"
@@ -96,6 +97,14 @@ func (s *Service) ListTeamTasks(ctx context.Context, request agent.ExecutionRequ
 	if len(requestedLimit) == 1 {
 		limit = requestedLimit[0]
 	}
+	return s.ListTeamTasksPage(ctx, request, teamID, "", limit)
+}
+
+// ListTeamTasksPage returns a bounded task-ID-ordered page after afterTaskID.
+func (s *Service) ListTeamTasksPage(ctx context.Context, request agent.ExecutionRequest, teamID, afterTaskID string, limit int) ([]teams.Task, error) {
+	if afterTaskID != "" && teams.ValidateID(afterTaskID) != nil {
+		return nil, errors.New("team task cursor is invalid")
+	}
 	root, scope, actor, err := s.teamOperationScope(ctx, request)
 	if err != nil {
 		return nil, err
@@ -109,6 +118,10 @@ func (s *Service) ListTeamTasks(ctx context.Context, request agent.ExecutionRequ
 		return nil, err
 	}
 	tasks := graph.List()
+	if afterTaskID != "" {
+		start := sort.Search(len(tasks), func(i int) bool { return tasks[i].ID > afterTaskID })
+		tasks = tasks[start:]
+	}
 	pageSize := teams.PageSize(limit)
 	if len(tasks) > pageSize {
 		tasks = tasks[:pageSize]

@@ -67,7 +67,7 @@ func registerTeamCommands(host *commandHost, registry *commands.Registry) {
 		sendTeamRequest(host, req, "正在读取团队…")
 	}})
 
-	registry.Register(&commands.Command{Name: "team", Description: "查看团队、任务、消息和请求", ArgPrompt: "ID get|members [limit]|tasks list [limit]|messages|requests [list [limit]]|send|respond|shutdown", Kind: commands.KindLocal, Local: func(args string) {
+	registry.Register(&commands.Command{Name: "team", Description: "查看团队、任务、消息和请求", ArgPrompt: "ID get|members [limit]|tasks list [limit [after-task-id]]|messages|requests [list [limit]]|send|respond|shutdown", Kind: commands.KindLocal, Local: func(args string) {
 		m := host.model
 		fields := strings.Fields(args)
 		if m.ActiveSession == "" {
@@ -229,14 +229,20 @@ func teamTaskRequest(base conversation.ClientMsg, args string) (conversation.Cli
 		if len(fields) == 1 {
 			return base, "正在读取团队任务…"
 		}
-		if len(fields) == 2 {
+		if len(fields) == 2 || len(fields) == 3 {
 			limit, err := strconv.Atoi(fields[1])
 			if err == nil && limit >= 1 && limit <= teams.MaxPageSize {
 				base.Limit = limit
+				if len(fields) == 3 {
+					if teams.ValidateID(fields[2]) != nil {
+						return conversation.ClientMsg{}, "用法：/team <ID> tasks list [条数，1-100 [上一页末尾任务ID]]"
+					}
+					base.AfterTaskID = fields[2]
+				}
 				return base, "正在读取团队任务…"
 			}
 		}
-		return conversation.ClientMsg{}, "用法：/team <ID> tasks list [条数，1-100]"
+		return conversation.ClientMsg{}, "用法：/team <ID> tasks list [条数，1-100 [上一页末尾任务ID]]"
 	}
 	switch {
 	case len(fields) == 2 && fields[0] == "get" && teams.ValidateID(fields[1]) == nil:
@@ -255,7 +261,7 @@ func teamTaskRequest(base conversation.ClientMsg, args string) (conversation.Cli
 		status := fields[4]
 		base.Op, base.TaskID, base.ExpectedRevision, base.TaskStatus = "team_task_update", fields[1], revision, &status
 	default:
-		return conversation.ClientMsg{}, "用法：/team <ID> tasks [list | get <任务ID> | create <标题> | update <任务ID> <revision> status <状态>]"
+		return conversation.ClientMsg{}, "用法：/team <ID> tasks [list [条数，1-100 [上一页末尾任务ID]] | get <任务ID> | create <标题> | update <任务ID> <revision> status <状态>]"
 	}
 	return base, "正在读取团队任务…"
 }

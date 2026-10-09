@@ -171,7 +171,7 @@ func TestTeamRoleInstructionStaysPrivateAcrossReplayAndTUI(t *testing.T) {
 		t.Fatal("members listing should be rendered locally from the loaded replay")
 	}
 	model, ok := updated.(Model)
-	if !ok || model.Status != "团队成员：1" || len(model.TeamMembers) != 1 || model.TeamMembers[0].ID != member.ID {
+	if !ok || model.Status != "团队成员：1/1" || len(model.TeamMembers) != 1 || model.TeamMembers[0].ID != member.ID {
 		t.Fatalf("TUI members listing=%T status=%q members=%+v", updated, model.Status, model.TeamMembers)
 	}
 	uiEvents, err := json.Marshal(model.Events)

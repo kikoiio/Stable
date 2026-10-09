@@ -49,6 +49,7 @@ type ClientMsg struct {
 	TaskStatus           *string                 `json:"task_status,omitempty"`
 	TaskAssignee         *string                 `json:"task_assignee,omitempty"`
 	TaskBlockedBy        *[]string               `json:"task_blocked_by,omitempty"`
+	AfterTaskID          string                  `json:"after_task_id,omitempty"`
 	ExpectedRevision     uint64                  `json:"expected_revision,omitempty"`
 	TeamID               string                  `json:"team_id,omitempty"`
 	TeamName             string                  `json:"team_name,omitempty"`
@@ -394,7 +395,7 @@ func validateClient(m ClientMsg) error {
 		}
 		switch m.Op {
 		case "team_task_create":
-			if m.TaskTitle == nil || teams.ValidateText(*m.TaskTitle, teams.MaxTaskTitleBytes, true) != nil || (m.TaskDescription != nil && teams.ValidateText(*m.TaskDescription, teams.MaxTaskDescriptionBytes, false) != nil) || m.TaskStatus != nil || m.TaskID != "" || m.ExpectedRevision != 0 || m.Limit != 0 {
+			if m.TaskTitle == nil || teams.ValidateText(*m.TaskTitle, teams.MaxTaskTitleBytes, true) != nil || (m.TaskDescription != nil && teams.ValidateText(*m.TaskDescription, teams.MaxTaskDescriptionBytes, false) != nil) || m.TaskStatus != nil || m.TaskID != "" || m.ExpectedRevision != 0 || m.Limit != 0 || m.AfterTaskID != "" {
 				return fmt.Errorf("team_task_create requires a bounded title and valid task data")
 			}
 			if m.TaskAssignee != nil && *m.TaskAssignee != "" && teams.ValidateID(*m.TaskAssignee) != nil {
@@ -411,15 +412,15 @@ func validateClient(m ClientMsg) error {
 				}
 			}
 		case "team_task_get":
-			if teams.ValidateID(m.TaskID) != nil || m.TaskTitle != nil || m.TaskDescription != nil || m.TaskStatus != nil || m.TaskAssignee != nil || m.TaskBlockedBy != nil || m.ExpectedRevision != 0 || m.Limit != 0 {
+			if teams.ValidateID(m.TaskID) != nil || m.TaskTitle != nil || m.TaskDescription != nil || m.TaskStatus != nil || m.TaskAssignee != nil || m.TaskBlockedBy != nil || m.AfterTaskID != "" || m.ExpectedRevision != 0 || m.Limit != 0 {
 				return fmt.Errorf("team_task_get requires only task_id")
 			}
 		case "team_task_list":
-			if m.TaskID != "" || m.TaskTitle != nil || m.TaskDescription != nil || m.TaskStatus != nil || m.TaskAssignee != nil || m.TaskBlockedBy != nil || m.ExpectedRevision != 0 || m.Limit < 0 || m.Limit > teams.MaxPageSize {
-				return fmt.Errorf("team_task_list accepts no task fields")
+			if m.TaskID != "" || m.TaskTitle != nil || m.TaskDescription != nil || m.TaskStatus != nil || m.TaskAssignee != nil || m.TaskBlockedBy != nil || m.ExpectedRevision != 0 || m.Limit < 0 || m.Limit > teams.MaxPageSize || m.AfterTaskID != "" && teams.ValidateID(m.AfterTaskID) != nil {
+				return fmt.Errorf("team_task_list requires a bounded page and valid cursor")
 			}
 		case "team_task_update":
-			if teams.ValidateID(m.TaskID) != nil || m.ExpectedRevision == 0 || (m.TaskTitle == nil && m.TaskDescription == nil && m.TaskStatus == nil && m.TaskAssignee == nil && m.TaskBlockedBy == nil) || m.Limit != 0 {
+			if teams.ValidateID(m.TaskID) != nil || m.ExpectedRevision == 0 || (m.TaskTitle == nil && m.TaskDescription == nil && m.TaskStatus == nil && m.TaskAssignee == nil && m.TaskBlockedBy == nil) || m.Limit != 0 || m.AfterTaskID != "" {
 				return fmt.Errorf("team_task_update requires task_id, expected_revision and a patch")
 			}
 			if (m.TaskTitle != nil && teams.ValidateText(*m.TaskTitle, teams.MaxTaskTitleBytes, true) != nil) || (m.TaskDescription != nil && teams.ValidateText(*m.TaskDescription, teams.MaxTaskDescriptionBytes, false) != nil) {
