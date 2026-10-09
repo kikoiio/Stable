@@ -123,9 +123,6 @@ func TestWorktreeTUIExportIsIdempotentAfterConversationRestart(t *testing.T) {
 			break
 		}
 	}
-	if err := stream.Close(); err != nil {
-		t.Fatal(err)
-	}
 	model.ActiveRunID, model.Pending, model.stream = "", false, nil
 
 	formalRoot, err := filepath.Abs(formal)

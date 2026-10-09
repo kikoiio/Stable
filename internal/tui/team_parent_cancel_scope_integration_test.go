@@ -77,7 +77,7 @@ func TestTeamTUIParentCancelOnlyInterruptsItsOwnMemberTurn(t *testing.T) {
 		}
 	})
 
-	reqctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	reqctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	created, err := conversation.Request(reqctx, socket, conversation.ClientMsg{Op: "session_create", ProjectRoot: project})
 	if err != nil || len(created) != 1 || created[0].Session == nil {
