@@ -14,7 +14,6 @@ import (
 	"stable/internal/agent"
 	"stable/internal/candidate"
 	"stable/internal/conversation"
-	"stable/internal/permission"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
 	"stable/internal/workspace"
@@ -256,18 +255,25 @@ func TestWorktreeTUIResolutionExportAndAcceptanceUsesConversationService(t *test
 		}
 	})
 	socket := filepath.Join(socketDir, "c.sock")
-	svc, err := conversation.Serve(ctx, conversation.Deps{
+	runner := &tuiHoldingRunner{}
+	serviceCtx, stopService := context.WithCancel(ctx)
+	service, err := conversation.Serve(serviceCtx, conversation.Deps{
 		Store: db, ProjectRoot: formal, WorkspaceStateRoot: filepath.Join(root, "workspace-state"),
 		SocketPath: socket, PollEvery: time.Hour,
+		Runner:            runner,
 		CandidateCheckers: []candidate.Checker{tuiWorkspacePassingChecker{}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	serviceClosed := false
 	t.Cleanup(func() {
-		if err := svc.Close(); err != nil {
-			t.Errorf("close conversation service: %v", err)
+		if !serviceClosed {
+			if err := service.Close(); err != nil {
+				t.Errorf("close conversation service: %v", err)
+			}
 		}
+		stopService()
 	})
 
 	sessions, err := conversation.Request(ctx, socket, conversation.ClientMsg{Op: "session_create", ProjectRoot: formal})
@@ -275,49 +281,79 @@ func TestWorktreeTUIResolutionExportAndAcceptanceUsesConversationService(t *test
 		t.Fatalf("create session: messages=%+v err=%v", sessions, err)
 	}
 	sessionID := sessions[0].Session.ID
+	runID, err := sessionlog.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := conversation.OpenRun(ctx, socket, agent.ExecutionRequest{
+		RunID: runID, Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: sessionID},
+		Intent: "create a workspace for TUI acceptance", Model: "fixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := stream.Receive()
+	if err != nil || started.Type != "run_started" || started.RunID != runID {
+		t.Fatalf("start lead run: message=%+v err=%v", started, err)
+	}
+	m := New(socket, formal)
+	m.ActiveSession, m.ActiveRunID, m.Pending = sessionID, runID, true
+	m.Composer.SetValue("/worktrees create TUI-acceptance")
+	updated, cmd := m.submitComposer()
+	m = updated.(Model)
+	if cmd == nil || m.ActiveRunID != runID || !m.Pending {
+		t.Fatalf("TUI create did not preserve active lead run: run=%q pending=%v", m.ActiveRunID, m.Pending)
+	}
+	updated, _ = m.handleResult(cmd().(resultMsg))
+	m = updated.(Model)
+	if len(m.Worktrees) != 1 || m.Worktrees[0].Label != "TUI-acceptance" {
+		t.Fatalf("TUI did not create workspace through the conversation service: %+v", m.Worktrees)
+	}
+	createdID := m.Worktrees[0].ID
+	if err := stream.Cancel(sessionID, runID); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		message, receiveErr := stream.Receive()
+		if receiveErr != nil {
+			t.Fatalf("receive lead run cancellation: %v", receiveErr)
+		}
+		if message.Type == "run_outcome" {
+			if message.Outcome == nil || message.Outcome.Status != agent.RunCancelled {
+				t.Fatalf("lead run outcome=%+v, want cancelled", message.Outcome)
+			}
+			break
+		}
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatal(err)
+	}
+	serviceClosed = true
+	stopService()
+	serviceCtx, stopService = context.WithCancel(ctx)
+	service, err = conversation.Serve(serviceCtx, conversation.Deps{
+		Store: db, ProjectRoot: formal, WorkspaceStateRoot: filepath.Join(root, "workspace-state"),
+		SocketPath: socket, PollEvery: time.Hour,
+		CandidateCheckers: []candidate.Checker{tuiWorkspacePassingChecker{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceClosed = false
 	formalRoot, err := filepath.Abs(formal)
 	if err != nil {
 		t.Fatal(err)
 	}
 	projectHash := sha256.Sum256([]byte(filepath.Clean(formalRoot)))
-	runID, err := sessionlog.NewID()
+	projectID := "p" + hex.EncodeToString(projectHash[:16])
+	layout, err := workspace.NewLayout(filepath.Join(root, "workspace-state"), formalRoot, projectID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	scope := workspace.Scope{
-		ProjectID: "p" + hex.EncodeToString(projectHash[:16]), SessionID: sessionID,
-		Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: sessionID},
-		Authority: permission.Authority{
-			RunID: runID, SessionID: sessionID, AllowedRoot: formalRoot,
-			FormalRoot: formalRoot, CandidateRoot: filepath.Join(root, "candidate"),
-		},
-	}
-	layout, err := workspace.NewLayout(filepath.Join(root, "workspace-state"), formalRoot, scope.ProjectID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager, err := workspace.NewService(layout, workspace.DefaultLimits(), workspace.ServiceDependencies{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	managerClosed := false
-	t.Cleanup(func() {
-		if !managerClosed {
-			if err := manager.Close(ctx); err != nil {
-				t.Errorf("close workspace fixture: %v", err)
-			}
-		}
-	})
-	created, err := manager.Create(ctx, scope, "TUI acceptance")
-	if err != nil {
-		t.Fatal(err)
-	}
-	paths, err := layout.Paths(created.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = manager.Close(ctx)
-	managerClosed = true
+	paths, err := layout.Paths(createdID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,10 +364,10 @@ func TestWorktreeTUIResolutionExportAndAcceptanceUsesConversationService(t *test
 		t.Fatal(err)
 	}
 
-	m := New(socket, formal)
+	m = New(socket, formal)
 	m.ActiveSession = sessionID
-	m.Composer.SetValue("/worktrees resolve " + created.ID)
-	updated, cmd := m.submitComposer()
+	m.Composer.SetValue("/worktrees resolve " + createdID)
+	updated, cmd = m.submitComposer()
 	m = updated.(Model)
 	if cmd == nil {
 		t.Fatal("TUI did not request a worktree conflict preview")
@@ -351,7 +387,7 @@ func TestWorktreeTUIResolutionExportAndAcceptanceUsesConversationService(t *test
 	updated, _ = m.handleResult(cmd().(resultMsg))
 	m = updated.(Model)
 
-	m.Composer.SetValue("/worktrees export " + created.ID)
+	m.Composer.SetValue("/worktrees export " + createdID)
 	updated, cmd = m.submitComposer()
 	m = updated.(Model)
 	if cmd == nil {
