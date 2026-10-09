@@ -156,6 +156,136 @@ func TestTeamPlanRequestTUIResponsePersistsLeadApproval(t *testing.T) {
 	}
 }
 
+func TestTeamPlanRequestTUIRejectsUnknownIDWithoutMutation(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	project := filepath.Join(root, "p")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	childRunner := &planSubmittingChildRunner{started: make(chan struct{}, 1)}
+	pool, err := agent.NewPoolDelegator(agent.DefaultDelegationLimits(), childRunner, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	parentRunner := &acceptanceTeamParentRunner{started: make(chan *acceptanceTeamParentRun, 1)}
+	socket := filepath.Join(root, "s")
+	svc, err := conversation.Serve(ctx, conversation.Deps{
+		Store: db, ProjectRoot: project, SocketPath: socket, PollEvery: time.Hour,
+		Runner: parentRunner, Delegator: pool, Agents: agentcatalog.New("", ""),
+		ForkProvider: acceptanceTeamProvider{}, ProviderName: "fixture", Model: "fixture-model",
+		ForkExecutorFactory: agent.FakeExecutorFactory{Executor: &agent.FakeExecutor{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childRunner.service = svc
+	t.Cleanup(func() {
+		if err := svc.Close(); err != nil {
+			t.Errorf("close conversation service: %v", err)
+		}
+	})
+
+	reqctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	created, err := conversation.Request(reqctx, socket, conversation.ClientMsg{Op: "session_create", ProjectRoot: project})
+	if err != nil || len(created) != 1 || created[0].Session == nil {
+		t.Fatalf("create session: messages=%+v err=%v", created, err)
+	}
+	sessionID := created[0].Session.ID
+	parentRunID, err := sessionlog.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentStream, err := conversation.OpenRun(reqctx, socket, agent.ExecutionRequest{
+		RunID: parentRunID, Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: sessionID}, Intent: "unknown plan request fixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = parentStream.Close() })
+	parentRun := receiveAcceptanceParentRun(t, parentRunner.started)
+	t.Cleanup(func() { parentRun.finish(agent.RunCompleted) })
+	if started, err := parentStream.Receive(); err != nil || started.Type != "run_started" {
+		t.Fatalf("start lead run: message=%+v err=%v", started, err)
+	}
+	model := New(socket, project)
+	model.ActiveSession, model.ActiveRunID = sessionID, parentRunID
+	model, teamResult := submitAcceptanceTeamCommand(t, model, "/teams create unknown-request")
+	team := acceptanceTeamResponse(t, teamResult, "team_create").Team
+	if team == nil {
+		t.Fatal("team create response omitted team")
+	}
+	_, spawnResult := submitAcceptanceTeamCommand(t, model, "/team "+team.ID+" spawn reader explore inspect parser --plan")
+	spawned := acceptanceTeamResponse(t, spawnResult, "team_member_spawn").TeamMember
+	if spawned == nil || !spawned.PlanRequired {
+		t.Fatalf("spawn response=%+v, want plan-required member", spawned)
+	}
+	select {
+	case <-childRunner.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child did not submit plan request")
+	}
+	model.ActiveRunID = ""
+	_, listResult := submitAcceptanceTeamCommand(t, model, "/team "+team.ID+" requests")
+	listed := acceptanceTeamResponse(t, listResult, "team_request_list").TeamRequests
+	var pending teams.Request
+	for _, request := range listed {
+		if request.Type == teams.RequestPlan && request.MemberID == spawned.ID && request.Status == teams.RequestPending {
+			pending = request
+		}
+	}
+	if pending.ID == "" || pending.Revision != 1 || pending.ResponderID != teams.Lead {
+		t.Fatalf("pending plan request=%+v, want revision-1 request awaiting lead", pending)
+	}
+
+	model.Composer.SetValue("/team " + team.ID + " respond missing-request-id 1 approve ignored")
+	_, cmd := model.submitComposer()
+	if cmd == nil {
+		t.Fatal("unknown request response produced no command")
+	}
+	result, ok := cmd().(resultMsg)
+	if !ok || result.err == nil {
+		t.Fatalf("unknown request response result=%T %+v, want a reported error", result, result)
+	}
+
+	projection, err := sessionlog.ReplayTeams(project, sessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed := projection.Requests[pending.ID]
+	if replayed.Status != teams.RequestPending || replayed.Revision != 1 || replayed.ResponderID != teams.Lead {
+		t.Fatalf("unknown request ID changed pending request: %+v", replayed)
+	}
+	transcript, err := sessionlog.Replay(project, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range transcript.Events {
+		if event.Type != sessionlog.EventTeam {
+			continue
+		}
+		data, err := json.Marshal(event.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fact sessionlog.TeamEvent
+		if err := json.Unmarshal(data, &fact); err != nil {
+			t.Fatal(err)
+		}
+		if fact.Kind == sessionlog.TeamRequestResponded {
+			t.Fatalf("unknown request ID appended response fact: %+v", fact)
+		}
+	}
+}
+
 type planSubmittingChildRunner struct {
 	service *conversation.Service
 	started chan struct{}
