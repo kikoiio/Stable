@@ -309,6 +309,16 @@ func validateClient(m ClientMsg) error {
 		if m.SessionID == "" || m.Run == nil || m.Run.Work.SessionID != m.SessionID || m.Run.Intent == "" {
 			return fmt.Errorf("op run_start requires matching session_id and run request")
 		}
+		if m.CoordinatorOn {
+			return fmt.Errorf("coordinator_on is only supported by team coordinator settings")
+		}
+		if m.Run.Work.Kind == agent.WorkGoal {
+			if m.CoordinatorTeamID != "" && sessionlog.ValidateID(m.CoordinatorTeamID) != nil {
+				return fmt.Errorf("goal coordinator requires a valid team ID")
+			}
+		} else if m.CoordinatorTeamID != "" {
+			return fmt.Errorf("per-run coordinator selection is only supported for Goal runs")
+		}
 	case "run_subscribe":
 		if m.SessionID == "" {
 			return fmt.Errorf("op run_subscribe requires session_id")

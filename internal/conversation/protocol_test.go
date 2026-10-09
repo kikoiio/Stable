@@ -3,6 +3,8 @@ package conversation
 import (
 	"strings"
 	"testing"
+
+	"stable/internal/agent"
 )
 
 func TestSessionProtocolRequiresProjectAndSessionIdentity(t *testing.T) {
@@ -32,6 +34,36 @@ func TestCoordinatorModeProtocolIsSessionScopedAndOneShot(t *testing.T) {
 		if err := validateClient(invalid); err == nil {
 			t.Fatalf("invalid coordinator mode request accepted: %+v", invalid)
 		}
+	}
+}
+
+func TestRunStartCoordinatorParameterIsGoalOnly(t *testing.T) {
+	validGoal := ClientMsg{
+		Op: "run_start", SessionID: "0123456789abcdef0123456789abcdef",
+		CoordinatorTeamID: "1123456789abcdef0123456789abcdef",
+		Run: &agent.ExecutionRequest{
+			RunID: "goal-run", Work: agent.WorkRef{Kind: agent.WorkGoal, SessionID: "0123456789abcdef0123456789abcdef", GoalID: "goal", WorkItemID: "item"}, Intent: "coordinate",
+		},
+	}
+	if err := validateClient(validGoal); err != nil {
+		t.Fatalf("valid explicit Goal coordinator run rejected: %v", err)
+	}
+	invalidSession := validGoal
+	invalidSession.Run = &agent.ExecutionRequest{
+		RunID: "session-run", Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: validGoal.SessionID}, Intent: "coordinate",
+	}
+	if err := validateClient(invalidSession); err == nil {
+		t.Fatal("per-run coordinator selection was accepted for a Session run")
+	}
+	invalidGoalID := validGoal
+	invalidGoalID.CoordinatorTeamID = "invalid"
+	if err := validateClient(invalidGoalID); err == nil {
+		t.Fatal("invalid Goal coordinator team ID was accepted")
+	}
+	invalidMode := validGoal
+	invalidMode.CoordinatorOn = true
+	if err := validateClient(invalidMode); err == nil {
+		t.Fatal("one-shot coordinator mode flag was accepted on run_start")
 	}
 }
 

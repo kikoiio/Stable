@@ -112,7 +112,7 @@ func TestCoordinatorExecutorDeniesForgedNonTeamToolsBeforeSideEffects(t *testing
 	}
 	for _, name := range []string{
 		"read_file", "write_file", "glob", "grep", "command", "fetch_url",
-		"run_agent", "delegate_tasks", "todo_write", "task_update",
+		"run_agent", "delegate_tasks", "load_skill", "todo_write", "task_update",
 	} {
 		outcome, err := executor.Execute(t.Context(), llm.ToolUse{
 			ID: "forged-" + name, Name: name, Arguments: []byte(`{"path":"project","command":"true"}`),

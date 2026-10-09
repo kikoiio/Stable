@@ -53,6 +53,11 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if request.Work.SessionID != msg.SessionID {
 		return errors.New("run session does not match request session")
 	}
+	// Coordinator authority is derived from the trusted session setting or the
+	// explicit Goal run parameter. Never trust the internal, non-wire fields on
+	// a locally constructed ExecutionRequest.
+	request.TeamCoordinator = false
+	request.TeamCoordinatorTeamID = ""
 	if s.deps.WorkspaceStateRoot != "" {
 		if err := s.reconcileWorkspaceToolTransitions(ctx, msg.SessionID, false); err != nil {
 			return fmt.Errorf("pending workspace lifecycle transition is not yet settled: %w", err)
@@ -103,6 +108,9 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	var teamCoordinatorMode bool
 	var teamCoordinatorTeamID string
 	if request.Work.Kind == agent.WorkSession {
+		if msg.CoordinatorTeamID != "" || msg.CoordinatorOn {
+			return errors.New("session coordinator mode must be selected before the run")
+		}
 		coordinator, modeErr := teamCoordinatorModeForSession(s.deps.ProjectRoot, msg.SessionID)
 		err = modeErr
 		if err != nil {
@@ -120,6 +128,21 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		}
 		request.TeamCoordinator = coordinator.Enabled
 		request.TeamCoordinatorTeamID = coordinator.TeamID
+	} else if request.Work.Kind == agent.WorkGoal {
+		if msg.CoordinatorOn {
+			return errors.New("Goal coordinator mode requires an explicit team selection")
+		}
+		if msg.CoordinatorTeamID != "" {
+			team, teamErr := s.getTeamForSession(ctx, currentProjectRoot(s.deps.ProjectRoot), msg.SessionID, msg.CoordinatorTeamID, &request.Work)
+			if teamErr != nil || team.Status != teams.TeamOpen {
+				return errors.New("Goal coordinator team is not authorized for this Goal and WorkItem")
+			}
+			request.TeamCoordinator = true
+			request.TeamCoordinatorTeamID = msg.CoordinatorTeamID
+			teamCoordinatorMode = true
+		}
+	} else if msg.CoordinatorTeamID != "" || msg.CoordinatorOn {
+		return errors.New("coordinator mode is unavailable for this work scope")
 	}
 	var leadLease *workspace.WriterLease
 	var leadManager *workspace.LifecycleService
@@ -241,11 +264,20 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		if coordinatorMode.Enabled {
 			request.TeamCoordinator = true
 			request.TeamCoordinatorTeamID = coordinatorMode.TeamID
-			request.ToolSchemas = execution.TeamCoordinatorToolSchemas(s.deps.ToolSchemas)
-			if len(request.ToolSchemas) == 0 {
-				s.eventMu.Unlock()
-				return errors.New("team coordinator mode has no configured team tools")
-			}
+		}
+	}
+	if request.Work.Kind == agent.WorkGoal && request.TeamCoordinator {
+		team, teamErr := s.getTeamForSession(ctx, currentProjectRoot(s.deps.ProjectRoot), msg.SessionID, request.TeamCoordinatorTeamID, &request.Work)
+		if teamErr != nil || team.Status != teams.TeamOpen {
+			s.eventMu.Unlock()
+			return errors.New("Goal coordinator binding changed during run admission")
+		}
+	}
+	if request.TeamCoordinator {
+		request.ToolSchemas = execution.TeamCoordinatorToolSchemas(s.deps.ToolSchemas)
+		if len(request.ToolSchemas) == 0 {
+			s.eventMu.Unlock()
+			return errors.New("team coordinator mode has no configured team tools")
 		}
 	}
 	taskPrefix, taskErr := s.agentTaskNotifications(request)
@@ -262,7 +294,12 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if request.Work.Kind != agent.WorkSession {
 		request.Messages = append(taskPrefix, request.Messages...)
 	}
-	if request.Work.Kind == agent.WorkGoal && leadLease != nil {
+	if request.Work.Kind == agent.WorkGoal && request.TeamCoordinator {
+		request.Messages = append([]llm.Message{{
+			Role:    "system",
+			Content: "当前运行处于团队协调器模式，仅协调已绑定团队 " + request.TeamCoordinatorTeamID + "：仅使用团队消息、请求和任务板工具；不得操作其它团队，不得调用项目文件、命令、MCP、网络、委派、后台任务或 session todo 工具。",
+		}}, request.Messages...)
+	} else if request.Work.Kind == agent.WorkGoal && leadLease != nil {
 		request.Messages = append([]llm.Message{{
 			Role:    "system",
 			Content: "你是 Stable 的受控工作区 agent。读、搜、列只能访问本次绑定工作区的只读基线；写、编辑和命令只能影响本次绑定工作区。正式工程保持不变，变更需稍后单独导出为候选并经用户审核。工具路径使用工作区相对路径。",

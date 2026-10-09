@@ -12,6 +12,7 @@ import (
 
 	"stable/internal/agent"
 	"stable/internal/platform/ipc"
+	"stable/internal/sessionlog"
 )
 
 type StreamClient struct {
@@ -26,6 +27,24 @@ func OpenRun(ctx context.Context, socket string, request agent.ExecutionRequest)
 		return nil, err
 	}
 	if err = client.Send(ClientMsg{Op: "run_start", SessionID: request.Work.SessionID, Run: &request}); err != nil {
+		client.Close()
+		return nil, err
+	}
+	return client, nil
+}
+
+// OpenGoalCoordinatorRun starts one explicit Goal run with a team coordinator
+// binding. Session coordinator mode is selected separately and persists only
+// for subsequent ordinary Session runs.
+func OpenGoalCoordinatorRun(ctx context.Context, socket string, request agent.ExecutionRequest, teamID string) (*StreamClient, error) {
+	if request.Work.Kind != agent.WorkGoal || sessionlog.ValidateID(teamID) != nil {
+		return nil, errors.New("Goal coordinator run requires a Goal scope and valid team ID")
+	}
+	client, err := openStream(ctx, socket)
+	if err != nil {
+		return nil, err
+	}
+	if err = client.Send(ClientMsg{Op: "run_start", SessionID: request.Work.SessionID, Run: &request, CoordinatorTeamID: teamID}); err != nil {
 		client.Close()
 		return nil, err
 	}
