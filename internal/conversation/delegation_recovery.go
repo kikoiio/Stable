@@ -285,11 +285,21 @@ func recoverSessionDelegation(root, sessionID string, events []sessionlog.Event)
 		}
 	}
 	for runID := range hasDelegations {
+		// Team child runs persist delegation-shaped progress for the shared
+		// runner, but their terminal must be paired with a team turn fact. The
+		// team recovery pass owns that transaction; a generic run terminal here
+		// would leave the team projection with an incomplete terminal gap.
+		if run := started[runID]; run.TeamTurnID != "" {
+			continue
+		}
 		if !terminal[runID] {
 			interruptedRuns[runID] = true
 		}
 	}
 	for runID := range interruptedRuns {
+		if run := started[runID]; run.TeamTurnID != "" {
+			continue
+		}
 		if !terminal[runID] {
 			if err = appendRunTerminal(root, sessionID, runID, &lastSeq); err != nil {
 				return err
