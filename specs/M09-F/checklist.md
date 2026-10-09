@@ -51,7 +51,7 @@
 
 ## AC5 Metadata 事务与兼容
 
-增量证据：`TestReconcileAcceptanceRetainsPartialMetadataRestoreConflict` 在正式内容已交换、`.git` 已归位后注入未知 `.stable` 目标，再执行两次恢复；recovery 保持 blocked 且不写 acceptance receipt，同时保留正式 accepted bytes、已归位 `.git` 元数据和未知 replacement 两边的 bytes/inodes。定向 store 测试本地通过（2026-10-10）；其余 intent/restore/finalize crash cuts 与版本矩阵仍开放。
+增量证据：`TestReconcileAcceptanceRetainsPartialMetadataRestoreConflict` 在正式内容已交换、`.git` 已归位后注入未知 `.stable` 目标，再执行两次恢复；recovery 保持 blocked 且不写 acceptance receipt，同时保留正式 accepted bytes、已归位 `.git` 元数据和未知 replacement 两边的 bytes/inodes。`TestProjectMetadataAcceptanceRecoveryEveryMoveBoundary/git_directory_true/same_digest_stable_directory_replacement` 在 swapped 恢复前把 incoming `.stable` 换成内容相同、inode 不同的目录；两次恢复均保持 blocked/no receipt，并保留正式 accepted bytes、原目录及 replacement 的身份和内容。定向 store 测试本地通过（2026-10-10）；其余 intent/restore/finalize crash cuts 与版本矩阵仍开放。
 
 旧 review digest 兼容回归：`TestLegacyReviewJSONKeepsHistoricalDigestAndAcceptance` 通过旧 JSON 结构独立计算历史 SHA256，确认缺少 `manifest_policy` 的 review 反序列化后仍省略该字段、digest 不变，且旧确认沿原 digest 接受验证。定向 candidate 测试本地通过（2026-10-10）；旧 SQL journal 迁移与含 Git legacy 事务恢复仍需单独验收。
 

@@ -424,6 +424,7 @@ func TestProjectMetadataAcceptanceRecoveryEveryMoveBoundary(t *testing.T) {
 		{"service_restored", "swapped", 3, 2}, {"before_finalize", "swapped", 3, 3},
 		{"metadata_destination_conflict", "swapped", 3, 0},
 		{"same_digest_git_pointer_replacement", "swapped", 3, 0},
+		{"same_digest_stable_directory_replacement", "swapped", 3, 0},
 		{"same_digest_formal_replacement", "prepared", 0, 0},
 		{"same_digest_candidate_replacement", "prepared", 0, 0},
 		{"same_digest_rollback_replacement", "old_saved", 1, 0},
@@ -432,6 +433,9 @@ func TestProjectMetadataAcceptanceRecoveryEveryMoveBoundary(t *testing.T) {
 	for _, gitDirectory := range []bool{false, true} {
 		for _, fixture := range cases {
 			if fixture.name == "same_digest_git_pointer_replacement" && gitDirectory {
+				continue
+			}
+			if fixture.name == "same_digest_stable_directory_replacement" && !gitDirectory {
 				continue
 			}
 			t.Run(fmt.Sprintf("git_directory_%t/%s", gitDirectory, fixture.name), func(t *testing.T) {
@@ -573,6 +577,28 @@ func TestProjectMetadataAcceptanceRecoveryEveryMoveBoundary(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				stableOriginal := filepath.Join(incoming, ".stable")
+				stableReplacement := filepath.Join(parent, "replacement.stable")
+				var stableOriginalInfo, stableReplacementInfo os.FileInfo
+				if fixture.name == "same_digest_stable_directory_replacement" {
+					stableOriginalInfo, err = os.Lstat(stableOriginal)
+					if err != nil || !stableOriginalInfo.IsDir() {
+						t.Fatalf("incoming .stable directory info=%v err=%v", stableOriginalInfo, err)
+					}
+					if err = os.Rename(stableOriginal, stableReplacement); err != nil {
+						t.Fatal(err)
+					}
+					if err = os.Mkdir(stableOriginal, 0700); err != nil {
+						t.Fatal(err)
+					}
+					if err = os.WriteFile(filepath.Join(stableOriginal, "session"), []byte("live log"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					stableReplacementInfo, err = os.Lstat(stableOriginal)
+					if err != nil || !stableReplacementInfo.IsDir() || os.SameFile(stableOriginalInfo, stableReplacementInfo) {
+						t.Fatalf(".stable was not replaced with a different directory inode: original=%v replacement=%v err=%v", stableOriginalInfo, stableReplacementInfo, err)
+					}
+				}
 				if err = s.Close(); err != nil {
 					t.Fatal(err)
 				}
@@ -676,6 +702,50 @@ func TestProjectMetadataAcceptanceRecoveryEveryMoveBoundary(t *testing.T) {
 					if _, ok, err := s.FindAcceptanceReceipt(ctx, d.ID); err != nil || ok {
 						t.Fatalf("repeat blocked recovery produced receipt: %t %v", ok, err)
 					}
+					return
+				}
+				if fixture.name == "same_digest_stable_directory_replacement" {
+					if err := s.ReconcileAcceptances(ctx); err == nil {
+						t.Fatal("recovery accepted a byte-identical replacement .stable directory")
+					}
+					assertStableReplacementRetained := func(attempt string) {
+						t.Helper()
+						data, readErr := os.ReadFile(filepath.Join(formal, "board"))
+						if readErr != nil || string(data) != "new" {
+							t.Errorf("%s formal accepted content=%q err=%v", attempt, data, readErr)
+						}
+						for path, wantInfo := range map[string]os.FileInfo{
+							stableOriginal:    stableReplacementInfo,
+							stableReplacement: stableOriginalInfo,
+						} {
+							info, statErr := os.Lstat(path)
+							if statErr != nil || !os.SameFile(wantInfo, info) {
+								t.Errorf("%s .stable identity at %s changed: want=%v got=%v err=%v", attempt, path, wantInfo, info, statErr)
+							}
+							content, readErr := os.ReadFile(filepath.Join(path, "session"))
+							if readErr != nil || string(content) != "live log" {
+								t.Errorf("%s .stable bytes at %s=%q err=%v", attempt, path, content, readErr)
+							}
+						}
+						if _, statErr := os.Lstat(filepath.Join(formal, ".stable")); !os.IsNotExist(statErr) {
+							t.Errorf("%s recovery installed .stable despite identity conflict: %v", attempt, statErr)
+						}
+						if data, readErr := os.ReadFile(filepath.Join(incoming, ".mewcode", "history")); readErr != nil || string(data) != "legacy state" {
+							t.Errorf("%s remaining source metadata=%q err=%v", attempt, data, readErr)
+						}
+						var phase string
+						if queryErr := s.DB().QueryRow(`SELECT phase FROM acceptance_apply_journal WHERE decision_id=?`, d.ID).Scan(&phase); queryErr != nil || phase != "blocked" {
+							t.Errorf("%s journal phase=%q err=%v, want blocked", attempt, phase, queryErr)
+						}
+						if _, ok, receiptErr := s.FindAcceptanceReceipt(ctx, d.ID); receiptErr != nil || ok {
+							t.Errorf("%s blocked acceptance receipt exists=%t err=%v", attempt, ok, receiptErr)
+						}
+					}
+					assertStableReplacementRetained("first recovery")
+					if err := s.ReconcileAcceptances(ctx); err != nil {
+						t.Fatalf("repeat blocked recovery: %v", err)
+					}
+					assertStableReplacementRetained("repeat recovery")
 					return
 				}
 				for attempt := 0; attempt < 2; attempt++ {

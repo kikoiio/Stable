@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -96,6 +97,7 @@ func TestTeamTUIFactsSurviveParentCompactionAndSocketReconnect(t *testing.T) {
 
 	model := New(socket, project)
 	model.ActiveSession, model.ActiveRunID, model.Pending = sessionID, parentRunID, true
+	model.stream = parentStream
 	model, createResult := submitAcceptanceTeamCommand(t, model, "/teams create compaction-socket")
 	createdTeam := acceptanceTeamResponse(t, createResult, "team_create").Team
 	if createdTeam == nil {
@@ -169,10 +171,6 @@ func TestTeamTUIFactsSurviveParentCompactionAndSocketReconnect(t *testing.T) {
 	if err != nil || postEvent.Type != "run_event" || postEvent.RunEvent == nil || postEvent.RunEvent.ID != afterID || postEvent.Cursor <= boundaryEvent.Cursor {
 		t.Fatalf("receive post-compaction parent event: message=%+v err=%v", postEvent, err)
 	}
-	if err := parentStream.Close(); err != nil {
-		t.Fatal(err)
-	}
-
 	afterCompact, err := sessionlog.ReplayTeams(project, sessionID, teamID)
 	if err != nil {
 		t.Fatal(err)
@@ -205,18 +203,61 @@ func TestTeamTUIFactsSurviveParentCompactionAndSocketReconnect(t *testing.T) {
 		t.Fatalf("parent run compaction boundary not persisted: %+v", storedBoundary)
 	}
 
-	reconnected, err := conversation.SubscribeRun(requestCtx, socket, sessionID, parentRunID, firstEvent.Cursor)
-	if err != nil {
+	// Model the TUI having consumed the first event, then losing its stream
+	// before it could process the compaction boundary and following event.
+	model.LastCursor = firstEvent.Cursor
+	if err := parentStream.Close(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = reconnected.Close() })
+	updated, resume := model.Update(runStreamMsg{client: parentStream, err: io.EOF})
+	model = updated.(Model)
+	if !model.Pending || model.ActiveRunID != parentRunID || model.LastCursor != firstEvent.Cursor || model.stream != nil {
+		t.Fatalf("TUI state changed when parent stream disconnected: pending=%v run=%q cursor=%d stream=%p", model.Pending, model.ActiveRunID, model.LastCursor, model.stream)
+	}
+	if resume == nil {
+		t.Fatal("TUI did not schedule parent run resubscription after EOF")
+	}
+	startedMsg, ok := resume().(runStreamStartedMsg)
+	if !ok || startedMsg.err != nil || startedMsg.client == nil || !startedMsg.resume {
+		t.Fatalf("TUI resume command result=%+v; want a live resume subscription", startedMsg)
+	}
+	updated, receive := model.Update(startedMsg)
+	model = updated.(Model)
+	if !model.Pending || model.ActiveRunID != parentRunID || model.LastCursor != firstEvent.Cursor || model.stream != startedMsg.client {
+		t.Fatalf("TUI state changed while resubscribing parent run: pending=%v run=%q cursor=%d streamSame=%v", model.Pending, model.ActiveRunID, model.LastCursor, model.stream == startedMsg.client)
+	}
+	t.Cleanup(func() { _ = startedMsg.client.Close() })
+	if receive == nil {
+		t.Fatal("resubscribed TUI did not schedule stream receive")
+	}
 	for index, want := range []struct {
 		id     string
 		cursor uint64
 	}{{boundaryID, boundaryEvent.Cursor}, {afterID, postEvent.Cursor}} {
-		message, receiveErr := reconnected.Receive()
-		if receiveErr != nil || message.Type != "run_event" || message.RunID != parentRunID || message.RunEvent == nil || message.RunEvent.ID != want.id || message.Cursor != want.cursor {
-			t.Fatalf("reconnected parent event %d=%+v err=%v; want %s at cursor %d", index, message, receiveErr, want.id, want.cursor)
+		streamMsg, ok := receive().(runStreamMsg)
+		if !ok || streamMsg.err != nil || streamMsg.message.Type != "run_event" || streamMsg.message.RunID != parentRunID || streamMsg.message.RunEvent == nil || streamMsg.message.RunEvent.ID != want.id || streamMsg.message.Cursor != want.cursor {
+			t.Fatalf("reconnected parent event %d=%+v; want %s at cursor %d", index, streamMsg, want.id, want.cursor)
+		}
+		updated, receive = model.Update(streamMsg)
+		model = updated.(Model)
+		if !model.Pending || model.ActiveRunID != parentRunID || model.LastCursor != want.cursor || model.stream != startedMsg.client {
+			t.Fatalf("TUI parent state after reconnected event %s: pending=%v run=%q cursor=%d streamSame=%v", want.id, model.Pending, model.ActiveRunID, model.LastCursor, model.stream == startedMsg.client)
+		}
+		count := 0
+		for _, event := range model.Events {
+			if event.Type != sessionlog.EventRunEvent {
+				continue
+			}
+			var runEvent agent.ExecutionEvent
+			if err := decodeTUIEvent(event.Data, &runEvent); err != nil {
+				t.Fatal(err)
+			}
+			if runEvent.ID == want.id {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("reconnected TUI event %q appears %d times; want exactly once", want.id, count)
 		}
 	}
 	type receiveResult struct {
@@ -225,7 +266,7 @@ func TestTeamTUIFactsSurviveParentCompactionAndSocketReconnect(t *testing.T) {
 	}
 	extraResult := make(chan receiveResult, 1)
 	go func() {
-		message, receiveErr := reconnected.Receive()
+		message, receiveErr := startedMsg.client.Receive()
 		extraResult <- receiveResult{message: message, err: receiveErr}
 	}()
 	select {
@@ -235,7 +276,7 @@ func TestTeamTUIFactsSurviveParentCompactionAndSocketReconnect(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 	}
-	if err := reconnected.Close(); err != nil {
+	if err := startedMsg.client.Close(); err != nil {
 		t.Fatal(err)
 	}
 

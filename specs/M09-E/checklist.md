@@ -24,7 +24,7 @@
 新增明确隐私回归：`CreateTeamTask` 与 `UpdateTeamTask` 现在在写入前对 title/description 执行 provider credential 脱敏；`TestTeamTaskTitleDescriptionCredentialRedaction` 定向通过（2026-10-10），核对服务返回、ReplayTeams projection、原始 session log 不含 sentinel credential，并验证脱敏后超长 title 不写入任何 task fact。云端验证待新 SHA。
 
 增量证据：`TestAgentTaskSessionReplayKeepsSummaryButNotCredentialRoleOrChildTranscript` 检查运行体 input 可包含完整可信角色指令，但 task/session 原始日志、replay 和 agent-task projection 只保留安全摘要与脱敏标记，不含 provider credential、角色正文或 child transcript sentinel；定向 conversation 测试本地通过（2026-10-10）。其他工具/UI字段与组合隐私矩阵仍开放。
-- [ ] **AC9 组合回归：** 完整client/TUI协作路径、M05 compaction前后team facts不丢、游标重连不覆盖parent；A/B/C/D、M06 todo、普通Session/Goal、权限、候选与独立目标验证保持通过。（验证：fake集成及已授权云端Go/E2E/package。增量证据：`TestTeamTUIFactsSurviveParentCompactionAndSocketReconnect` 通过真实TUI slash命令与Unix socket创建team/message/task，注入fake parent compaction boundary及后续事件，断开后按cursor重连并验证有序、无重复；team projection及TUI重新查询的facts保持一致。focused测试本地通过（2026-10-10）；完整AC9仍开放。）
+- [ ] **AC9 组合回归：** 完整client/TUI协作路径、M05 compaction前后team facts不丢、游标重连不覆盖parent；A/B/C/D、M06 todo、普通Session/Goal、权限、候选与独立目标验证保持通过。（验证：fake集成及已授权云端Go/E2E/package。增量证据：`TestTeamTUIFactsSurviveParentCompactionAndSocketReconnect` 通过真实TUI slash命令与Unix socket创建team/message/task，注入fake parent compaction boundary及后续事件；旧 stream EOF 后经 `Model.Update → resumeRunCmd → runStreamStartedMsg → receiveRunCmd` 重订阅同一 parent run，断言 Pending/ActiveRunID/cursor/stream 归属不变，两个 compaction 前后的父事件各出现一次，并核对重连后的 team facts 与 replay projection 一致。定向 TUI 集成测试本地通过（2026-10-10）；完整 AC9 仍开放。）
 
 ## 用户与父工具完整场景
 
