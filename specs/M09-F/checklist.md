@@ -1,6 +1,6 @@
 # M09-F 受控工作树与并行写入 Checklist
 
-> 状态：规格已批准，实施代码已提交；AC1–9 仍需逐项验收。最新代码 SHA `1ca6e0e0afb8400a61e4245eec7b88baeb6d3cb8` 的真实 Linux writer/sandbox/quota workflow、Go build/unit、package 与 E2E 全部 jobs 通过；A/B/C/D旧CI不作为F实现证据（2026-10-09）。
+> 状态：规格已批准，实施代码已提交；AC1–9 仍需逐项验收。最新已完成组合 CI 基线 SHA `3aebca97780704391cc1050b4f9ce75cbff72814` 的真实 Linux writer/sandbox/quota workflow、Go build/unit、package 与全部 E2E jobs 均通过；Go 首次单测运行在 `TestLegacyHistoryIsNotReplayedButLiveGoalMessagesBroadcast` 的 10 分钟 socket-read deadline 超时，失败 job 重跑后通过。当前推送 SHA `772e710f6cd8cb61b31f041492198347df8ab0d7` 的 Go/E2E/Workspace Linux workflows 正在运行。F AC1–9 仍未整体验收；A/B/C/D旧CI不作为F实现证据（2026-10-09）。
 
 ## 审批与追溯
 

@@ -1,6 +1,6 @@
 # M09 并行协作与工作树：范围与进度
 
-> 2026-10-09 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。SHA `7413680911db1f4fd8048218204e6e494f015216` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 全部通过。其后本地提交 `9a9873b`、`6be42ec`、`a3f5910` 增加导出/接受串行化、team close 恢复和普通 session lead run 绑定 workspace 的定向证据，尚待最新 SHA 的云端组合验证。E/F checklist 仍有逐项验收缺口。
+> 2026-10-09 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。最新已完成组合 CI 基线为 SHA `3aebca97780704391cc1050b4f9ce75cbff72814`：Go build/unit 重跑成功（首次在 `TestLegacyHistoryIsNotReplayedButLiveGoalMessagesBroadcast` 的 10 分钟 socket-read deadline 超时）、package 成功、E2E 全部六个 jobs 与 M09 Workspace Linux 成功。SHA `772e710f6cd8cb61b31f041492198347df8ab0d7` 已推送，Go/E2E/Workspace Linux 新 workflow 正在验证新增 E/F 证据；E/F AC1–9 仍未整体验收。
 
 ## 已完成
 
@@ -56,3 +56,5 @@ Linux 为当前首发平台，源端 iTerm 专用后端不属于本轮 Linux 验
 `48be60c` 的首次云端组合复验中，Go/unit 与 Workspace Linux contract 失败于两个旧 workspace test fixture 缺失 binding-admission capability；E2E `unit`/`e2e-m03` 同因失败，已由 `c86865d` 补齐 fixture 并经定向 workspace 测试验证。E2E `e2e-core` 的 `waiting_restart.sh` 另外报 `database is locked`，等待后续 workflow 判断是否为暂态。同期新增 E 父 socket disconnect child continuity、TUI task board create/update/list；F bound lead run→export→review→accept 与 Close timeout/retry 测试，均通过定向本地测试。上述新组合代码及 fixture 修复尚待云端复验。
 
 SHA `21d66d7061a31b43f72a24ea79810c52e3584798` 的 Go build/unit、package、全部 E2E jobs 与 Workspace Linux 均通过；`database is locked` 未在复验中重现。随后新增 `c8c5797` 的真实 TUI plan-request approval service 路径，定向本地测试 `-count=3` 通过，尚待最新 SHA 云端复验。该增量仍只补 E AC5/AC9 子场景；E/F 的 AC1–9 与 M09 全局组合验收尚未完成。
+
+随后继续推进 E/F：team task/request/team/member 历史查询补齐稳定排序、100 项上限和 cursor 续读；增加成员发消息给 lead 不自动起新 lead run、单个 member stop 不影响 sibling、parent cancellation 不伪完成 task 的 E 证据。F 增加后台 writer 在 requester disconnect/parent completion 后保留 generation lease、workspace chmod 经 export/review/accept 保留 mode、checkout 变化使旧 conflict resolution 失效、stale writer executor 跨 generation 写入被拒、linked `.git` pointer acceptance 后 inode/内容保全等测试。以上定向本地测试通过并记录在 E/F checklist。SHA `772e710f6cd8cb61b31f041492198347df8ab0d7` 已推送，Go/E2E/Workspace Linux 组合 workflow 正在运行；M09-E/F AC1–9 与全局源端差异和组合验收仍开放，整体 M09 未完成。

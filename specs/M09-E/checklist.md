@@ -1,6 +1,6 @@
 # M09-E 团队、消息与只读协调器 Checklist
 
-> 状态：规格已批准，实施代码已提交；AC1–9 与完整场景仍按实际证据逐项验收。SHA `99fa8502845d033dd0720c12aacd49d8f109a479` 的 Go build/unit、package、全部 E2E jobs 与 Workspace Linux 全部通过；E AC1–9 仍有逐项验收缺口（2026-10-09）。
+> 状态：规格已批准，实施代码已提交；AC1–9 与完整场景仍按实际证据逐项验收。最新已完成组合 CI 基线 SHA `3aebca97780704391cc1050b4f9ce75cbff72814` 的 Go build/unit、package、全部 E2E jobs 与 Workspace Linux 均通过；Go 首次单测运行在 `TestLegacyHistoryIsNotReplayedButLiveGoalMessagesBroadcast` 的 10 分钟 socket-read deadline 超时，失败 job 重跑后通过。当前推送 SHA `772e710f6cd8cb61b31f041492198347df8ab0d7` 的 Go/E2E/Workspace Linux workflows 正在运行。E AC1–9 仍未整体验收（2026-10-09）。
 
 ## 功能验收
 
