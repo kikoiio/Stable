@@ -751,6 +751,7 @@ func (s *Service) SpawnTeamMember(ctx context.Context, request agent.ExecutionRe
 					result.Error = "team member workspace writer could not be safely released: " + releaseErr.Error()
 				}
 			}
+			result = sanitizeTeamChildResult(result, child.RoleInstruction, s.deps.ProviderCredential)
 			if err := s.persistTeamChildFinish(root, request.Work.SessionID, team.ID, member.ID, turnID, child, result, &runSeq); err != nil {
 				return err
 			}
@@ -980,6 +981,7 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 					result.Error = "team member workspace writer could not be safely released: " + releaseErr.Error()
 				}
 			}
+			result = sanitizeTeamChildResult(result, child.RoleInstruction, s.deps.ProviderCredential)
 			if err := s.persistTeamChildFinish(root, request.Work.SessionID, team.ID, member.ID, turnID, child, result, &runSeq); err != nil {
 				return err
 			}
@@ -1848,6 +1850,7 @@ func (s *Service) persistTeamChildFinish(root, sessionID, teamID, memberID, turn
 // persistTeamChildFinishLocked writes terminal run facts when the caller
 // already holds eventMu for a larger atomic team transition.
 func (s *Service) persistTeamChildFinishLocked(root, sessionID, teamID, memberID, turnID string, child agent.ChildRunInput, result agent.ChildRunResult, runSeq *uint64) error {
+	result = sanitizeTeamChildResult(result, child.RoleInstruction, s.deps.ProviderCredential)
 	status := string(result.Status)
 	if !teamTerminalStatus(status) {
 		if result.Error != "" {
@@ -1856,8 +1859,8 @@ func (s *Service) persistTeamChildFinishLocked(root, sessionID, teamID, memberID
 			status = "succeeded"
 		}
 	}
-	summary := redactRunCredential(result.Summary, s.deps.ProviderCredential)
-	errorText := redactRunCredential(result.Error, s.deps.ProviderCredential)
+	summary := result.Summary
+	errorText := result.Error
 	summary = truncateDelegationText(summary, teams.MaxSummaryBytes)
 	errorText = truncateDelegationText(errorText, teams.MaxErrorBytes)
 	delegationStatus := status
@@ -1866,6 +1869,16 @@ func (s *Service) persistTeamChildFinishLocked(root, sessionID, teamID, memberID
 	}
 	runStatus := map[string]string{"succeeded": "completed", "failed": "failed", "canceled": "cancelled", "interrupted": "interrupted"}[status]
 	return s.appendTeamChildTerminalLocked(root, sessionID, child, runSeq, runStatus, errorText)
+}
+
+// sanitizeTeamChildResult is a service-side privacy boundary. Lifecycle
+// persistence runs before PoolDelegator's public terminal sanitization, so it
+// must remove role instructions before either child-run or team facts become
+// durable and before watchTeamMember can publish the TeamTurnTerminal result.
+func sanitizeTeamChildResult(result agent.ChildRunResult, roleInstruction, credential string) agent.ChildRunResult {
+	result.Summary = redactRunCredential(agent.SanitizeRoleOutput(result.Summary, roleInstruction), credential)
+	result.Error = redactRunCredential(agent.SanitizeRoleOutput(result.Error, roleInstruction), credential)
+	return result
 }
 
 func (s *Service) appendTeamChildRunEventLocked(root, sessionID string, child agent.ChildRunInput, runSeq *uint64, status, summary, errorText string) error {
