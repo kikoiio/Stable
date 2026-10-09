@@ -78,4 +78,6 @@ M09-E 增加持久化团队协作、消息、任务和只读协调器；M09-F �
 
 SHA `a8fbddd` 的 Go `build-and-test`、`test-package`、M09 Workspace Linux 和六个 E2E jobs 均通过：Go run [37998687925](https://github.com/kikoiio/Stable/actions/runs/37998687925)、Workspace Linux run [37998687877](https://github.com/kikoiio/Stable/actions/runs/37998687877)、E2E run [37998687884](https://github.com/kikoiio/Stable/actions/runs/37998687884)。该 SHA 补充 team 请求响应者拒绝、coordinator TUI 启停闭环、rename 冲突和生产默认20,000文件上限回归。Go 首轮曾发现旧 TUI task-board fixture 直接伪造 `TeamUser` 标记；夹具现通过真实 TUI/socket 查询，复验全绿。
 
-当前本地下一批还补充 E 身份/恢复/协调器拒绝/限额与 F workspace 所有权、plan-mode writer、metadata 恢复、重启用量、workspace 数和 child 输出预算证据；新增定向用例均通过，待提交及对应 SHA 云端复验。M09-E/F checklist 与 M09 总体仍保持未整体验收状态。
+SHA `2eca48a` 的 Go run [37999887455](https://github.com/kikoiio/Stable/actions/runs/37999887455) 与 M09 Workspace Linux run [37999887767](https://github.com/kikoiio/Stable/actions/runs/37999887767) 通过。E2E run [37999887580](https://github.com/kikoiio/Stable/actions/runs/37999887580) 的 `e2e-core` 在 `dependency_change.sh` 的 `PROJECT TABLE REMOVAL` 收敛后断言失败：证据和依赖已 current，但读取时 Goal 仍为 active；其余五个 jobs 通过。该 SHA 不含相关脚本或运行时代码改动，待后续 SHA 复验。
+
+当前本地下一批还补充 E lead 消息字节边界和身份 proof 过期、F workspace/project 存储额度及 live writer 退出失败保护；新增定向用例均通过，待提交及对应 SHA 云端复验。M09-E/F checklist 与 M09 总体仍保持未整体验收状态。

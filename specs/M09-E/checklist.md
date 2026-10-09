@@ -13,6 +13,8 @@
 增量证据：`TestCreateTeamRejectsForgedWorkRefBeforeSideEffects` 用有效 owner RunID 配合伪造 Goal/WorkItem WorkRef 调用 CreateTeam，验证权限拒绝前后 session team projection、目标 team history、session events 与 scheduler ready/active 均不变。定向 conversation 测试本地通过（2026-10-10）；完整 AC1 身份矩阵仍开放。
 
 增量证据：`TestTeamMemberStopRejectsForgedWorkItemActorBeforeDispatch` 从协议解码入口提交目标 team 的 sibling WorkItem/RunID 停止请求，验证请求在 handler dispatch 前拒绝，cancel callback 为零，member 仍 queued，team history 与 session journal 不变。定向 conversation 测试本地通过（2026-10-10）；完整 AC1 身份和 stop 矩阵仍开放。
+
+增量证据：`TestTeamUserProofEnforcesExpiryAndFutureClockSkew` 验证内部 socket user HMAC proof 新鲜时可用、超出 30 秒 TTL 或未来时间偏差超过 5 秒时拒绝，proof 与完整 WorkRef 校验测试均本地通过（2026-10-10）。
 - [x] **AC2 多轮：** 同一member连续两个有界turn，输入仅角色/身份/上一摘要/明确批次；没有父历史或兄弟transcript；idle不占worker，一member不并行；首spawn队满拒绝，后续消息waiting_capacity公平重试。（定向多轮/容量矩阵覆盖；SHA `5997ef511486af5911406bc04cfacbc428d48c2f` Go `build-and-test`通过。）
 - [x] **AC3 消息：** p2p/lead/broadcast持久有序、固定接收者、全或无投递；额满和写盘失败不误成功；批次handoff/restart destination gap、并发新消息和重连不丢失/重复；lead消息不自动起模型run。（定向投递/容量/恢复矩阵和 handoff 竞态用例均通过；SHA `42ebd90ace8e1b3bab4755a24d501d62aba237b4` Go `build-and-test` 通过。）
 - [x] **AC4 任务板：** CRUD、revision、owner、canonical依赖和blocks视图一致；未知/环/自依赖/跨队拒绝，未解除依赖禁止进行/完成；两成员抢claim只有一个成功，取消不会伪完成，M06 todo与Goal工作项独立。（本地定向矩阵通过；SHA `fb4353aaa1eae4003641d9232a913d69e1886029` Go `build-and-test` 与 `test-package` 通过。）
@@ -35,6 +37,8 @@
 - [ ] **AC8 有界与隐私：** service/team/member/turn累计额度、message pending/batch、lead32KiB、task/request/query全上限生效；入队/终态/关闭持久失败明确可恢复；日志/UI没有原始角色、thinking、credential、child transcript；消息/计划作为脱敏显式参考数据。（验证：边界/超限/故障/敏感标记fixtures。增量证据：未决 plan/shutdown 限制、plan/feedback 正文上限、MaxMemberTurns=16、service拒绝第257项team task、task 标题256字节/描述4096字节准确边界及+1拒绝无facts、terminal append-gap恢复都有本地定向服务测试；新增 watcher `TeamTurnTerminal` 暂时写失败后同一 watcher 重试及重启恢复用例（`TestTeamWatcherRetriesTerminalAppendAndRecoveryIsIdempotent`，2026-10-10本地通过）；新增 service 精确接受16条task依赖并拒绝第17条、确认无projection/history/session facts副作用的用例（`TestTeamTaskServiceRejectsDependencyCountOverLimitWithoutFacts`，`TMPDIR=$PWD/.tmp GOMAXPROCS=1 go test -p 1 ./internal/conversation -run '^TestTeamTaskServiceRejectsDependencyCountOverLimitWithoutFacts$' -count=1`，2026-10-10本地通过）；新增 `TestBuildTeamTurnTaskEnforcesEncodedInputAtExactByteLimit`，验证完整 delegation task JSON 编码恰为 MaxInputBytes (64 KiB) 时接受、增加1 byte即拒绝（本地定向 agent 测试通过，2026-10-10）；新增 plan body 与 shutdown feedback 凭据脱敏 service 测试 `TestTeamRequestBodyAndFeedbackCredentialsAreRedacted`，验证返回值、ReplayTeams projection 与原始 session log 保留安全上下文且不含 credential（2026-10-10 本地通过）。其余额度、持久故障恢复和联合隐私矩阵仍开放。）
 
 增量证据：`TestAgentTaskEncodedInputLimitExactBoundaryAndOverflowNoOp` 以完整序列化 DelegationTask 精确填满 64 KiB 并确认接受，再扩展 1 byte 确认拒绝且 session event 数不变、child runner 调用为零、无 active task。定向 conversation 测试本地通过（2026-10-10）。
+
+增量证据：`TestTeamLeadNotificationBatchEnforcesExactByteBoundary` 通过真实 lead handoff 选择器验证 32 KiB 精确交付，追加 1 byte 后该通知不进入 parent messages、replay/history handoff 或 accepted batch，且其余四条 accepted handoff 恰好一次。定向 conversation 测试本地通过（2026-10-10）；AC8 其余累计额度与隐私矩阵仍开放。
 
 新增明确隐私回归：`CreateTeamTask` 与 `UpdateTeamTask` 现在在写入前对 title/description 执行 provider credential 脱敏；`TestTeamTaskTitleDescriptionCredentialRedaction` 定向通过（2026-10-10），核对服务返回、ReplayTeams projection、原始 session log 不含 sentinel credential，并验证脱敏后超长 title 不写入任何 task fact。云端验证待新 SHA。
 
