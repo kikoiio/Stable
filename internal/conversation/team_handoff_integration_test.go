@@ -187,9 +187,6 @@ func TestInterruptedMessageHandoffIsExplicitlyRetriedAfterRestart(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.ResumeTeamMember(t.Context(), request, team.ID, member.ID, "resume-interrupted"); err != nil {
-		t.Fatal(err)
-	}
 	interrupted := receiveTeamChildInput(t, runner.inputs)
 	if interrupted.TeamTurn == nil || !strings.Contains(interrupted.Task.Instruction, message.Body) {
 		t.Fatalf("message was not included in the interrupted destination turn: %+v", interrupted)

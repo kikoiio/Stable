@@ -139,3 +139,120 @@ func TestWorkspaceWriterRealSyncBackgroundDefinitionAndDirect(t *testing.T) {
 		})
 	}
 }
+
+func TestParallelWorkspaceWriterAgentsUseIndependentLeases(t *testing.T) {
+	helper := os.Getenv("STABLE_M09_WRITER_HELPER")
+	volume := os.Getenv("STABLE_M09_VOLUME")
+	if helper == "" || volume == "" {
+		t.Skip("requires cloud helper and disposable bounded disk volume")
+	}
+	if err := sandbox.BoundedWorkspaceVolume(volume); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan agentTaskTestInvocation, 2)
+	release := make(chan struct{}, 2)
+	runner := agentTaskTestRunner(func(ctx context.Context, input agent.ChildRunInput) agent.ChildRunResult {
+		invocation := agentTaskTestInvocation{ctx: ctx, input: input, release: make(chan struct{})}
+		select {
+		case started <- invocation:
+		case <-ctx.Done():
+			return agent.ChildRunResult{Status: agent.DelegationCanceled, Error: ctx.Err().Error()}
+		}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return agent.ChildRunResult{Status: agent.DelegationCanceled, Error: ctx.Err().Error()}
+		}
+		executor, err := input.ExecutorFactory.ForRun(agent.ExecutionRequest{RunID: input.ChildRunID, Work: input.Work, PermissionBounds: input.PermissionBounds})
+		if err != nil {
+			return agent.ChildRunResult{Status: agent.DelegationFailed, Error: err.Error()}
+		}
+		marker := "one"
+		if strings.Contains(input.Task.Instruction, "writer two") {
+			marker = "two"
+		}
+		args, _ := json.Marshal(map[string]string{"file_path": "parallel.txt", "content": marker})
+		out, err := executor.Execute(ctx, llm.ToolUse{ID: "write-" + marker, Name: "write_file", Arguments: args})
+		if err != nil || out.IsError {
+			return agent.ChildRunResult{Status: agent.DelegationFailed, Error: fmt.Sprintf("write %s: %s (%v)", marker, out.Content, err)}
+		}
+		return agent.ChildRunResult{Status: agent.DelegationSucceeded, Summary: "writer " + marker + " complete"}
+	})
+	role := "---\nname: builder\ndescription: isolated writer\nisolation: worktree\n---\nWrite only the assigned checkout.\n"
+	svc, formal, session := newAgentTaskTestService(t, runner, role)
+	state, err := os.MkdirTemp(volume, "parallel-writer-state-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.deps.WorkspaceStateRoot = state
+	if err := os.WriteFile(filepath.Join(formal, "base.txt"), []byte("formal bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	factory := execution.NewToolExecutorFactory(execution.ToolExecutorDeps{Sandbox: sandbox.New(), Gate: writerAcceptanceGate{}, HelperPath: helper})
+	parentRunID, err := sessionlog.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := agentTaskTestParent(t, svc, session, parentRunID)
+	parent.ExecutorFactory = factory
+	parent.ToolSchemas = []llm.ToolSchema{{Name: "read_file"}, {Name: "write_file"}}
+	svc.mu.Lock()
+	svc.activeRuns[parent.RunID] = session
+	svc.activeRequests[parent.RunID] = agent.ExecutionRequest{RunID: parent.RunID, Work: parent.Work, PermissionBounds: parent.PermissionBounds}
+	svc.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	first, err := svc.deps.AgentTasks.run(ctx, parent, agent.AgentTaskRequest{AgentName: "builder", Instruction: "writer one", Isolation: "worktree", Background: true}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.deps.AgentTasks.run(ctx, parent, agent.AgentTaskRequest{AgentName: "builder", Instruction: "writer two", Isolation: "worktree", Background: true}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.WorkspaceID == "" || second.WorkspaceID == "" || first.WorkspaceID == second.WorkspaceID || first.WorkspaceGeneration == 0 || second.WorkspaceGeneration == 0 {
+		t.Fatalf("parallel tasks did not receive independent workspace leases: first=%+v second=%+v", first, second)
+	}
+	invocationA := receiveAgentTaskInvocation(t, started)
+	invocationB := receiveAgentTaskInvocation(t, started)
+	if invocationA.input.ChildRunID == invocationB.input.ChildRunID || invocationA.ctx.Err() != nil || invocationB.ctx.Err() != nil {
+		t.Fatalf("parallel writer runs are not independently active: %q / %q", invocationA.input.ChildRunID, invocationB.input.ChildRunID)
+	}
+	childIDs := map[string]bool{invocationA.input.ChildRunID: true, invocationB.input.ChildRunID: true}
+	root, scope, err := svc.workspaceScope(ctx, ClientMsg{SessionID: session})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := svc.workspaceService(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range []agent.AgentTaskSnapshot{first, second} {
+		active, err := manager.Get(ctx, scope, task.WorkspaceID)
+		if err != nil || active.State != workspace.StateWriting || !childIDs[active.WriterRunID] || active.Generation != task.WorkspaceGeneration {
+			t.Fatalf("independent writer lease is not active: snapshot=%+v err=%v task=%+v", active, err, task)
+		}
+	}
+	release <- struct{}{}
+	release <- struct{}{}
+	for _, task := range []agent.AgentTaskSnapshot{first, second} {
+		completed, err := svc.deps.AgentTasks.Output(ctx, parent, task.ID, 30*time.Second)
+		if err != nil || completed.Status != agent.DelegationSucceeded {
+			t.Fatalf("parallel writer task did not complete: snapshot=%+v err=%v", completed, err)
+		}
+		kept, err := manager.Get(ctx, scope, task.WorkspaceID)
+		if err != nil || kept.State != workspace.StateKept || kept.WriterRunID != "" || kept.ChangedFiles != 1 {
+			t.Fatalf("parallel workspace was not settled independently: %+v err=%v", kept, err)
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(formal, "base.txt")); err != nil || string(data) != "formal bytes" {
+		t.Fatalf("formal baseline changed: %q err=%v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(formal, "parallel.txt")); !os.IsNotExist(err) {
+		t.Fatalf("parallel child wrote into formal project: %v", err)
+	}
+	svc.mu.Lock()
+	delete(svc.activeRuns, parent.RunID)
+	delete(svc.activeRequests, parent.RunID)
+	svc.mu.Unlock()
+}
