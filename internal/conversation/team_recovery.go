@@ -335,6 +335,13 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 	if err != nil {
 		return err
 	}
+	if err := reconcileApprovedTeamPlanStates(root, sessionID, projection); err != nil {
+		return err
+	}
+	projection, err = sessionlog.ReplayTeams(root, sessionID)
+	if err != nil {
+		return err
+	}
 	teamIDs := make([]string, 0, len(projection.Teams))
 	for id := range projection.Teams {
 		teamIDs = append(teamIDs, id)
@@ -386,6 +393,44 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 		if _, err := sessionlog.Append(root, sessionID, sessionlog.EventTeam, sessionlog.TeamEvent{ID: id, TeamID: teamID, SessionID: sessionID, Kind: sessionlog.TeamClosed, Revision: team.Revision, ActorID: "service", Team: &team}); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// reconcileApprovedTeamPlanStates repairs the durable gap where the approved
+// request event was appended but the member PlanApproved state event was not.
+// It never starts a child during startup recovery; a lead retry can safely
+// re-signal the scheduler after this state has been repaired.
+func reconcileApprovedTeamPlanStates(root, sessionID string, projection sessionlog.TeamProjection) error {
+	requestIDs := make([]string, 0, len(projection.Requests))
+	for id, request := range projection.Requests {
+		if request.Type == teams.RequestPlan && request.Status == teams.RequestApproved {
+			requestIDs = append(requestIDs, id)
+		}
+	}
+	sort.Strings(requestIDs)
+	for _, id := range requestIDs {
+		request := projection.Requests[id]
+		team, ok := projection.Teams[request.TeamID]
+		if !ok || team.Status != teams.TeamOpen {
+			continue
+		}
+		member, ok := projection.Members[request.MemberID]
+		if !ok || member.TeamID != team.ID {
+			return fmt.Errorf("approved plan request %s has no matching member", request.ID)
+		}
+		if member.PlanApproved {
+			continue
+		}
+		member.PlanApproved = true
+		if member.Status == teams.MemberAwaitingPlan {
+			member.Status = teams.MemberIdle
+		}
+		member.Revision++
+		if err := appendTeamFactLocked(root, sessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: member.OriginRunID, Member: &member}); err != nil {
+			return err
+		}
+		projection.Members[member.ID] = member
 	}
 	return nil
 }

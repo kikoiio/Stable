@@ -286,6 +286,25 @@ func (s *Service) RespondTeamRequest(ctx context.Context, request agent.Executio
 		// Only the persisted responder may receive the already-applied response
 		// result, and it must match both the decision and sanitized feedback.
 		if prior.Revision > expectedRevision && prior.Revision-expectedRevision == 1 && teamRequestResponder(actor, prior) && teamRequestAppliedDecision(prior.Status, decision) && prior.Feedback == feedback && (prior.Status != teams.RequestDeferred || time.Now().Before(prior.ExpiresAt)) {
+			if prior.Type == teams.RequestPlan && prior.Status == teams.RequestApproved {
+				member, ok := projection.Members[prior.MemberID]
+				if !ok || member.TeamID != teamID {
+					return teams.Request{}, teams.ErrNotFound
+				}
+				if !member.PlanApproved {
+					member.PlanApproved = true
+					if member.Status == teams.MemberAwaitingPlan {
+						member.Status = teams.MemberIdle
+					}
+					member.Revision++
+					if err := s.appendTeamMemberState(root, team, request.RunID, teams.Lead, member); err != nil {
+						return teams.Request{}, err
+					}
+				}
+				if s.teamScheduler != nil {
+					s.teamScheduler.signalPlanResponse(request, scope, team.ID, member.ID, prior.ID)
+				}
+			}
 			return prior, nil
 		}
 		return prior, teams.ErrRevisionConflict
@@ -593,6 +612,9 @@ func (s *Service) appendTeamRequest(root string, team teams.Team, runID, actor, 
 }
 
 func (s *Service) appendTeamMemberState(root string, team teams.Team, runID, actor string, member teams.Member) error {
+	if s.teamMemberStateAppender != nil {
+		return s.teamMemberStateAppender(root, team, runID, actor, member)
+	}
 	id, err := sessionlog.NewID()
 	if err != nil {
 		return err

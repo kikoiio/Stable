@@ -108,17 +108,20 @@ type Service struct {
 	// skills is the M07-A skill gate copied from deps at Serve; nil closes
 	// the skill surface. The gate itself also keeps a service reference (set
 	// by Bind) so its event appends share the service event mutex.
-	skills                *SkillGate
-	hooks                 *HookGate
-	mcp                   *mcp.Manager
-	mcpMu                 sync.Mutex
-	mcpInstructions       map[string]bool
-	teamScheduler         *teamScheduler
-	workspaceMu           sync.Mutex
-	workspaceAdmissionMu  sync.Mutex
-	workspaceTransitionMu sync.Mutex
-	workspaces            map[string]*workspace.LifecycleService
-	workspaceRuns         map[string]workspaceLeadRun
+	skills          *SkillGate
+	hooks           *HookGate
+	mcp             *mcp.Manager
+	mcpMu           sync.Mutex
+	mcpInstructions map[string]bool
+	teamScheduler   *teamScheduler
+	// teamMemberStateAppender is an optional per-service persistence seam used
+	// to exercise recovery of a failed state append. Nil uses the session log.
+	teamMemberStateAppender func(root string, team teams.Team, runID, actor string, member teams.Member) error
+	workspaceMu             sync.Mutex
+	workspaceAdmissionMu    sync.Mutex
+	workspaceTransitionMu   sync.Mutex
+	workspaces              map[string]*workspace.LifecycleService
+	workspaceRuns           map[string]workspaceLeadRun
 }
 
 type workspaceLeadRun struct {
