@@ -1482,8 +1482,9 @@ func (s *LifecycleService) removeRecordLocked(ctx context.Context, scope Scope, 
 }
 
 type removeHooks struct {
-	afterIntent     func() error
-	afterQuarantine func(string) error
+	afterIntent            func() error
+	afterQuarantine        func(string) error
+	afterQuarantineRemoved func(string) error
 }
 
 func (s *LifecycleService) removeRecordLockedWithHooks(ctx context.Context, scope Scope, record Record, hooks removeHooks) (Snapshot, error) {
@@ -1563,6 +1564,11 @@ func (s *LifecycleService) removeRecordLockedWithHooks(ctx context.Context, scop
 	}
 	if err := project.Close(); err != nil {
 		return Snapshot{}, err
+	}
+	if hooks.afterQuarantineRemoved != nil {
+		if err := hooks.afterQuarantineRemoved(quarantineName); err != nil {
+			return Snapshot{}, err
+		}
 	}
 	removing.Snapshot.State = StateRemoved
 	removing.Snapshot.Cursor++

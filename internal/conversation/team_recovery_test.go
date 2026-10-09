@@ -68,6 +68,72 @@ func TestTeamRecoveryInterruptsAcceptedTurnWithoutReplayingProvider(t *testing.T
 	}
 }
 
+func TestTeamRecoveryAbortsUnacceptedTurnIntentIdempotently(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	service, request := teamServiceFixture(t, root, "parent-unaccepted-intent")
+	team, err := service.CreateTeam(t.Context(), request, "intent-recovery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := teams.Member{ID: "member-unaccepted-intent", TeamID: team.ID, Name: "reader", AgentName: "explore", RoleHash: "role-hash", Model: "fixture", Tools: []string{"read_file"}, Status: teams.MemberCreated, Revision: 1}
+	if err := appendTeamFactLocked(root, request.Work.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberAdded, ActorID: teams.Lead, ActorRunID: request.RunID, Member: &member}); err != nil {
+		t.Fatal(err)
+	}
+	turn := sessionlog.TurnFact{ID: "turn-unaccepted-intent", MemberID: member.ID, RunID: "child-unaccepted-intent", TaskID: "turn-unaccepted-intent", OriginRunID: request.RunID, OriginCallID: "call-unaccepted-intent", Status: "intent"}
+	if err := appendTeamFactLocked(root, request.Work.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamTurnIntent, ActorID: "service", ActorRunID: request.RunID, Turn: &turn}); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a crash after durable intent, before pool acceptance or child
+	// RunStarted. Recovery must abort this intent without starting a provider.
+
+	if err := recoverTeamRuns(root); err != nil {
+		t.Fatalf("first recovery: %v", err)
+	}
+	projection, err := sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := projection.Turns[turn.ID].Status; got != "aborted" {
+		t.Fatalf("unaccepted turn status = %q, want aborted", got)
+	}
+	if got := projection.Members[member.ID].Status; got != teams.MemberInterrupted {
+		t.Fatalf("member status = %q, want interrupted", got)
+	}
+	transcript, err := sessionlog.Replay(root, request.Work.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRecoveryEventCount := len(transcript.Events)
+	for _, event := range transcript.Events {
+		switch event.Type {
+		case sessionlog.EventRunStarted:
+			var start sessionlog.RunStarted
+			if decodeSessionData(event.Data, &start) == nil && start.RunID == turn.RunID {
+				t.Fatalf("recovery started child run for unaccepted intent: %+v", start)
+			}
+		case sessionlog.EventRunEvent:
+			var runEvent sessionlog.RunEvent
+			if decodeSessionData(event.Data, &runEvent) == nil && runEvent.RunID == turn.RunID {
+				t.Fatalf("recovery wrote child run event for unaccepted intent: %+v", runEvent)
+			}
+		}
+	}
+
+	if err := recoverTeamRuns(root); err != nil {
+		t.Fatalf("second recovery: %v", err)
+	}
+	transcript, err = sessionlog.Replay(root, request.Work.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transcript.Events) != firstRecoveryEventCount {
+		t.Fatalf("second recovery appended events: first=%d second=%d", firstRecoveryEventCount, len(transcript.Events))
+	}
+}
+
 func TestTeamRecoveryRestoresWorktreeAuthorityForAcceptedTurnWithoutRunStarted(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "project")
 	if err := os.MkdirAll(root, 0700); err != nil {

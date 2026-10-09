@@ -164,6 +164,109 @@ func TestRemoveQuarantineRecoveryCompletesPinnedOwnedRoot(t *testing.T) {
 	}
 }
 
+func TestRemoveCrashAfterQuarantineRemovalRecoversIdempotently(t *testing.T) {
+	ctx := context.Background()
+	parent := t.TempDir()
+	formal := filepath.Join(parent, "formal")
+	if err := os.Mkdir(formal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stateRoot := filepath.Join(parent, "state")
+	scope := testScope()
+	scope.Authority = permission.Authority{RunID: "remove-finalize-crash", SessionID: scope.SessionID, AllowedRoot: formal, FormalRoot: formal, CandidateRoot: filepath.Join(parent, "candidate")}
+	newService := func() *LifecycleService {
+		t.Helper()
+		layout, err := NewLayout(stateRoot, formal, "project")
+		if err != nil {
+			t.Fatal(err)
+		}
+		service, err := NewService(layout, Limits{}, ServiceDependencies{IdleGuard: idleWorkspaceGuard{}})
+		if err != nil {
+			_ = layout.Close()
+			t.Fatal(err)
+		}
+		return service
+	}
+
+	service := newService()
+	created, err := service.Create(ctx, scope, "remove finalization crash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := service.layout.Paths(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(paths.Root, "user-data.txt"), []byte("authorized removal"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	record, err := service.store.Load(ctx, scope, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crash := errors.New("simulated stop after quarantine removal")
+	_, err = service.removeRecordLockedWithHooks(ctx, scope, record, removeHooks{
+		afterQuarantineRemoved: func(name string) error {
+			if _, err := os.Lstat(paths.Root); !errors.Is(err, os.ErrNotExist) {
+				return errors.New("workspace ID path remains at finalization cut")
+			}
+			if _, err := os.Lstat(filepath.Join(filepath.Dir(paths.Root), name)); !errors.Is(err, os.ErrNotExist) {
+				return errors.New("quarantine path remains at finalization cut")
+			}
+			return crash
+		},
+	})
+	if !errors.Is(err, crash) {
+		t.Fatalf("remove interruption error=%v, want simulated stop", err)
+	}
+	intent, err := service.store.load(created.ID, false)
+	if err != nil || intent.Snapshot.State != StateRemoving || intent.Operation.ID == "" || intent.Operation.Quarantine == "" {
+		t.Fatalf("remove intent was not retained at finalization cut: record=%+v err=%v", intent, err)
+	}
+	removeOperationID := intent.Operation.ID
+	quarantineName := intent.Operation.Quarantine
+	intentCursor := intent.Snapshot.Cursor
+	if err := service.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	firstRecovery := newService()
+	removed, err := firstRecovery.Get(ctx, scope, created.ID)
+	if err != nil || removed.State != StateRemoved || removed.Cursor != intentCursor+1 {
+		t.Fatalf("first recovery snapshot=%+v err=%v", removed, err)
+	}
+	firstRecord, err := firstRecovery.store.load(created.ID, false)
+	if err != nil || firstRecord.Snapshot.State != StateRemoved || firstRecord.Snapshot.Cursor != intentCursor+1 || firstRecord.Operation.ID != removeOperationID || firstRecord.Operation.Phase != "complete" || firstRecord.Operation.Quarantine != "" {
+		t.Fatalf("first recovery terminal record=%+v err=%v", firstRecord, err)
+	}
+	if _, err := os.Lstat(paths.Root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("workspace root exists after recovery: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(paths.Root), quarantineName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("quarantine exists after recovery: %v", err)
+	}
+	if err := firstRecovery.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	secondRecovery := newService()
+	defer secondRecovery.Close(ctx)
+	removedAgain, err := secondRecovery.Get(ctx, scope, created.ID)
+	if err != nil || removedAgain.State != StateRemoved || removedAgain.Cursor != firstRecord.Snapshot.Cursor {
+		t.Fatalf("second recovery snapshot=%+v err=%v", removedAgain, err)
+	}
+	secondRecord, err := secondRecovery.store.load(created.ID, false)
+	if err != nil || secondRecord.Snapshot.State != StateRemoved || secondRecord.Snapshot.Cursor != firstRecord.Snapshot.Cursor || secondRecord.Operation.ID != removeOperationID || secondRecord.Operation.Phase != "complete" || secondRecord.Operation.Quarantine != "" {
+		t.Fatalf("second recovery changed terminal record: first=%+v second=%+v err=%v", firstRecord, secondRecord, err)
+	}
+	if _, err := os.Lstat(paths.Root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("workspace root exists after second recovery: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(paths.Root), quarantineName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("quarantine exists after second recovery: %v", err)
+	}
+}
+
 func TestRemoveQuarantineReplacementFailsClosedOnRestart(t *testing.T) {
 	parent := t.TempDir()
 	formal := filepath.Join(parent, "formal")

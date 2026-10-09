@@ -73,7 +73,7 @@
 
 新增恢复边界：`TestInterruptedPartialCreateUsageIsChargedAfterRestart` 构造 root identity 已持久化、checkout/baseline/repo 尚未完成且 root 留有部分文件的创建崩溃；重启后 workspace 仍 interrupted，`UsedBytes` 与实际 `DiskUsage` 一致，并拒绝会超过项目总上限的新 reservation。恢复现在对不完整但身份匹配的 root 仍计量磁盘占用；无法计量时将其保守计为整项目上限并置 blocked。定向测试本地通过（2026-10-10）；AC6 其余生命周期 crash matrix 仍开放。
 
-新增 clean-remove root identity 边界：`TestRemoveRootReplacementAfterIntentIsRetained` 覆盖持久化 removing intent 后 ID 路径被替换，以及原 root 原子移入 quarantine 后 quarantine 路径被替换；两种情况都拒绝删除，保留原 workspace 数据、replacement sentinel 与 removing journal。实现先把已验证 root 原子移入同项目随机 quarantine，再通过核对持久 device/inode 的 pinned `os.Root` 清理内容，最后对空 quarantine 做非递归删除。`TestRemoveQuarantineRecoveryCompletesPinnedOwnedRoot` 覆盖 rename 后中断的合法恢复；`TestRemoveQuarantineReplacementFailsClosedOnRestart` 覆盖 quarantine inode 被替换后的重启恢复拒绝，并确认 replacement、原 root 数据和 removing intent 均保留。四项 remove/recovery 定向测试及既有 remove/recovery 回归本地通过（2026-10-10）；当前 SHA 云端验证仍待完成，AC6 仍开放。
+新增 clean-remove root identity 边界：`TestRemoveRootReplacementAfterIntentIsRetained` 覆盖持久化 removing intent 后 ID 路径被替换，以及原 root 原子移入 quarantine 后 quarantine 路径被替换；两种情况都拒绝删除，保留原 workspace 数据、replacement sentinel 与 removing journal。实现先把已验证 root 原子移入同项目随机 quarantine，再通过核对持久 device/inode 的 pinned `os.Root` 清理内容，最后对空 quarantine 做非递归删除。`TestRemoveQuarantineRecoveryCompletesPinnedOwnedRoot` 覆盖 rename 后中断的合法恢复；`TestRemoveQuarantineReplacementFailsClosedOnRestart` 覆盖 quarantine inode 被替换后的重启恢复拒绝，并确认 replacement、原 root 数据和 removing intent 均保留；`TestRemoveCrashAfterQuarantineRemovalRecoversIdempotently` 覆盖 quarantine 已删除、Removed journal 尚未保存时的中断，并验证两次重启只推进一次 cursor、保持 operation ID 且路径持续不存在。五项 remove/recovery 定向测试及既有 remove/recovery 回归本地通过（2026-10-10）；当前 SHA 云端验证仍待完成，AC6 仍开放。
 
 ## AC7 有界资源
 
