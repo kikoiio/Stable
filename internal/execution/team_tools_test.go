@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -30,10 +31,46 @@ func TestMemberSpawnAndResumeToolsReachTrustedTeamHost(t *testing.T) {
 }
 
 func TestTeamCoordinatorSchemasAndExecutorUseStaticTeamOnlyAllowlist(t *testing.T) {
-	all := []llm.ToolSchema{{Name: "read_file"}, {Name: "write_file"}, {Name: "command"}, {Name: "run_agent"}, {Name: "team_create"}, {Name: "team_close"}, {Name: "team_list"}, {Name: "team_send"}, {Name: "team_task_update"}}
+	wantAllowed := []string{
+		"team_member_spawn", "team_member_resume",
+		"team_list", "team_get", "team_member_get", "team_member_list",
+		"team_send", "team_messages",
+		"team_request_list", "team_request_respond", "team_shutdown_request",
+		"team_task_create", "team_task_get", "team_task_list", "team_task_update",
+	}
+
+	// Keep the expected policy independent from the production allowlist map so
+	// additions/removals require an intentional test update. The configured
+	// provider schema order is preserved, duplicates are removed, and unrelated
+	// tools are filtered out.
+	configuredNames := []string{
+		"read_file", "team_member_spawn", "write_file", "team_member_resume",
+		"team_list", "team_get", "team_member_get", "team_member_list",
+		"team_send", "team_messages", "team_request_list", "team_request_respond",
+		"team_shutdown_request", "team_task_create", "team_task_get", "team_task_list",
+		"team_task_update", "command", "team_member_spawn", "team_task_update", "team_create", "team_close",
+	}
+	all := make([]llm.ToolSchema, 0, len(configuredNames))
+	for _, name := range configuredNames {
+		all = append(all, llm.ToolSchema{Name: name})
+	}
 	filtered := TeamCoordinatorToolSchemas(all)
-	if len(filtered) != 3 || filtered[0].Name != "team_list" || filtered[1].Name != "team_send" || filtered[2].Name != "team_task_update" {
-		t.Fatalf("coordinator schemas include unsupported tools: %+v", filtered)
+	gotAllowed := make([]string, 0, len(filtered))
+	for _, schema := range filtered {
+		gotAllowed = append(gotAllowed, schema.Name)
+	}
+	if !reflect.DeepEqual(gotAllowed, wantAllowed) {
+		t.Fatalf("coordinator schemas = %v, want complete ordered allowlist %v", gotAllowed, wantAllowed)
+	}
+	for _, name := range wantAllowed {
+		if !TeamCoordinatorToolAllowed(name) {
+			t.Errorf("expected coordinator tool %q is missing from hard executor allowlist", name)
+		}
+	}
+	for _, name := range []string{"read_file", "write_file", "command", "team_create", "team_close", "run_agent", "mcp_call"} {
+		if TeamCoordinatorToolAllowed(name) {
+			t.Errorf("unrelated tool %q unexpectedly entered hard coordinator allowlist", name)
+		}
 	}
 	for _, name := range []string{"read_file", "write_file", "command", "mcp_call", "run_agent", "delegate_tasks", "task_update", "team_create", "team_close"} {
 		executor := &toolRunExecutor{deps: ToolExecutorDeps{Now: time.Now}, request: agent.ExecutionRequest{TeamCoordinator: true}}

@@ -57,6 +57,8 @@
 - [ ] clean remove只有完整基线相等、无binding/writer才执行；dirty discard要求真实用户ID+generation+digest确认，模型bool/过期确认/跨session不可触发。
 - [ ] 子进程未实际退出、持久失败或rootidentity不明时保留blocked lease/操作记录，不宣称资源释放或删除完成。
 
+新增恢复边界：`TestInterruptedPartialCreateUsageIsChargedAfterRestart` 构造 root identity 已持久化、checkout/baseline/repo 尚未完成且 root 留有部分文件的创建崩溃；重启后 workspace 仍 interrupted，`UsedBytes` 与实际 `DiskUsage` 一致，并拒绝会超过项目总上限的新 reservation。恢复现在对不完整但身份匹配的 root 仍计量磁盘占用；无法计量时将其保守计为整项目上限并置 blocked。定向测试本地通过（2026-10-10）；AC6 其余生命周期 crash matrix 仍开放。
+
 ## AC7 有界资源
 
 - [ ] 3 workers/32 queue与D/A/B/C共池，单materializer/8 pending、20,000 files/128 MiB snapshot/16 MiB file真实边界和拒绝路径有屏障证据。增量证据：`TestMaterializerSingleWorkerAndEightPendingSlots` 以channel-gated callback验证单 materializer 同时仅运行一个任务、容纳8个pending、第9个返回 `ErrQueueFull` 且不持久化；定向测试本地通过（2026-10-10）。共池和文件/字节边界仍未整体验收。

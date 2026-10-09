@@ -200,45 +200,91 @@ func (s *LifecycleService) reconcileUsage(ctx context.Context, records []Record)
 		}
 		if record.Snapshot.State == StateInterrupted {
 			incomplete := false
+			var childErr error
 			for _, child := range []string{paths.Baseline, paths.Repository, paths.Checkout} {
 				if _, err := os.Lstat(child); errors.Is(err, os.ErrNotExist) {
 					incomplete = true
 					break
 				} else if err != nil {
-					s.markBlocked(record.Scope, record, fmt.Errorf("workspace startup child identity failed: %w", err))
+					childErr = fmt.Errorf("workspace startup child identity failed: %w", err)
 					incomplete = true
 					break
 				}
 			}
 			if incomplete {
-				continue
-			}
-		}
-		used, err := DiskUsage(ctx, paths.Root, s.limits)
-		if err == nil {
-			var manifest, baseline Manifest
-			manifest, err = BuildManifest(ctx, paths.Checkout, s.limits)
-			if err == nil {
-				baseline, err = BuildManifest(ctx, paths.Baseline, s.limits)
-			}
-			if err == nil {
-				updated := record
-				updated.UsedBytes = used
-				updated.Snapshot.WorkspaceDigest = manifest.Digest
-				updated.Snapshot.ChangedFiles = changedManifestEntries(baseline.Entries, manifest.Entries)
-				if updated.UsedBytes != record.UsedBytes || updated.Snapshot.WorkspaceDigest != record.Snapshot.WorkspaceDigest || updated.Snapshot.ChangedFiles != record.Snapshot.ChangedFiles {
-					updated.Snapshot.Cursor++
-					updated.Operation.UpdatedAt = time.Now().UTC()
-					if err := s.store.Save(ctx, record.Scope, updated, record.Snapshot.Generation); err != nil {
+				used, usageErr := DiskUsage(ctx, paths.Root, s.limits)
+				if usageErr != nil {
+					// The root identity is verified by the ownership journal, but its
+					// partial contents could not be measured. Charge the full project
+					// budget so recovery cannot undercount it and admit more storage.
+					if err := s.saveRecoveryAccounting(ctx, record, s.limits.MaxProjectBytes,
+						fmt.Errorf("workspace startup accounting failed: %w", usageErr)); err != nil {
 						return err
 					}
+					continue
+				}
+				if childErr != nil {
+					if err := s.saveRecoveryAccounting(ctx, record, used, childErr); err != nil {
+						return err
+					}
+				} else if err := s.saveRecoveryAccounting(ctx, record, used, nil); err != nil {
+					return err
 				}
 				continue
 			}
 		}
-		s.markBlocked(record.Scope, record, fmt.Errorf("workspace startup accounting failed: %w", err))
+		used, err := DiskUsage(ctx, paths.Root, s.limits)
+		if err != nil {
+			if saveErr := s.saveRecoveryAccounting(ctx, record, s.limits.MaxProjectBytes,
+				fmt.Errorf("workspace startup accounting failed: %w", err)); saveErr != nil {
+				return saveErr
+			}
+			continue
+		}
+		var manifest, baseline Manifest
+		manifest, err = BuildManifest(ctx, paths.Checkout, s.limits)
+		if err == nil {
+			baseline, err = BuildManifest(ctx, paths.Baseline, s.limits)
+		}
+		if err != nil {
+			if saveErr := s.saveRecoveryAccounting(ctx, record, used,
+				fmt.Errorf("workspace startup accounting failed: %w", err)); saveErr != nil {
+				return saveErr
+			}
+			continue
+		}
+		updated := record
+		updated.UsedBytes = used
+		updated.Snapshot.WorkspaceDigest = manifest.Digest
+		updated.Snapshot.ChangedFiles = changedManifestEntries(baseline.Entries, manifest.Entries)
+		if updated.UsedBytes != record.UsedBytes || updated.Snapshot.WorkspaceDigest != record.Snapshot.WorkspaceDigest || updated.Snapshot.ChangedFiles != record.Snapshot.ChangedFiles {
+			updated.Snapshot.Cursor++
+			updated.Operation.UpdatedAt = time.Now().UTC()
+			if err := s.store.Save(ctx, record.Scope, updated, record.Snapshot.Generation); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
+}
+
+// saveRecoveryAccounting persists conservative quota state for a root whose
+// materialized checkout could not be reconciled. A non-nil cause blocks use;
+// callers pass MaxProjectBytes when disk usage itself is unknown.
+func (s *LifecycleService) saveRecoveryAccounting(ctx context.Context, record Record, used int64, cause error) error {
+	updated := record
+	updated.UsedBytes = used
+	if cause != nil {
+		updated.Snapshot.State = StateBlocked
+		updated.Snapshot.Error = boundedError(cause)
+		updated.Operation.Phase = "blocked"
+	}
+	if updated.UsedBytes == record.UsedBytes && updated.Snapshot.State == record.Snapshot.State && updated.Snapshot.Error == record.Snapshot.Error {
+		return nil
+	}
+	updated.Snapshot.Cursor++
+	updated.Operation.UpdatedAt = time.Now().UTC()
+	return s.store.Save(ctx, record.Scope, updated, record.Snapshot.Generation)
 }
 
 // recoverInterruptedOperations reconciles journal intents after the previous

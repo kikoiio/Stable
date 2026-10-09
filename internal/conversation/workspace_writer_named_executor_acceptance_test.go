@@ -118,9 +118,13 @@ func TestNamedRunAgentWriterFactoryEnforcesPermissionRoleAndLease(t *testing.T) 
 	if _, err := receiveNamedWriterStart(t, started); err == nil {
 		t.Fatal("denied parent permission dispatched a named writer")
 	}
-	formalEntries, err := os.ReadDir(formal)
-	if err != nil || len(formalEntries) != 1 || formalEntries[0].Name() != "base.txt" {
-		t.Fatalf("denied parent permission changed formal tree: entries=%v err=%v", formalEntries, err)
+	if got, err := os.ReadFile(filepath.Join(formal, "base.txt")); err != nil || string(got) != "formal baseline" {
+		t.Fatalf("denied parent permission changed formal file: %q err=%v", got, err)
+	}
+	for _, name := range []string{"named.txt", "must-not-run.txt"} {
+		if _, err := os.Stat(filepath.Join(formal, name)); !os.IsNotExist(err) {
+			t.Fatalf("denied parent permission created formal path %q: %v", name, err)
+		}
 	}
 	stateEntries, err := os.ReadDir(stateRoot)
 	if err != nil || len(stateEntries) != 0 {
