@@ -44,6 +44,61 @@ func TestThreeWayPreviewSelectsOnlyUncontestedChanges(t *testing.T) {
 	}
 }
 
+func TestThreeWayPreviewMergesAndConflictsOnModeOnly(t *testing.T) {
+	baseEntry := mergeEntry("script.sh", "same bytes", 0644)
+	formalExecutable := mergeEntry("script.sh", "same bytes", 0755)
+	workspacePrivate := mergeEntry("script.sh", "same bytes", 0600)
+
+	tests := []struct {
+		name         string
+		formal       ManifestEntry
+		workspace    ManifestEntry
+		want         ManifestEntry
+		wantConflict bool
+	}{
+		{name: "formal chmod only", formal: formalExecutable, workspace: baseEntry, want: formalExecutable},
+		{name: "workspace chmod only", formal: baseEntry, workspace: formalExecutable, want: formalExecutable},
+		{name: "same chmod on both sides", formal: formalExecutable, workspace: formalExecutable, want: formalExecutable},
+		{name: "different chmod on both sides", formal: formalExecutable, workspace: workspacePrivate, wantConflict: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			preview, err := ThreeWayPreview(
+				mergeManifest(t, baseEntry),
+				mergeManifest(t, test.formal),
+				mergeManifest(t, test.workspace),
+				Limits{},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.wantConflict {
+				if len(preview.Conflicts) != 1 || preview.Conflicts[0].Path != "script.sh" {
+					t.Fatalf("mode-only conflict = %+v", preview.Conflicts)
+				}
+				resolved, err := ResolveThreeWay(preview, map[string]string{"script.sh": UseWorkspace}, Limits{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(resolved.Entries) != 1 || resolved.Entries[0] != test.workspace {
+					t.Fatalf("workspace mode choice = %+v, want %+v", resolved.Entries, test.workspace)
+				}
+				resolved, err = ResolveThreeWay(preview, map[string]string{"script.sh": UseFormal}, Limits{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(resolved.Entries) != 1 || resolved.Entries[0] != test.formal {
+					t.Fatalf("formal mode choice = %+v, want %+v", resolved.Entries, test.formal)
+				}
+				return
+			}
+			if len(preview.Conflicts) != 0 || len(preview.Manifest.Entries) != 1 || preview.Manifest.Entries[0] != test.want {
+				t.Fatalf("mode merge = manifest %+v conflicts %+v; want %+v without conflict", preview.Manifest.Entries, preview.Conflicts, test.want)
+			}
+		})
+	}
+}
+
 func TestThreeWayPreviewHandlesAddedDeletedAndRenamedPaths(t *testing.T) {
 	baseFile := mergeEntry("old.txt", "base", 0644)
 	formalAdd := mergeEntry("new.txt", "formal", 0644)
