@@ -31,6 +31,9 @@ type workspaceCandidateExporter struct {
 	// final candidate directory durability boundary. Production exporters leave
 	// it nil; the callback must not alter files.
 	syncCandidateDirectories func(string) error
+	// afterExistingCandidateLookup is an optional test seam for mutations that
+	// race an idempotent export lookup. Production exporters leave it nil.
+	afterExistingCandidateLookup func(string)
 }
 
 func (e workspaceCandidateExporter) PreviewWorkspace(ctx context.Context, scope workspace.Scope, record workspace.Record, paths workspace.Paths) (workspace.Snapshot, error) {
@@ -127,6 +130,31 @@ func (e workspaceCandidateExporter) ExportWorkspace(ctx context.Context, scope w
 	}
 	candidateParent := filepath.Join(filepath.Dir(formalRoot), ".stable-candidates")
 	if existing, getErr := e.service.deps.Store.GetCandidate(ctx, candidateID); getErr == nil {
+		if e.afterExistingCandidateLookup != nil {
+			e.afterExistingCandidateLookup(candidateID)
+		}
+		// The project root and its inputs can change independently of this
+		// process-local lock while the candidate lookup is in flight. Do not
+		// return an idempotent result unless it still refers to the captured
+		// formal root and B/F/W snapshot.
+		if err := workspace.ValidateRootIdentity(formalRoot, record.FormalRootIdentity); err != nil {
+			return workspace.Snapshot{}, err
+		}
+		formalAfter, err := workspace.BuildManifest(ctx, formalRoot, workspace.DefaultLimits())
+		if err != nil {
+			return workspace.Snapshot{}, err
+		}
+		workingAfter, err := workspace.BuildManifest(ctx, paths.Checkout, workspace.DefaultLimits())
+		if err != nil {
+			return workspace.Snapshot{}, err
+		}
+		baselineAfter, err := workspace.BuildManifest(ctx, paths.Baseline, workspace.DefaultLimits())
+		if err != nil {
+			return workspace.Snapshot{}, err
+		}
+		if formalAfter.Digest != formal.Digest || workingAfter.Digest != working.Digest || baselineAfter.Digest != baseline.Digest {
+			return workspace.Snapshot{}, workspace.ErrSourceChanged
+		}
 		if existing.GoalID != goalID || existing.ActionID != actionID || existing.Candidate.FormalRoot != formalRoot || filepath.Clean(existing.Candidate.CandidateRoot) != filepath.Join(candidateParent, candidateID) || existing.Candidate.ManifestPolicy != candidate.ManifestPolicyProject || existing.Candidate.BaselineDigest != formal.Digest {
 			return workspace.Snapshot{}, workspace.ErrOwnership
 		}

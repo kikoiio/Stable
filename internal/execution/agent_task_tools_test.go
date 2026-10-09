@@ -263,3 +263,31 @@ func TestNamedTaskHooksAndAuditPairing(t *testing.T) {
 		t.Fatal("pre-hook rejection reached service or post-hook")
 	}
 }
+
+func TestRunAgentPassesWriterSchemaCeilingOnlyToCoordinator(t *testing.T) {
+	service := &agentTaskServiceStub{result: agent.AgentTaskSnapshot{ID: "task-1", Status: agent.DelegationQueued}}
+	gate := policyGate{policy: permission.Policy{}}
+	executor := namedTaskExecutor(t, service, gate, agent.WorkSession)
+
+	if _, err := executor.Execute(context.Background(), m06Call("run_agent", `{"agent_name":"builder","instruction":"write","isolation":"worktree"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := schemaNames(service.parent.ToolSchemas), schemaNames(WorkspaceWriterToolSchemas()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("run_agent parent schema ceiling=%v, want workspace writer schemas %v", got, want)
+	}
+
+	if _, err := executor.Execute(context.Background(), m06Call("task_output", `{"task_id":"task-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := schemaNames(service.parent.ToolSchemas), schemaNames(ReadOnlyToolSchemas()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("task_output parent schemas=%v, want read-only schemas %v", got, want)
+	}
+}
+
+func schemaNames(schemas []llm.ToolSchema) []string {
+	names := make([]string, len(schemas))
+	for i, schema := range schemas {
+		names[i] = schema.Name
+	}
+	return names
+}

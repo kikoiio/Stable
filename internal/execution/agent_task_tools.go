@@ -83,6 +83,10 @@ func (e *toolRunExecutor) executeAgentTaskTool(ctx context.Context, call llm.Too
 		return outcome
 	}
 	if call.Name == "run_agent" {
+		// Named roles narrow this maximum schema set before their child starts.
+		// A worktree role then receives a lease-bound writer factory; without a
+		// worktree lease the underlying read-only factory still denies writes.
+		parent.ToolSchemas = WorkspaceWriterToolSchemas()
 		parent.ToolCallID = call.ID
 	}
 	var result agent.AgentTaskSnapshot
