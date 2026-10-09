@@ -40,7 +40,7 @@ func TestWorkspaceStopFailureRetainsBlockedLeaseForRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	stopper := &failingWorkspaceStopper{err: errors.New("sandbox process did not exit")}
-	service, err := NewService(layout, Limits{}, ServiceDependencies{Stopper: stopper})
+	service, err := NewService(layout, Limits{}, ServiceDependencies{IdleGuard: idleWorkspaceGuard{}, Stopper: stopper})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestWorkspaceStopDeadlineRetainsBlockedLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	stopper := &failingWorkspaceStopper{err: context.DeadlineExceeded}
-	service, err := NewService(layout, Limits{}, ServiceDependencies{Stopper: stopper})
+	service, err := NewService(layout, Limits{}, ServiceDependencies{IdleGuard: idleWorkspaceGuard{}, Stopper: stopper})
 	if err != nil {
 		t.Fatal(err)
 	}

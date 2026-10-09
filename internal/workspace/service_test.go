@@ -167,7 +167,7 @@ func TestWorkspaceWriterAccountsWritesAndReleasesOnlyAfterCompletion(t *testing.
 	scope := testScope()
 	scope.OriginRunID = "lead-run"
 	scope.Authority = permission.Authority{RunID: "lead-run", SessionID: scope.SessionID, AllowedRoot: formal, FormalRoot: formal, CandidateRoot: filepath.Join(parent, "candidate")}
-	service, err := NewService(layout, Limits{}, ServiceDependencies{})
+	service, err := NewService(layout, Limits{}, ServiceDependencies{IdleGuard: idleWorkspaceGuard{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +421,7 @@ func TestUserDiscardRequiresCurrentPreviewDigestAndGeneration(t *testing.T) {
 	}
 	scope := testScope()
 	scope.Authority = permission.Authority{RunID: "lead-run", SessionID: scope.SessionID, AllowedRoot: formal, FormalRoot: formal, CandidateRoot: filepath.Join(parent, "candidate")}
-	service, err := NewService(layout, Limits{}, ServiceDependencies{})
+	service, err := NewService(layout, Limits{}, ServiceDependencies{IdleGuard: idleWorkspaceGuard{}})
 	if err != nil {
 		t.Fatal(err)
 	}
