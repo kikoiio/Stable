@@ -44,6 +44,60 @@ func TestThreeWayPreviewSelectsOnlyUncontestedChanges(t *testing.T) {
 	}
 }
 
+func TestThreeWayPreviewHandlesAddedDeletedAndRenamedPaths(t *testing.T) {
+	baseFile := mergeEntry("old.txt", "base", 0644)
+	formalAdd := mergeEntry("new.txt", "formal", 0644)
+	workspaceAdd := mergeEntry("new.txt", "workspace", 0644)
+	renamed := mergeEntry("renamed.txt", "base", 0644)
+
+	tests := []struct {
+		name      string
+		base      []ManifestEntry
+		formal    []ManifestEntry
+		workspace []ManifestEntry
+		conflicts []string
+		merged    []ManifestEntry
+	}{
+		{name: "formal add", formal: []ManifestEntry{formalAdd}, merged: []ManifestEntry{formalAdd}},
+		{name: "workspace add", workspace: []ManifestEntry{formalAdd}, merged: []ManifestEntry{formalAdd}},
+		{name: "same add", formal: []ManifestEntry{formalAdd}, workspace: []ManifestEntry{formalAdd}, merged: []ManifestEntry{formalAdd}},
+		{name: "conflicting add", formal: []ManifestEntry{formalAdd}, workspace: []ManifestEntry{workspaceAdd}, conflicts: []string{"new.txt"}},
+		{name: "both delete", base: []ManifestEntry{baseFile}},
+		{name: "formal delete", base: []ManifestEntry{baseFile}, workspace: []ManifestEntry{baseFile}},
+		{name: "delete against edit", base: []ManifestEntry{baseFile}, workspace: []ManifestEntry{mergeEntry("old.txt", "workspace", 0644)}, conflicts: []string{"old.txt"}},
+		{name: "rename is delete and add", base: []ManifestEntry{baseFile}, formal: []ManifestEntry{baseFile}, workspace: []ManifestEntry{renamed}, merged: []ManifestEntry{renamed}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			preview, err := ThreeWayPreview(
+				mergeManifest(t, test.base...),
+				mergeManifest(t, test.formal...),
+				mergeManifest(t, test.workspace...),
+				Limits{},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(preview.Conflicts) != len(test.conflicts) {
+				t.Fatalf("conflicts=%+v, want paths %v", preview.Conflicts, test.conflicts)
+			}
+			for i, conflict := range preview.Conflicts {
+				if conflict.Path != test.conflicts[i] {
+					t.Fatalf("conflict[%d]=%q, want %q", i, conflict.Path, test.conflicts[i])
+				}
+			}
+			if len(preview.Manifest.Entries) != len(test.merged) {
+				t.Fatalf("merged entries=%+v, want %+v", preview.Manifest.Entries, test.merged)
+			}
+			for i, entry := range preview.Manifest.Entries {
+				if entry != test.merged[i] {
+					t.Fatalf("merged entry[%d]=%+v, want %+v", i, entry, test.merged[i])
+				}
+			}
+		})
+	}
+}
+
 func TestThreeWayConflictResolutionBindsExactPathsAndModes(t *testing.T) {
 	base := mergeManifest(t, mergeEntry("file.txt", "base", 0644), mergeEntry("delete.txt", "base", 0644))
 	formal := mergeManifest(t, mergeEntry("file.txt", "formal", 0644), mergeEntry("delete.txt", "modified", 0644))
