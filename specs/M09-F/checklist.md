@@ -99,7 +99,7 @@
 - [ ] 每项512 MiB/每project2 GiB/16未删除项、child8轮/3分钟/50,000输出/8 KiB摘要/64 KiB输入生效；定义/请求只能收窄。增量证据：`TestBudgetDefaultWorkspaceCountLimitAtBoundary` 以 production limits 验证默认16个 live workspace 可用、第17个被 `ErrQuota` 拒绝，removed record 不占槽，移除一项后新建成功且仍为16项；`TestStreamingChildRunnerEnforcesProductionDefaultAggregateOutputLimit` 验证真实 child tool loop 聚合输出精确50,000 bytes成功、50,001 bytes被拒，summary不超过默认8 KiB。两项定向测试通过（2026-10-10）。其余每项/每project空间、child时间与部分请求预算组合仍开放。
 
 增量证据：`TestBudgetProductionDefaultStorageLimitsAtBoundary` 通过 Budget production defaults 验证 workspace 用量 512 MiB 精确上限通过、+1 byte 拒绝；四项 workspace 汇总 2 GiB 通过，第五项 +1 byte 拒绝。仅操作配额记账，不分配大文件；定向 workspace 测试本地通过（2026-10-10）。child 时间与其余限额组合仍开放。
-- [ ] create/materialize3分钟、command90秒并受childdeadline、query最多30秒、stop清理10秒边界生效；等待不占额外childworker、不产生未接受无界goroutine。
+- [ ] create/materialize3分钟、command90秒并受childdeadline、query最多30秒、stop清理10秒边界生效；等待不占额外childworker、不产生未接受无界goroutine。增量证据：`TestWorkspaceCommandDeadlineIsCappedAndInheritsParentDeadline` 通过真实 workspace writer executor 检查 command 即使请求600秒也将 profile 限制为90秒，并验证 sandbox 有效 deadline 不超过90秒；上游30秒 context deadline 原样收窄有效期限。测试中的 recording sandbox 按 profile timeout 对传入 context 应用 `context.WithTimeout`；Linux `RunIsolated` 使用同一规则。本机 execution 定向测试通过（2026-10-10）。`TestWorkspaceStopUsesBoundedDeadlineAndRetainsLeaseOnFailure` 用 recording stopper 验证默认 stop context 不超过10秒、父期限较短时保留原期限，且 stop 失败仍持久保留 blocked lease 的 RunID/generation。workspace 定向测试本地通过（2026-10-10）；create/materialize、query deadline 及其余等待/worker矩阵仍开放。
 - [ ] 配额/持久化/取消/队列失败可见，临时资源只清理自身；构建/全量/容器/大数据走已授权云端，未完成检查如实保留。
 
 ## AC8 入口、恢复、隐私与目标事实
