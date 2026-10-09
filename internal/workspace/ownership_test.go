@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"stable/internal/agent"
 )
 
 func ownershipFixture(t *testing.T) (*Layout, *OwnershipStore) {
@@ -74,6 +76,49 @@ func TestOwnershipScopeGenerationAndReplacement(t *testing.T) {
 	}
 	if _, err := store.Load(ctx, scope, "workspace"); !errors.Is(err, ErrOwnership) {
 		t.Fatalf("physical replacement adopted: %v", err)
+	}
+}
+
+func TestOwnershipRejectsCrossProjectGoalAndWorkItemScope(t *testing.T) {
+	_, store := ownershipFixture(t)
+	ctx := context.Background()
+	scope := testScope()
+	scope.Work.Kind = agent.WorkGoal
+	scope.Work.GoalID = "goal-one"
+	scope.Work.WorkItemID = "item-one"
+	record, err := store.Create(ctx, scope, "workspace", "goal workspace", "create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Snapshot.State = StateReady
+	record.Operation.Phase = "complete"
+	if err := store.Save(ctx, scope, record, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, forged := range map[string]Scope{
+		"project":   func() Scope { s := scope; s.ProjectID = "another-project"; return s }(),
+		"goal":      func() Scope { s := scope; s.Work.GoalID = "goal-two"; return s }(),
+		"work item": func() Scope { s := scope; s.Work.WorkItemID = "item-two"; return s }(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := store.Load(ctx, forged, "workspace"); !errors.Is(err, ErrOwnership) {
+				t.Fatalf("cross-scope load accepted: %v", err)
+			}
+			changed := record
+			changed.Scope = forged
+			changed.Snapshot.State = StateKept
+			changed.Snapshot.Generation = 2
+			changed.Operation.Generation = 2
+			if err := store.Save(ctx, forged, changed, 1); !errors.Is(err, ErrOwnership) {
+				t.Fatalf("cross-scope save accepted: %v", err)
+			}
+		})
+	}
+
+	loaded, err := store.Load(ctx, scope, "workspace")
+	if err != nil || loaded.Snapshot.State != StateReady || loaded.Snapshot.Generation != 1 {
+		t.Fatalf("forged scope changed the owned record: state=%q generation=%d err=%v", loaded.Snapshot.State, loaded.Snapshot.Generation, err)
 	}
 }
 
