@@ -23,9 +23,23 @@ import (
 )
 
 type worktreeTeamWriterRunner struct {
-	started  chan agent.ChildRunInput
-	finished chan agent.ChildRunResult
+	started     chan agent.ChildRunInput
+	finished    chan agent.ChildRunResult
+	holdStarted chan<- struct{}
+	releaseHold <-chan struct{}
 }
+
+type teamWorkspaceAcceptanceEventSink struct{}
+
+func (teamWorkspaceAcceptanceEventSink) PublishDelegation(string, agent.DelegationEvent) error {
+	return nil
+}
+
+func (teamWorkspaceAcceptanceEventSink) Start(context.Context, agent.ExecutionRequest) (*agent.RunHandle, error) {
+	return nil, errors.New("unexpected parent run start in acceptance fixture")
+}
+
+func (teamWorkspaceAcceptanceEventSink) Cancel(string) error { return nil }
 
 type formalGitFileSnapshot struct {
 	content []byte
@@ -101,6 +115,21 @@ func (r *worktreeTeamWriterRunner) Run(ctx context.Context, input agent.ChildRun
 	case r.started <- input:
 	case <-ctx.Done():
 		return agent.ChildRunResult{Status: agent.DelegationCanceled, Error: ctx.Err().Error()}
+	}
+	if input.TeamTurn != nil && r.holdStarted != nil {
+		select {
+		case r.holdStarted <- struct{}{}:
+		case <-ctx.Done():
+			return agent.ChildRunResult{Status: agent.DelegationCanceled, Error: ctx.Err().Error()}
+		}
+		select {
+		case <-r.releaseHold:
+		case <-ctx.Done():
+			return agent.ChildRunResult{Status: agent.DelegationCanceled, Error: ctx.Err().Error()}
+		}
+	}
+	if input.TeamTurn == nil {
+		return agent.ChildRunResult{Status: agent.DelegationSucceeded, Summary: "named task complete"}
 	}
 	executor, err := input.ExecutorFactory.ForRun(agent.ExecutionRequest{RunID: input.ChildRunID, Work: input.Work, PermissionBounds: input.PermissionBounds})
 	if err != nil {
@@ -181,16 +210,27 @@ func TestWorktreeTeamMemberFlowsThroughExportReviewAndAcceptance(t *testing.T) {
 		Tools: []string{"read_file", "write_file"}, Isolation: "worktree", MaxTurns: 2,
 	}}
 	service.deps.ForkProvider, service.deps.ProviderName, service.deps.Model = forkSkillFixtureProvider{}, "fixture", "fixture"
-	runner := &worktreeTeamWriterRunner{started: make(chan agent.ChildRunInput, 2), finished: make(chan agent.ChildRunResult, 2)}
-	pool, err := agent.NewPoolDelegator(agent.DefaultDelegationLimits(), runner, nil)
+	holdStarted := make(chan struct{}, 1)
+	releaseHold := make(chan struct{})
+	runner := &worktreeTeamWriterRunner{started: make(chan agent.ChildRunInput, 4), finished: make(chan agent.ChildRunResult, 4), holdStarted: holdStarted, releaseHold: releaseHold}
+	limits := agent.DefaultDelegationLimits()
+	limits.Workers = 1
+	reporter := NewDelegationEventReporter()
+	pool, err := agent.NewPoolDelegator(limits, runner, reporter)
 	if err != nil {
 		t.Fatal(err)
 	}
 	service.deps.Delegator = pool
+	service.deps.Runner = teamWorkspaceAcceptanceEventSink{}
+	reporter.Bind(service)
+	tasks := NewAgentTaskCoordinator()
+	tasks.Bind(service)
+	service.deps.AgentTasks = tasks
 	service.lifeCtx = ctx
 	service.teamScheduler = newTeamScheduler(service)
 	t.Cleanup(func() {
 		service.teamScheduler.close()
+		tasks.Close()
 		pool.Close()
 		for _, manager := range service.workspaces {
 			if err := manager.Close(context.Background()); err != nil {
@@ -222,12 +262,88 @@ func TestWorktreeTeamMemberFlowsThroughExportReviewAndAcceptance(t *testing.T) {
 		t.Fatalf("child workspace attribution is incomplete: input=%+v member=%+v", first, member)
 	}
 	select {
+	case <-holdStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("worktree team child did not hold its writer lease")
+	}
+	workspaceRoot, workspaceScope, err := service.workspaceScope(ctx, ClientMsg{SessionID: request.Work.SessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceManager, err := service.workspaceService(workspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeWorkspace, err := workspaceManager.Get(ctx, workspaceScope, member.WorkspaceID)
+	if err != nil || activeWorkspace.State != workspace.StateWriting || activeWorkspace.WriterRunID != first.ChildRunID || activeWorkspace.Generation != first.WorkspaceGeneration {
+		t.Fatalf("team child did not retain the expected writer lease while blocked: %+v err=%v", activeWorkspace, err)
+	}
+	parent := agent.ParentRun{
+		RunID: request.RunID, Work: request.Work, ProjectRoot: formal,
+		PermissionBounds: append(json.RawMessage(nil), request.PermissionBounds...),
+		Provider:         service.deps.ForkProvider, ProviderName: service.deps.ProviderName, Model: service.deps.Model,
+		ToolSchemas: append([]llm.ToolSchema(nil), service.deps.ToolSchemas...), ExecutorFactory: service.deps.ForkExecutorFactory,
+	}
+	namedResult := make(chan struct {
+		snapshot agent.AgentTaskSnapshot
+		err      error
+	}, 1)
+	go func() {
+		snapshot, runErr := tasks.Run(ctx, parent, agent.AgentTaskRequest{
+			AgentName: "builder", Instruction: "run behind the worktree child", Background: true, Isolation: "none",
+		})
+		namedResult <- struct {
+			snapshot agent.AgentTaskSnapshot
+			err      error
+		}{snapshot: snapshot, err: runErr}
+	}()
+	var named agent.AgentTaskSnapshot
+	select {
+	case result := <-namedResult:
+		if result.err != nil {
+			t.Fatalf("submit named task while worktree writer is active: %v", result.err)
+		}
+		named = result.snapshot
+	case <-time.After(3 * time.Second):
+		t.Fatal("named task did not enter the shared pool queue")
+	}
+	if named.Status != agent.DelegationQueued || named.WorkspaceID != "" {
+		t.Fatalf("named non-worktree task was not queued without a workspace: %+v", named)
+	}
+	select {
+	case unexpected := <-runner.started:
+		t.Fatalf("named task started before worktree writer released its lease: %+v", unexpected)
+	default:
+	}
+	close(releaseHold)
+	select {
 	case result := <-runner.finished:
 		if result.Status != agent.DelegationSucceeded {
 			t.Fatalf("worktree team child result=%+v", result)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("worktree team child did not finish")
+	}
+	var namedInput agent.ChildRunInput
+	select {
+	case namedInput = <-runner.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("queued named task did not start after worktree writer released the worker")
+	}
+	if namedInput.TeamTurn != nil || namedInput.Task.Name != "builder" || namedInput.ChildRunID != named.RunID {
+		t.Fatalf("shared pool did not run the queued named task second: %+v", namedInput)
+	}
+	select {
+	case result := <-runner.finished:
+		if result.Status != agent.DelegationSucceeded {
+			t.Fatalf("named task result=%+v", result)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("queued named task did not finish")
+	}
+	settledNamed, err := tasks.Output(ctx, parent, named.ID, 3*time.Second)
+	if err != nil || settledNamed.Status != agent.DelegationSucceeded || settledNamed.Summary != "named task complete" {
+		t.Fatalf("named task did not settle successfully: %+v err=%v", settledNamed, err)
 	}
 	waitForTeamMemberStatus(t, formal, request.Work.SessionID, team.ID, member.ID, teams.MemberIdle)
 	unauthorizedResume := request
