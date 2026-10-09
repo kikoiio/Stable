@@ -67,6 +67,8 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 	if store == nil {
 		return Receipt{}, errors.New("acceptance journal is unavailable")
 	}
+	unlock := lockProjectTransaction(c.FormalRoot)
+	defer unlock()
 	exists, existingReceipt, hasReceipt, err := store.CheckAcceptance(ctx, decision)
 	if err != nil {
 		return Receipt{}, err
@@ -153,7 +155,7 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 		}
 	}
 	tx := DirectoryTransaction{ID: decision.ID, Kind: TransactionAcceptance, ManifestPolicy: c.ManifestPolicy, ProtectedMetadata: metadataFacts, CurrentRoot: c.FormalRoot, IncomingRoot: c.CandidateRoot, RollbackRoot: rollback, ExpectedRootIdentity: expectedRootIdentity, TargetRootIdentity: targetRootIdentity, ExpectedDigest: decision.FormalDigest, TargetDigest: decision.CandidateDigest, ServiceRoot: filepath.Join(c.FormalRoot, ".stable"), Mode: mode}
-	if err = NewTransactionCoordinator().Apply(ctx, tx, acceptanceJournal{store: store}); err != nil {
+	if err = NewTransactionCoordinator().applyLocked(ctx, tx, acceptanceJournal{store: store}); err != nil {
 		_ = store.SetAcceptancePhase(ctx, decision.ID, "prepared", "blocked", err.Error())
 		return Receipt{}, err
 	}

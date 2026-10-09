@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 
 	"stable/internal/platform/secfile"
 )
@@ -66,11 +67,55 @@ type TransactionJournal interface {
 	Advance(context.Context, string, TransactionPhase, TransactionPhase, string) error
 }
 
+type projectTransactionLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+var projectTransactionLocks = struct {
+	sync.Mutex
+	items map[string]*projectTransactionLock
+}{items: map[string]*projectTransactionLock{}}
+
+func lockProjectTransaction(root string) func() {
+	key, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		key = filepath.Clean(root)
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(key); resolveErr == nil {
+		key = resolved
+	}
+	projectTransactionLocks.Lock()
+	entry := projectTransactionLocks.items[key]
+	if entry == nil {
+		entry = &projectTransactionLock{}
+		projectTransactionLocks.items[key] = entry
+	}
+	entry.refs++
+	projectTransactionLocks.Unlock()
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		projectTransactionLocks.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(projectTransactionLocks.items, key)
+		}
+		projectTransactionLocks.Unlock()
+	}
+}
+
 type TransactionCoordinator struct{}
 
 func NewTransactionCoordinator() *TransactionCoordinator { return &TransactionCoordinator{} }
 
 func (c *TransactionCoordinator) Apply(ctx context.Context, tx DirectoryTransaction, journal TransactionJournal) error {
+	unlock := lockProjectTransaction(tx.CurrentRoot)
+	defer unlock()
+	return c.applyLocked(ctx, tx, journal)
+}
+
+func (c *TransactionCoordinator) applyLocked(ctx context.Context, tx DirectoryTransaction, journal TransactionJournal) error {
 	if err := validateTransaction(tx); err != nil {
 		return err
 	}
