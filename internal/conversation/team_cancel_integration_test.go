@@ -204,6 +204,109 @@ func TestCancelParentRunCancelsOnlyItsTeamChildren(t *testing.T) {
 	}
 }
 
+func TestServiceCloseCancelsTeamChildAndDrainsWatcher(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	parentRunID, err := sessionlog.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := sessionlog.Create(root, "service close team fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessionlog.Append(root, session.ID, sessionlog.EventRunStarted, sessionlog.RunStarted{
+		RunID: parentRunID, WorkKind: string(agent.WorkSession), Intent: "service close fixture",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	socketDir, err := os.MkdirTemp("/tmp", "m09-close-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	childRunner := &cancelAwareTeamChildRunner{started: make(chan teamChildStart, 1), canceled: make(chan string, 1)}
+	pool, err := agent.NewPoolDelegator(agent.DefaultDelegationLimits(), childRunner, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	role := agentcatalog.Definition{Name: "explore", Instruction: "Inspect the assigned area.", Model: "inherit", Tools: []string{"read_file"}, MaxTurns: 3}
+	service, err := Serve(context.Background(), Deps{
+		ProjectRoot: root, SocketPath: filepath.Join(socketDir, "s.sock"), PollEvery: time.Hour,
+		Agents: fixedTeamRoleCatalog{definition: role}, Delegator: pool,
+		ForkProvider: forkSkillFixtureProvider{}, ForkExecutorFactory: forkSkillFixtureExecutorFactory{},
+		ForkToolSchemas: []llm.ToolSchema{{Name: "read_file"}}, ProviderName: "fixture", Model: "model-v1",
+	})
+	if err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
+	parent := agent.ExecutionRequest{RunID: parentRunID, Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: session.ID}}
+	parent.PermissionBounds, err = json.Marshal(permission.Authority{RunID: parentRunID, SessionID: session.ID, AllowedRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.mu.Lock()
+	service.activeRuns[parentRunID] = session.ID
+	service.activeRequests[parentRunID] = parent
+	service.mu.Unlock()
+
+	t.Cleanup(func() {
+		_ = service.Close()
+		pool.Close()
+	})
+
+	team, err := service.CreateTeam(t.Context(), parent, "service-close")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := service.SpawnTeamMember(t.Context(), parent, TeamMemberSpawnRequest{
+		TeamID: team.ID, Name: "reader", AgentName: role.Name, Instruction: "Inspect the assigned files.", OriginCallID: "spawn-close",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := receiveTeamChildStart(t, childRunner.started)
+	if started.input.TeamTurn == nil || started.input.TeamTurn.MemberID != member.ID {
+		t.Fatalf("unexpected active team child: %+v", started.input.TeamTurn)
+	}
+	waitForTeamMemberStatus(t, root, session.ID, team.ID, member.ID, teams.MemberRunning)
+	if err := service.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case turnID := <-childRunner.canceled:
+		if turnID != started.input.TeamTurn.TurnID {
+			t.Fatalf("canceled turn=%s, want %s", turnID, started.input.TeamTurn.TurnID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("service close did not cancel the active team child")
+	}
+	waitForTeamMemberStatus(t, root, session.ID, team.ID, member.ID, teams.MemberInterrupted)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		service.teamScheduler.mu.Lock()
+		active := len(service.teamScheduler.active) + len(service.teamScheduler.activeOrigin) + len(service.teamScheduler.activeMember) + len(service.teamScheduler.activeTeam)
+		service.teamScheduler.mu.Unlock()
+		if active == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("team watcher did not drain after child exit: active registrations=%d", active)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	projection, err := sessionlog.ReplayTeams(root, session.ID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := projection.Turns[started.input.TeamTurn.TurnID].Status; got != string(agent.DelegationCanceled) {
+		t.Fatalf("closed-service turn status=%s, want canceled", got)
+	}
+}
+
 func receiveTeamChildStart(t *testing.T, starts <-chan teamChildStart) teamChildStart {
 	t.Helper()
 	select {

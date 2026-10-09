@@ -255,6 +255,96 @@ func TestWorkspaceWriterLeaseIsExclusiveAndGenerationFenced(t *testing.T) {
 	}
 }
 
+func TestIndependentWorkspacesHoldConcurrentWriterLeases(t *testing.T) {
+	parent := t.TempDir()
+	formal := filepath.Join(parent, "formal")
+	if err := os.Mkdir(formal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formal, "base.txt"), []byte("base"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	layout, err := NewLayout(filepath.Join(parent, "state"), formal, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := testScope()
+	scope.OriginRunID = "lead-run"
+	scope.Authority = permission.Authority{RunID: "lead-run", SessionID: scope.SessionID, AllowedRoot: formal, FormalRoot: formal, CandidateRoot: filepath.Join(parent, "candidate")}
+	service, err := NewService(layout, Limits{}, ServiceDependencies{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close(context.Background())
+
+	firstWorkspace, err := service.Create(context.Background(), scope, "parallel writer one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondWorkspace, err := service.Create(context.Background(), scope, "parallel writer two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRunID, err := NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRunID, err := NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.AcquireWriter(context.Background(), scope, firstWorkspace.ID, firstRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.AcquireWriter(context.Background(), scope, secondWorkspace.ID, secondRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.WorkspaceID == second.WorkspaceID || first.RunID == second.RunID || first.Paths.Checkout == second.Paths.Checkout {
+		t.Fatalf("independent leases share identity or checkout: first=%+v second=%+v", first, second)
+	}
+	for _, lease := range []WriterLease{first, second} {
+		active, err := service.Get(context.Background(), scope, lease.WorkspaceID)
+		if err != nil || active.State != StateWriting || active.WriterRunID != lease.RunID || active.Generation != lease.Generation {
+			t.Fatalf("concurrent writer was not retained: snapshot=%+v err=%v lease=%+v", active, err, lease)
+		}
+		duplicateRunID, err := NewID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.AcquireWriter(context.Background(), scope, lease.WorkspaceID, duplicateRunID); !errors.Is(err, ErrOwnership) {
+			t.Fatalf("occupied workspace %s accepted a second lease: %v", lease.WorkspaceID, err)
+		}
+	}
+
+	for _, item := range []struct {
+		lease WriterLease
+		name  string
+		body  string
+	}{{first, "first.txt", "writer one"}, {second, "second.txt", "writer two"}} {
+		reservation, err := service.ReserveWriterWrite(context.Background(), item.lease, int64(len(item.body)+(64<<10)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(item.lease.Paths.Checkout, item.name), []byte(item.body), 0600); err != nil {
+			reservation.Release()
+			t.Fatal(err)
+		}
+		if err := reservation.Commit(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, lease := range []WriterLease{first, second} {
+		kept, err := service.ReleaseCompletedWriter(context.Background(), lease)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kept.State != StateKept || kept.WriterRunID != "" || kept.ChangedFiles != 1 {
+			t.Fatalf("writer completion was not accounted independently: %+v", kept)
+		}
+	}
+}
 func TestWorkspacePreviewPersistsBoundedConflictSummary(t *testing.T) {
 	parent := t.TempDir()
 	formal := filepath.Join(parent, "formal")
