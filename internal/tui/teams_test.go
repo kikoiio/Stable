@@ -244,6 +244,7 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 		acceptRoleChange                                   bool
 	}{
 		{line: "/teams list", op: "team_list"},
+		{line: "/teams list 100", op: "team_list", limit: 100},
 		{line: "/teams coordinator on", op: "team_coordinator", coordinatorOn: true},
 		{line: "/teams create squad", op: "team_create", runID: "parent"},
 		{line: "/teams close team-1", op: "team_close", teamID: "team-1"},
@@ -313,6 +314,9 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 			if tc.op == "team_task_list" && request.Limit != int(tc.limit) {
 				t.Fatalf("task page limit=%d, want %d", request.Limit, tc.limit)
 			}
+			if tc.op == "team_list" && request.Limit != int(tc.limit) {
+				t.Fatalf("team page limit=%d, want %d", request.Limit, tc.limit)
+			}
 			if tc.op == "team_task_create" && (request.TaskTitle == nil || *request.TaskTitle != tc.text) {
 				t.Fatalf("task title=%v", request.TaskTitle)
 			}
@@ -329,7 +333,7 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 }
 
 func TestTeamCommandsRejectInvalidUsageAndRequireRunForCreate(t *testing.T) {
-	for _, line := range []string{"/teams", "/teams create", "/teams close", "/teams coordinator", "/teams coordinator yes", "/team", "/team team-1 tasks update task-1 0 status completed", "/team team-1 tasks list 101", "/team team-1 messages 0 999", "/team team-1 send all", "/team team-1 respond req-1 0 approve", "/team team-1 shutdown", "/team team-1 spawn reader explore inspect", "/team team-1 resume member-1"} {
+	for _, line := range []string{"/teams", "/teams list 0", "/teams list 101", "/teams create", "/teams close", "/teams coordinator", "/teams coordinator yes", "/team", "/team team-1 tasks update task-1 0 status completed", "/team team-1 tasks list 101", "/team team-1 messages 0 999", "/team team-1 send all", "/team team-1 respond req-1 0 approve", "/team team-1 shutdown", "/team team-1 spawn reader explore inspect", "/team team-1 resume member-1"} {
 		m := New("", t.TempDir())
 		m.ActiveSession = "session"
 		m.Composer.SetValue(line)

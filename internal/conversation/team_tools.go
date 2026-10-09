@@ -77,7 +77,7 @@ func (s *Service) ExecuteTeamTool(ctx context.Context, request agent.ExecutionRe
 			result, err = s.ResumeTeamMember(ctx, request, args.TeamID, args.MemberID, call.ID)
 		}
 	case "team_list":
-		result, err = s.ListTeams(ctx, request)
+		result, err = s.ListTeams(ctx, request, args.Limit)
 	case "team_get":
 		if args.TeamID == "" {
 			err = teams.ErrNotFound

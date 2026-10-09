@@ -356,6 +356,12 @@ func validateClient(m ClientMsg) error {
 		if m.Run != nil || m.ProjectRoot != "" {
 			return fmt.Errorf("team operations use the persisted run scope and server-bound project root")
 		}
+		if m.Op == "team_list" && (m.Limit < 0 || m.Limit > teams.MaxPageSize) {
+			return fmt.Errorf("team_list page size exceeds the maximum")
+		}
+		if m.Op != "team_list" && m.Limit != 0 {
+			return fmt.Errorf("limit is only accepted by team_list")
+		}
 		if m.Op == "team_create" && (m.TeamName == "" || m.RunID == "") {
 			return fmt.Errorf("op team_create requires team_name and active lead run_id")
 		}

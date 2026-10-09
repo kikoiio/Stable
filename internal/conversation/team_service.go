@@ -300,12 +300,27 @@ func serviceTeamCapacity(root string) (int, int, error) {
 	return openTeams, members, nil
 }
 
-func (s *Service) ListTeams(ctx context.Context, request agent.ExecutionRequest) ([]teams.Team, error) {
+func (s *Service) ListTeams(ctx context.Context, request agent.ExecutionRequest, requestedLimit ...int) ([]teams.Team, error) {
+	if len(requestedLimit) > 1 {
+		return nil, errors.New("team query accepts at most one limit")
+	}
+	limit := 0
+	if len(requestedLimit) == 1 {
+		limit = requestedLimit[0]
+	}
 	root, _, err := s.scopeForWork(ctx, currentProjectRoot(s.deps.ProjectRoot), request.Work)
 	if err != nil {
 		return nil, err
 	}
-	return s.listTeamsForSession(ctx, root, request.Work.SessionID, &request.Work)
+	list, err := s.listTeamsForSession(ctx, root, request.Work.SessionID, &request.Work)
+	if err != nil {
+		return nil, err
+	}
+	pageSize := teams.PageSize(limit)
+	if len(list) > pageSize {
+		list = list[:pageSize]
+	}
+	return list, nil
 }
 
 func currentProjectRoot(path string) string {
@@ -338,7 +353,12 @@ func (s *Service) listTeamsForSession(ctx context.Context, root, sessionID strin
 		}
 		out = append(out, team)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
 	return out, nil
 }
 
@@ -505,6 +525,12 @@ func (s *Service) handleTeamRequest(ctx context.Context, msg ClientMsg) (ServerM
 		return ServerMsg{Type: msg.Op, Team: &team}, createErr
 	case "team_list":
 		list, listErr := s.listTeamsForSession(ctx, root, msg.SessionID, nil)
+		if listErr == nil {
+			pageSize := teams.PageSize(msg.Limit)
+			if len(list) > pageSize {
+				list = list[:pageSize]
+			}
+		}
 		return ServerMsg{Type: msg.Op, Teams: list}, listErr
 	case "team_get":
 		team, getErr := s.getTeamForSession(ctx, root, msg.SessionID, msg.TeamID, nil)

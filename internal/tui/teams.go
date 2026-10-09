@@ -25,7 +25,7 @@ type teamUIState struct {
 }
 
 func registerTeamCommands(host *commandHost, registry *commands.Registry) {
-	registry.Register(&commands.Command{Name: "teams", Description: "列出、创建或关闭会话团队", ArgPrompt: "list | create 名称 | close ID | coordinator on|off", Kind: commands.KindLocal, Local: func(args string) {
+	registry.Register(&commands.Command{Name: "teams", Description: "列出、创建或关闭会话团队", ArgPrompt: "list [limit] | create 名称 | close ID | coordinator on|off", Kind: commands.KindLocal, Local: func(args string) {
 		m := host.model
 		fields := strings.Fields(args)
 		if m.ActiveSession == "" {
@@ -34,8 +34,16 @@ func registerTeamCommands(host *commandHost, registry *commands.Registry) {
 		}
 		var req conversation.ClientMsg
 		switch {
-		case len(fields) == 1 && fields[0] == "list":
+		case (len(fields) == 1 || len(fields) == 2) && fields[0] == "list":
 			req = conversation.ClientMsg{Op: "team_list", SessionID: m.ActiveSession}
+			if len(fields) == 2 {
+				limit, err := strconv.Atoi(fields[1])
+				if err != nil || limit < 1 || limit > teams.MaxPageSize {
+					m.Status = "用法：/teams list [条数，1-100]"
+					return
+				}
+				req.Limit = limit
+			}
 		case len(fields) >= 2 && fields[0] == "create":
 			name := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(args), "create"))
 			_, nameErr := teams.NormalizeName(name)
@@ -53,7 +61,7 @@ func registerTeamCommands(host *commandHost, registry *commands.Registry) {
 		case len(fields) == 2 && fields[0] == "coordinator" && (fields[1] == "on" || fields[1] == "off"):
 			req = conversation.ClientMsg{Op: "team_coordinator", SessionID: m.ActiveSession, CoordinatorOn: fields[1] == "on"}
 		default:
-			m.Status = "用法：/teams list | /teams create <名称> | /teams close <ID> | /teams coordinator on|off"
+			m.Status = "用法：/teams list [条数] | /teams create <名称> | /teams close <ID> | /teams coordinator on|off"
 			return
 		}
 		sendTeamRequest(host, req, "正在读取团队…")
