@@ -14,7 +14,7 @@
 - [ ] **AC6 取消恢复：** 父completed/failed/断socket后团队继续；父显式取消及独立stop只作用关联turn；service关闭清理自身worker/watchers；首queued前、queued/running/stopping、child terminal/run/idle/close gap恢复两次无重跑；积压保留、显式resume才继续且预算不清零。（验证：双parent/双team、持久fixture/provider计数。增量证据：跨team member stop 只取消目标 child，另一team的held turn/history保持原值并可完成；child delegation terminal 到 run/team terminal 的恢复空档也已通过服务启动恢复和重复恢复用例。其余组合仍开放。）
 - [ ] **AC7 协调器：** run开始前绑定授权team，prompt/schemas/hard executor一致、当前run模式静态；文件读写/搜索/command/MCP/network/fork/D递归/todo明确拒绝；member不能伪lead、越权新建成员；用户仍可close/stop并退出下一run模式。（验证：direct-call fake provider及gate/hook/audit。增量证据：直接伪造 `task_output`/`task_stop` 会先于后台任务服务、permission gate、hook 和 MCP 被拒绝；其余矩阵仍开放。）
 - [ ] **AC8 有界与隐私：** service/team/member/turn累计额度、message pending/batch、lead32KiB、task/request/query全上限生效；入队/终态/关闭持久失败明确可恢复；日志/UI没有原始角色、thinking、credential、child transcript；消息/计划作为脱敏显式参考数据。（验证：边界/超限/故障/敏感标记fixtures。增量证据：未决 plan/shutdown 限制、plan/feedback 正文上限、MaxMemberTurns=16、service拒绝第257项team task及terminal append-gap恢复都有本地定向服务测试；其余额度、持久故障恢复和联合隐私矩阵仍开放。）
-- [ ] **AC9 组合回归：** 完整client/TUI协作路径、M05 compaction前后team facts不丢、游标重连不覆盖parent；A/B/C/D、M06 todo、普通Session/Goal、权限、候选与独立目标验证保持通过。（验证：fake集成及已授权云端Go/E2E/package。）
+- [ ] **AC9 组合回归：** 完整client/TUI协作路径、M05 compaction前后team facts不丢、游标重连不覆盖parent；A/B/C/D、M06 todo、普通Session/Goal、权限、候选与独立目标验证保持通过。（验证：fake集成及已授权云端Go/E2E/package。增量证据：`TestTeamTUIFactsSurviveParentCompactionAndSocketReconnect` 通过真实TUI slash命令与Unix socket创建team/message/task，注入fake parent compaction boundary及后续事件，断开后按cursor重连并验证有序、无重复；team projection及TUI重新查询的facts保持一致。focused测试本地通过（2026-10-10）；完整AC9仍开放。）
 
 ## 用户与父工具完整场景
 

@@ -67,15 +67,22 @@ func TestRewindJournalLifecycle(t *testing.T) {
 	}
 }
 
-func TestReconcileRewindInterruptedBeforeSwap(t *testing.T) {
+func TestReconcileLegacyRewindCompletesPreparedTransaction(t *testing.T) {
 	s, _ := newGoalStore(t)
 	ctx := context.Background()
-	_, digest := rewindCandidate(t, s, ctx, map[string]string{"a.txt": "one"})
+	root, digest := rewindCandidate(t, s, ctx, map[string]string{"a.txt": "one"})
 	staging := filepath.Join(t.TempDir(), "staging")
 	if err := os.MkdirAll(staging, 0700); err != nil {
 		t.Fatal(err)
 	}
-	j := RewindJournal{ID: "rw-1", CandidateID: "cand", SnapshotID: "snap-1", ExpectedDigest: digest, TargetDigest: "target", StagingDir: staging}
+	if err := os.WriteFile(filepath.Join(staging, "a.txt"), []byte("snapshot"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, targetDigest, err := candidate.BuildManifest(staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := RewindJournal{ID: "rw-1", CandidateID: "cand", SnapshotID: "snap-1", ExpectedDigest: digest, TargetDigest: targetDigest, StagingDir: staging}
 	if err := s.BeginRewind(ctx, j); err != nil {
 		t.Fatal(err)
 	}
@@ -83,14 +90,110 @@ func TestReconcileRewindInterruptedBeforeSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, ok, _ := s.UnfinishedRewindFor(ctx, "cand"); ok {
-		t.Fatal("pre-swap interruption not finalized")
+		t.Fatal("prepared rewind was not finalized")
 	}
 	if _, err := os.Lstat(staging); !os.IsNotExist(err) {
-		t.Fatal("staging directory not cleaned")
+		t.Fatalf("spent staging root not cleaned: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "a.txt"))
+	if err != nil || string(got) != "snapshot" {
+		t.Fatalf("candidate did not recover valid legacy target: %q err=%v", got, err)
 	}
 	rec, err := s.GetCandidate(ctx, "cand")
-	if err != nil || rec.Candidate.CandidateDigest != digest {
-		t.Fatalf("candidate changed by pre-swap recovery: %+v", rec)
+	if err != nil || rec.Candidate.CandidateDigest != targetDigest {
+		t.Fatalf("candidate after valid legacy recovery: %+v err=%v", rec, err)
+	}
+}
+
+func TestReconcileLegacyRewindRetainsReplacedStaging(t *testing.T) {
+	s, _ := newGoalStore(t)
+	ctx := context.Background()
+	root, oldDigest := rewindCandidate(t, s, ctx, map[string]string{"board": "original"})
+	staging := filepath.Join(t.TempDir(), "staging")
+	if err := os.Mkdir(staging, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "board"), []byte("snapshot"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, targetDigest, err := candidate.BuildManifest(staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := RewindJournal{ID: "rw-replaced-staging", CandidateID: "cand", SnapshotID: "snap-1", ExpectedDigest: oldDigest, TargetDigest: targetDigest, StagingDir: staging}
+	if err := s.BeginRewind(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+	originalStaging := staging + ".original"
+	if err := os.Rename(staging, originalStaging); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(staging, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "board"), []byte("unknown replacement"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	replacementInfo, err := os.Stat(staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileRewinds(ctx); err == nil || !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("replaced legacy staging was not blocked: %v", err)
+	}
+	var phase string
+	if err := s.DB().QueryRow(`SELECT phase FROM rewind_journal WHERE id=?`, j.ID).Scan(&phase); err != nil || phase != RewindBlocked {
+		t.Fatalf("rewind phase=%q err=%v; want blocked", phase, err)
+	}
+	got, err := os.ReadFile(filepath.Join(staging, "board"))
+	currentInfo, statErr := os.Stat(staging)
+	if err != nil || string(got) != "unknown replacement" || statErr != nil || !os.SameFile(replacementInfo, currentInfo) {
+		t.Fatalf("replacement staging changed: bytes=%q info=%v err=%v stat=%v", got, currentInfo, err, statErr)
+	}
+	original, err := os.ReadFile(filepath.Join(originalStaging, "board"))
+	if err != nil || string(original) != "snapshot" {
+		t.Fatalf("original staging was lost: %q err=%v", original, err)
+	}
+	board, err := os.ReadFile(filepath.Join(root, "board"))
+	if err != nil || string(board) != "original" {
+		t.Fatalf("candidate changed during blocked recovery: %q err=%v", board, err)
+	}
+	rec, err := s.GetCandidate(ctx, "cand")
+	if err != nil || rec.Candidate.CandidateDigest != oldDigest || rec.Candidate.Status != "ready" {
+		t.Fatalf("candidate record changed during blocked recovery: %+v err=%v", rec, err)
+	}
+}
+
+func TestReconcileLegacyRewindWithoutRecordedIdentityRetainsStaging(t *testing.T) {
+	s, _ := newGoalStore(t)
+	ctx := context.Background()
+	root, oldDigest := rewindCandidate(t, s, ctx, map[string]string{"board": "original"})
+	staging := filepath.Join(t.TempDir(), "staging")
+	if err := os.Mkdir(staging, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "board"), []byte("snapshot"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, targetDigest, err := candidate.BuildManifest(staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := RewindJournal{ID: "rw-missing-identity", CandidateID: "cand", SnapshotID: "snap-1", ExpectedDigest: oldDigest, TargetDigest: targetDigest, StagingDir: staging}
+	if err := s.BeginRewind(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec(`UPDATE rewind_journal SET expected_root_identity='',target_root_identity='' WHERE id=?`, j.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileRewinds(ctx); err == nil || !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("legacy rewind without identities was not blocked: %v", err)
+	}
+	for path, want := range map[string]string{filepath.Join(root, "board"): "original", filepath.Join(staging, "board"): "snapshot"} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("unidentified rewind changed %s: got=%q want=%q err=%v", path, got, want, err)
+		}
 	}
 }
 
@@ -98,23 +201,24 @@ func TestReconcileRewindCompletesSwap(t *testing.T) {
 	s, _ := newGoalStore(t)
 	ctx := context.Background()
 	root, oldDigest := rewindCandidate(t, s, ctx, map[string]string{"a.txt": "one"})
-	// Simulate the completed exchange: the candidate now holds the snapshot.
-	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("two"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	_, newDigest, err := candidate.BuildManifest(root)
-	if err != nil {
-		t.Fatal(err)
-	}
 	staging := filepath.Join(t.TempDir(), "staging")
 	if err := os.MkdirAll(staging, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "a.txt"), []byte("two"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, newDigest, err := candidate.BuildManifest(staging)
+	if err != nil {
 		t.Fatal(err)
 	}
 	j := RewindJournal{ID: "rw-1", CandidateID: "cand", SnapshotID: "snap-1", ExpectedDigest: oldDigest, TargetDigest: newDigest, StagingDir: staging}
 	if err := s.BeginRewind(ctx, j); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetRewindPhase(ctx, "rw-1", RewindPrepared, RewindSwapped, ""); err != nil {
+	// Simulate a crash immediately after the atomic exchange but before its
+	// journal phase advances.
+	if err := candidate.SwapWithStaging(root, staging); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.ReconcileRewinds(ctx); err != nil {
