@@ -134,6 +134,13 @@ type Runner interface {
 	Cancel(runID string) error
 }
 
+// TrustedExecutorRunner allows a host to select a per-run executor through a
+// trusted in-process call. It must never be populated from an ExecutionRequest
+// decoded from the client protocol.
+type TrustedExecutorRunner interface {
+	StartWithExecutorFactory(context.Context, ExecutionRequest, ExecutorFactory) (*RunHandle, error)
+}
+
 // DelegationEvent is a user-visible lifecycle update. Summary is intended for
 // concise stage text only; model reasoning and raw child transcripts are not
 // represented by this type.

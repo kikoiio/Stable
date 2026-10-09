@@ -100,6 +100,20 @@ func NewRunner(provider llm.Provider, options RunnerOptions) *StreamingRunner {
 }
 
 func (r *StreamingRunner) Start(parent context.Context, request ExecutionRequest) (*RunHandle, error) {
+	return r.start(parent, request, nil)
+}
+
+// StartWithExecutorFactory is the trusted in-process entry point for a
+// per-run executor. The factory is captured in the private runner entry and
+// is not part of ExecutionRequest or the wire protocol.
+func (r *StreamingRunner) StartWithExecutorFactory(parent context.Context, request ExecutionRequest, factory ExecutorFactory) (*RunHandle, error) {
+	if factory == nil {
+		return nil, errors.New("trusted per-run executor factory is required")
+	}
+	return r.start(parent, request, factory)
+}
+
+func (r *StreamingRunner) start(parent context.Context, request ExecutionRequest, factory ExecutorFactory) (*RunHandle, error) {
 	if r.provider == nil {
 		return nil, errors.New("streaming provider is not configured")
 	}
@@ -119,7 +133,7 @@ func (r *StreamingRunner) Start(parent context.Context, request ExecutionRequest
 	r.runs[request.RunID] = runEntry{cancel: cancel, sink: sink}
 	r.mu.Unlock()
 	go func() {
-		outcome := r.execute(ctx, request, events, sink)
+		outcome := r.execute(ctx, request, events, sink, factory)
 		r.mu.Lock()
 		sink.close()
 		delete(r.runs, request.RunID)
@@ -182,7 +196,7 @@ func ValidateRequest(request ExecutionRequest) error {
 	return nil
 }
 
-func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest, output chan<- ExecutionEvent, sink *runEventSink) RunOutcome {
+func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest, output chan<- ExecutionEvent, sink *runEventSink, trustedFactory ExecutorFactory) RunOutcome {
 	messages := append([]llm.Message(nil), request.Messages...)
 	msgSeqs := make([]uint64, len(messages)) // request history predates this run
 	budget := r.runBudget(request)
@@ -355,12 +369,16 @@ func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest,
 		if budget.MaxTotalDuration > 0 && time.Since(startedAt) >= budget.MaxTotalDuration {
 			return r.budgetExhausted(request, output, sink, "max_total_duration")
 		}
-		if r.options.ExecutorFactory == nil {
+		executorFactory := trustedFactory
+		if executorFactory == nil {
+			executorFactory = r.options.ExecutorFactory
+		}
+		if executorFactory == nil {
 			return r.terminal(request, output, sink, RunAwaitingTools, nil)
 		}
 		if executor == nil {
 			var err error
-			executor, err = r.options.ExecutorFactory.ForRun(request)
+			executor, err = executorFactory.ForRun(request)
 			if err != nil || executor == nil {
 				providerErr := &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not initialize tool executor"}
 				payload, _ := json.Marshal(providerErr)

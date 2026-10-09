@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -487,6 +488,46 @@ func TestRunnerCancellationStopsToolExecution(t *testing.T) {
 	}
 	if outcome := <-handle.Done; outcome.Status != RunCancelled {
 		t.Fatalf("outcome=%+v", outcome)
+	}
+}
+
+func TestTrustedPerRunExecutorOverridesGlobalFactory(t *testing.T) {
+	var calls atomic.Int32
+	provider := providerFunc(func(context.Context, llm.Request) (<-chan llm.Event, <-chan error) {
+		events := make(chan llm.Event, 2)
+		if calls.Add(1) == 1 {
+			events <- llm.Event{Kind: llm.ToolCallComplete, Tool: &llm.ToolCall{ID: "trusted-call", Name: "read_file", Arguments: json.RawMessage(`{"file_path":"a"}`), Complete: true}}
+		} else {
+			events <- llm.Event{Kind: llm.TextDelta, Text: "done"}
+		}
+		events <- llm.Event{Kind: llm.StreamEnd, StopReason: "completed"}
+		close(events)
+		errs := make(chan error)
+		close(errs)
+		return events, errs
+	})
+	globalCalls := atomic.Int32{}
+	trustedCalls := atomic.Int32{}
+	global := executorFactoryFunc(func(ExecutionRequest) (RunExecutor, error) {
+		globalCalls.Add(1)
+		return nil, errors.New("global factory must not be used")
+	})
+	trusted := executorFactoryFunc(func(ExecutionRequest) (RunExecutor, error) {
+		trustedCalls.Add(1)
+		return &FakeExecutor{Script: []ToolOutcome{{Status: ToolSucceeded, Content: "ok"}}}, nil
+	})
+	runner := NewRunner(provider, RunnerOptions{MaxRetries: -1, ExecutorFactory: global})
+	handle, err := runner.StartWithExecutorFactory(context.Background(), sessionRequest("trusted-factory"), trusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range handle.Events {
+	}
+	if outcome := <-handle.Done; outcome.Status != RunCompleted {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	if globalCalls.Load() != 0 || trustedCalls.Load() != 1 {
+		t.Fatalf("global factory calls=%d trusted factory calls=%d", globalCalls.Load(), trustedCalls.Load())
 	}
 }
 

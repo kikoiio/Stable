@@ -58,6 +58,28 @@ func ReadOnlyToolSchemas() []llm.ToolSchema {
 	return schemas
 }
 
+// WorkspaceWriterToolSchemas returns the fixed session workspace surface.
+// The executor independently enforces this same allowlist.
+func WorkspaceWriterToolSchemas() []llm.ToolSchema {
+	registry := tools.CreateDefaultTools().Registry
+	wanted := map[string]bool{"read_file": true, "glob": true, "grep": true, "write_file": true, "edit_file": true, "command": true}
+	var schemas []llm.ToolSchema
+	for _, item := range registry.GetAllSchemas() {
+		name, _ := item["name"].(string)
+		if !wanted[name] {
+			continue
+		}
+		description, _ := item["description"].(string)
+		input, _ := item["input_schema"].(map[string]any)
+		schemas = append(schemas, llm.ToolSchema{Name: name, Description: description, InputSchema: input})
+	}
+	sort.Slice(schemas, func(i, j int) bool { return schemas[i].Name < schemas[j].Name })
+	if len(schemas) != len(wanted) {
+		return nil
+	}
+	return schemas
+}
+
 func schemaToLLM(item map[string]any) llm.ToolSchema {
 	name, _ := item["name"].(string)
 	description, _ := item["description"].(string)

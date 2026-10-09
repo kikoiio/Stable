@@ -78,6 +78,7 @@ type Service struct {
 	statuses          map[string]core.GoalStatus
 	activeRuns        map[string]string
 	activeRequests    map[string]agent.ExecutionRequest
+	runDone           map[string]chan struct{}
 	activeForkRuns    map[string]*forkRunState
 	closing           bool
 	notifiedApprovals map[string]bool
@@ -105,14 +106,21 @@ type Service struct {
 	// skills is the M07-A skill gate copied from deps at Serve; nil closes
 	// the skill surface. The gate itself also keeps a service reference (set
 	// by Bind) so its event appends share the service event mutex.
-	skills          *SkillGate
-	hooks           *HookGate
-	mcp             *mcp.Manager
-	mcpMu           sync.Mutex
-	mcpInstructions map[string]bool
-	teamScheduler   *teamScheduler
-	workspaceMu     sync.Mutex
-	workspaces      map[string]*workspace.LifecycleService
+	skills               *SkillGate
+	hooks                *HookGate
+	mcp                  *mcp.Manager
+	mcpMu                sync.Mutex
+	mcpInstructions      map[string]bool
+	teamScheduler        *teamScheduler
+	workspaceMu          sync.Mutex
+	workspaceAdmissionMu sync.Mutex
+	workspaces           map[string]*workspace.LifecycleService
+	workspaceRuns        map[string]workspaceLeadRun
+}
+
+type workspaceLeadRun struct {
+	lease   workspace.WriterLease
+	manager *workspace.LifecycleService
 }
 
 type clientSubscription struct {
@@ -139,7 +147,7 @@ func Serve(ctx context.Context, deps Deps) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{deps: deps, lifeCtx: ctx, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, activeRequests: map[string]agent.ExecutionRequest{}, activeForkRuns: map[string]*forkRunState{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks, mcp: deps.MCP, mcpInstructions: map[string]bool{}, workspaces: map[string]*workspace.LifecycleService{}}
+	s := &Service{deps: deps, lifeCtx: ctx, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, activeRequests: map[string]agent.ExecutionRequest{}, runDone: map[string]chan struct{}{}, activeForkRuns: map[string]*forkRunState{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks, mcp: deps.MCP, mcpInstructions: map[string]bool{}, workspaces: map[string]*workspace.LifecycleService{}, workspaceRuns: map[string]workspaceLeadRun{}}
 	s.teamScheduler = newTeamScheduler(s)
 	if deps.AgentTasks != nil {
 		deps.AgentTasks.Bind(s)
@@ -176,22 +184,51 @@ func (s *Service) acceptLoop(ctx context.Context) {
 }
 
 func (s *Service) Close() error {
+	s.workspaceAdmissionMu.Lock()
 	s.mu.Lock()
 	s.closing = true
 	for _, run := range s.activeForkRuns {
 		run.cancel()
 	}
+	runIDs := make([]string, 0, len(s.activeRuns))
+	done := make([]<-chan struct{}, 0, len(s.runDone))
+	for runID := range s.activeRuns {
+		runIDs = append(runIDs, runID)
+	}
+	for _, finished := range s.runDone {
+		done = append(done, finished)
+	}
 	s.mu.Unlock()
+	s.workspaceAdmissionMu.Unlock()
+	var closeErr error
+	if err := s.ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		closeErr = errors.Join(closeErr, err)
+	}
+	if s.deps.Runner != nil {
+		for _, runID := range runIDs {
+			closeErr = errors.Join(closeErr, s.deps.Runner.Cancel(runID))
+		}
+	}
 	if s.deps.AgentTasks != nil {
 		s.deps.AgentTasks.Close()
 	}
 	if s.teamScheduler != nil {
 		s.teamScheduler.close()
 	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, finished := range done {
+		select {
+		case <-finished:
+		case <-waitCtx.Done():
+			// A live run may still own a workspace writer. Leave its manager
+			// and durable lease open so restart recovery can mark it interrupted.
+			return errors.Join(closeErr, fmt.Errorf("wait for active runs before closing workspace managers: %w", waitCtx.Err()))
+		}
+	}
 	if s.hooks != nil {
 		s.hooks.Close()
 	}
-	closeErr := s.ln.Close()
 	s.workspaceMu.Lock()
 	for key, manager := range s.workspaces {
 		closeErr = errors.Join(closeErr, manager.Close(context.Background()))

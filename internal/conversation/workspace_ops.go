@@ -47,6 +47,63 @@ func (s *Service) CanSwitchWorkspace(ctx context.Context, scope workspace.Scope)
 	return nil
 }
 
+// LockWorkspaceBinding shares one admission boundary between lifecycle
+// mutations and run start. The caller keeps the returned unlock function
+// until its persisted binding operation or RunStarted fact is complete.
+func (s *Service) LockWorkspaceBinding(ctx context.Context, scope workspace.Scope) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.workspaceAdmissionMu.Lock()
+	if err := ctx.Err(); err != nil {
+		s.workspaceAdmissionMu.Unlock()
+		return nil, err
+	}
+	s.mu.Lock()
+	closing := s.closing
+	s.mu.Unlock()
+	if closing {
+		s.workspaceAdmissionMu.Unlock()
+		return nil, workspace.ErrUnavailable
+	}
+	return s.workspaceAdmissionMu.Unlock, nil
+}
+
+// StopWorkspaceWriter is used only by the lifecycle manager after it has
+// durably recorded a stopping intent. It waits for consumeRun to observe the
+// actual Runner.Done signal and finish lease settlement.
+func (s *Service) StopWorkspaceWriter(ctx context.Context, lease workspace.WriterLease) error {
+	s.mu.Lock()
+	lead, ok := s.workspaceRuns[lease.RunID]
+	done := s.runDone[lease.RunID]
+	if ok && (lead.lease.WorkspaceID != lease.WorkspaceID || lead.lease.Generation != lease.Generation || !lead.lease.Scope.SameOwner(lease.Scope)) {
+		s.mu.Unlock()
+		return workspace.ErrOwnership
+	}
+	s.mu.Unlock()
+	if !ok {
+		if s.deps.AgentTasks != nil {
+			return s.deps.AgentTasks.StopWorkspaceWriter(ctx, lease)
+		}
+		return workspace.ErrUnavailable
+	}
+	if s.deps.Runner == nil {
+		return workspace.ErrUnavailable
+	}
+	if err := s.deps.Runner.Cancel(lease.RunID); err != nil {
+		return err
+	}
+	if done == nil {
+		return workspace.ErrUnavailable
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (s *Service) workspaceService(formalRoot string) (*workspace.LifecycleService, error) {
 	if s.deps.WorkspaceStateRoot == "" {
 		return nil, workspace.ErrUnavailable
@@ -70,7 +127,7 @@ func (s *Service) workspaceService(formalRoot string) (*workspace.LifecycleServi
 	if err != nil {
 		return nil, err
 	}
-	manager, err := workspace.NewService(layout, workspace.DefaultLimits(), workspace.ServiceDependencies{IdleGuard: s, Stopper: s.deps.AgentTasks, Exporter: workspaceCandidateExporter{service: s}})
+	manager, err := workspace.NewService(layout, workspace.DefaultLimits(), workspace.ServiceDependencies{IdleGuard: s, Stopper: s, Exporter: workspaceCandidateExporter{service: s}})
 	if err != nil {
 		return nil, err
 	}

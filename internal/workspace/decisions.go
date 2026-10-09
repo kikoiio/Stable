@@ -183,6 +183,11 @@ func (s *LifecycleService) PreviewDiscardUser(ctx context.Context, scope Scope, 
 }
 
 func (s *LifecycleService) RemoveDiscardUser(ctx context.Context, scope Scope, id, userID, decisionID, digest string, generation uint64) (Snapshot, error) {
+	unlock, err := s.lockBindingOperation(ctx, scope)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record, err := s.removableRecord(ctx, scope, id)

@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"stable/internal/agent"
 	"stable/internal/permission"
 )
 
@@ -21,6 +22,13 @@ import (
 // changes are rejected unless no run can still be using the current binding.
 type IdleGuard interface {
 	CanSwitchWorkspace(context.Context, Scope) error
+}
+
+// BindingAdmission serializes lifecycle binding changes with run admission.
+// The returned release function must be called after the complete persisted
+// operation, not immediately after its idle check.
+type BindingAdmission interface {
+	LockWorkspaceBinding(context.Context, Scope) (func(), error)
 }
 
 // WriterStopper must return only after the sandbox process tree has exited.
@@ -416,6 +424,11 @@ func (s *LifecycleService) List(ctx context.Context, scope Scope, cursor uint64,
 }
 
 func (s *LifecycleService) Enter(ctx context.Context, scope Scope, id string) (Snapshot, error) {
+	unlock, err := s.lockBindingOperation(ctx, scope)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer unlock()
 	if err := s.guardSwitch(ctx, scope); err != nil {
 		return Snapshot{}, err
 	}
@@ -452,9 +465,11 @@ func (s *LifecycleService) Enter(ctx context.Context, scope Scope, id string) (S
 }
 
 func (s *LifecycleService) Exit(ctx context.Context, scope Scope) (Snapshot, error) {
-	if err := s.guardSwitch(ctx, scope); err != nil {
+	unlock, err := s.lockBindingOperation(ctx, scope)
+	if err != nil {
 		return Snapshot{}, err
 	}
+	defer unlock()
 	id, err := s.readBinding(scope)
 	if err != nil {
 		return Snapshot{}, err
@@ -473,6 +488,9 @@ func (s *LifecycleService) Exit(ctx context.Context, scope Scope) (Snapshot, err
 		if _, err := s.StopWriter(ctx, scope, id); err != nil {
 			return Snapshot{}, err
 		}
+	}
+	if err := s.guardSwitch(ctx, scope); err != nil {
+		return Snapshot{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -497,6 +515,11 @@ func (s *LifecycleService) Exit(ctx context.Context, scope Scope) (Snapshot, err
 }
 
 func (s *LifecycleService) Keep(ctx context.Context, scope Scope, id string) (Snapshot, error) {
+	unlock, err := s.lockBindingOperation(ctx, scope)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer unlock()
 	s.mu.Lock()
 	_, writing := s.writers[id]
 	s.mu.Unlock()
@@ -519,10 +542,24 @@ func (s *LifecycleService) Keep(ctx context.Context, scope Scope, id string) (Sn
 }
 
 func (s *LifecycleService) AcquireWriter(ctx context.Context, scope Scope, id, runID string) (WriterLease, error) {
+	return s.acquireWriter(ctx, scope, id, runID, false)
+}
+
+// AcquireLeadWriter is restricted to a service-authenticated ordinary session
+// lead run whose workspace binding is already held under binding admission.
+// The lead authority and writer run ID are intentionally identical.
+func (s *LifecycleService) AcquireLeadWriter(ctx context.Context, scope Scope, id, runID string) (WriterLease, error) {
+	if scope.Work.Kind != agent.WorkSession || scope.OriginRunID != runID || scope.OriginTaskID != "" {
+		return WriterLease{}, ErrOwnership
+	}
+	return s.acquireWriter(ctx, scope, id, runID, true)
+}
+
+func (s *LifecycleService) acquireWriter(ctx context.Context, scope Scope, id, runID string, allowSameRun bool) (WriterLease, error) {
 	if err := scope.ValidateAuthority(); err != nil {
 		return WriterLease{}, err
 	}
-	if scope.Authority.Mode == permission.ModePlan || scope.Authority.RunID == runID {
+	if scope.Authority.Mode == permission.ModePlan || scope.Authority.RunID == runID && !allowSameRun {
 		return WriterLease{}, ErrOwnership
 	}
 	if !ValidID(runID) {
@@ -1030,6 +1067,11 @@ func (s *LifecycleService) StopWriterIfActive(ctx context.Context, scope Scope, 
 }
 
 func (s *LifecycleService) RemoveClean(ctx context.Context, scope Scope, id string) (Snapshot, error) {
+	unlock, err := s.lockBindingOperation(ctx, scope)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record, err := s.removableRecord(ctx, scope, id)
@@ -1135,6 +1177,19 @@ func (s *LifecycleService) guardSwitch(ctx context.Context, scope Scope) error {
 		return ErrUnavailable
 	}
 	return s.deps.IdleGuard.CanSwitchWorkspace(ctx, scope)
+}
+
+func (s *LifecycleService) lockBindingOperation(ctx context.Context, scope Scope) (func(), error) {
+	if err := scope.Validate(); err != nil {
+		return nil, err
+	}
+	if s.deps.IdleGuard == nil {
+		return nil, ErrUnavailable
+	}
+	if admission, ok := s.deps.IdleGuard.(BindingAdmission); ok {
+		return admission.LockWorkspaceBinding(ctx, scope)
+	}
+	return nil, ErrUnavailable
 }
 
 func (s *LifecycleService) transition(ctx context.Context, scope Scope, record Record, to State) (Snapshot, error) {

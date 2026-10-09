@@ -18,6 +18,12 @@ import (
 type idleWorkspaceGuard struct{ err error }
 
 func (g idleWorkspaceGuard) CanSwitchWorkspace(context.Context, Scope) error { return g.err }
+func (g idleWorkspaceGuard) LockWorkspaceBinding(context.Context, Scope) (func(), error) {
+	if g.err != nil {
+		return nil, g.err
+	}
+	return func() {}, nil
+}
 
 type previewWorkspaceExporter struct{}
 

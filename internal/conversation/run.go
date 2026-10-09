@@ -21,6 +21,7 @@ import (
 	"stable/internal/redact"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
+	"stable/internal/workspace"
 )
 
 func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan ServerMsg) error {
@@ -73,12 +74,97 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if _, err := sessionlog.SessionPath(s.deps.ProjectRoot, msg.SessionID); err != nil {
 		return err
 	}
+	// Run starts and workspace binding changes share this admission lock. Keep
+	// it through lease acquisition, RunStarted persistence, Runner.Start, and
+	// active-run registration so an Enter/Exit cannot slip into the gap.
+	s.workspaceAdmissionMu.Lock()
+	if err := ctx.Err(); err != nil {
+		s.workspaceAdmissionMu.Unlock()
+		return err
+	}
+	admissionHeld := true
+	defer func() {
+		if admissionHeld {
+			s.workspaceAdmissionMu.Unlock()
+		}
+	}()
+	s.mu.Lock()
+	closing := s.closing
+	s.mu.Unlock()
+	if closing {
+		return workspace.ErrUnavailable
+	}
+	var teamCoordinatorMode bool
+	if request.Work.Kind == agent.WorkSession {
+		teamCoordinatorMode, err = teamCoordinatorModeEnabled(s.deps.ProjectRoot, msg.SessionID)
+		if err != nil {
+			return err
+		}
+		request.TeamCoordinator = teamCoordinatorMode
+	}
+	var leadLease *workspace.WriterLease
+	var leadManager *workspace.LifecycleService
+	var trustedFactory agent.ExecutorFactory
+	leaseTransferred := false
+	defer func() {
+		if leadLease != nil && !leaseTransferred {
+			_, _ = leadManager.ReleaseCompletedWriter(context.Background(), *leadLease)
+		}
+	}()
+	if request.Work.Kind == agent.WorkSession && s.deps.WorkspaceStateRoot != "" {
+		projectRoot, scope, scopeErr := s.workspaceScope(ctx, msg)
+		if scopeErr != nil {
+			return scopeErr
+		}
+		leadManager, err = s.workspaceService(projectRoot)
+		if err != nil {
+			return err
+		}
+		boundID, bindingErr := leadManager.Binding(scope)
+		if bindingErr != nil {
+			return bindingErr
+		}
+		if boundID != "" {
+			if mode == permission.ModePlan || teamCoordinatorMode || request.TeamTurn != nil || request.TeamUser {
+				return workspace.ErrOwnership
+			}
+			if _, ok := s.deps.Runner.(agent.TrustedExecutorRunner); !ok {
+				return errors.New("workspace-bound runs require trusted per-run executor support")
+			}
+			scope.Authority = authority
+			scope.OriginRunID = request.RunID
+			lease, acquireErr := leadManager.AcquireLeadWriter(ctx, scope, boundID, request.RunID)
+			if acquireErr != nil {
+				return acquireErr
+			}
+			leadLease = &lease
+			base := s.deps.ExecutorFactory
+			if base == nil {
+				return errors.New("workspace-bound runs require a trusted executor factory")
+			}
+			trustedFactory = execution.WorkspaceWriterExecutorFactory(base, lease, leadManager)
+			writerSchemas := execution.WorkspaceWriterToolSchemas()
+			if trustedFactory == nil || len(writerSchemas) != 6 {
+				return errors.New("workspace writer executor surface is unavailable")
+			}
+			request.ToolSchemas = writerSchemas
+			request.AllowedScope = []string{lease.Authority.AllowedRoot}
+			request.PermissionBounds, err = json.Marshal(lease.Authority)
+			if err != nil {
+				return fmt.Errorf("encode trusted workspace writer authority: %w", err)
+			}
+		}
+	}
 	work := sessionlog.RunStarted{RunID: request.RunID, WorkKind: string(request.Work.Kind), GoalID: request.Work.GoalID, WorkItemID: request.Work.WorkItemID, Intent: request.Intent}
+	if leadLease != nil {
+		work.WorkspaceID = leadLease.WorkspaceID
+		work.WorkspaceGeneration = leadLease.Generation
+	}
 	// The skill inventory is refreshed before the event mutex is taken: the
 	// gate journals its events under the same mutex, so calling it here keeps
 	// the lock order gate → event and avoids a re-entrant acquire.
 	var skillPrefix []llm.Message
-	if request.Work.Kind == agent.WorkSession && s.skills != nil {
+	if request.Work.Kind == agent.WorkSession && s.skills != nil && leadLease == nil {
 		snapshotText, deltaText, invErr := s.skills.SkillInventory(ctx, msg.SessionID)
 		if invErr != nil {
 			return invErr
@@ -91,7 +177,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		}
 	}
 	var mcpPrefix []llm.Message
-	if request.Work.Kind == agent.WorkSession && s.mcp != nil {
+	if request.Work.Kind == agent.WorkSession && s.mcp != nil && leadLease == nil {
 		if instructions := s.mcp.Instructions(); instructions != "" {
 			s.mcpMu.Lock()
 			if !s.mcpInstructions[msg.SessionID] {
@@ -102,7 +188,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		}
 	}
 	var hookPrefix []llm.Message
-	if s.hooks != nil {
+	if s.hooks != nil && leadLease == nil {
 		if notice := s.hooks.DrainNotifications(msg.SessionID); notice != "" {
 			hookPrefix = append(hookPrefix, llm.Message{Role: "user", Content: notice})
 		}
@@ -113,6 +199,10 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		if modeErr != nil {
 			s.eventMu.Unlock()
 			return modeErr
+		}
+		if coordinatorMode != teamCoordinatorMode {
+			s.eventMu.Unlock()
+			return errors.New("session run mode changed during admission")
 		}
 		if coordinatorMode {
 			request.TeamCoordinator = true
@@ -134,6 +224,9 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if request.Work.Kind == agent.WorkSession {
 		history := sessionConversationMessages(s.deps.ProjectRoot, msg.SessionID)
 		systemPrompt := "你是 Stable 的通用 agent。读、搜、列只能访问正式工程只读视图；写、编辑只能写入本次运行的候选区。工具路径使用工作区相对路径。工具结果代表真实受控执行结果。"
+		if leadLease != nil {
+			systemPrompt = "你是 Stable 的受控工作区 agent。读、搜、列只能访问本次绑定工作区的只读基线；写、编辑和命令只能影响本次绑定工作区。正式工程保持不变，变更需稍后单独导出为候选并经用户审核。工具路径使用工作区相对路径。"
+		}
 		if request.TeamCoordinator {
 			systemPrompt += " 当前运行处于团队协调器模式：仅使用团队消息、请求和任务板工具协调成员；不得调用项目文件、命令、MCP、网络、委派、后台任务或 session todo 工具。"
 		}
@@ -194,7 +287,12 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if request.Work.Kind != agent.WorkSession && len(hookPrefix) > 0 {
 		request.Messages = append(hookPrefix, request.Messages...)
 	}
-	handle, err := s.deps.Runner.Start(ctx, request)
+	var handle *agent.RunHandle
+	if trustedFactory != nil {
+		handle, err = s.deps.Runner.(agent.TrustedExecutorRunner).StartWithExecutorFactory(ctx, request, trustedFactory)
+	} else {
+		handle, err = s.deps.Runner.Start(ctx, request)
+	}
 	if err != nil {
 		eventID, idErr := sessionlog.NewID()
 		if idErr == nil {
@@ -217,7 +315,18 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	}
 	s.activeRuns[request.RunID] = request.Work.SessionID
 	s.activeRequests[request.RunID] = request
+	runDone := make(chan struct{})
+	if s.runDone == nil {
+		s.runDone = map[string]chan struct{}{}
+	}
+	s.runDone[request.RunID] = runDone
+	if leadLease != nil {
+		s.workspaceRuns[request.RunID] = workspaceLeadRun{lease: *leadLease, manager: leadManager}
+		leaseTransferred = true
+	}
 	s.mu.Unlock()
+	s.workspaceAdmissionMu.Unlock()
+	admissionHeld = false
 	if s.hooks != nil {
 		// Start the runner first so run_start child progress can be published
 		// into its durable parent event stream. The consumer starts after the
@@ -225,7 +334,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		s.hooks.RunStartRun(ctx, s.hookAgentParent(request), msg.SessionID, request.Intent)
 	}
 	s.broadcastRun(ServerMsg{Type: "run_started", RunID: request.RunID}, msg.SessionID, request.RunID, 0)
-	go s.consumeRun(request, handle)
+	go s.consumeRun(request, handle, leadLease, leadManager, runDone)
 	return nil
 }
 
@@ -328,7 +437,8 @@ func sessionConversationMessages(root, sessionID string) []llm.Message {
 	return messages
 }
 
-func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHandle) {
+func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHandle, lease *workspace.WriterLease, manager *workspace.LifecycleService, runDone chan struct{}) {
+	defer close(runDone)
 	var textOut strings.Builder
 	for event := range handle.Events {
 		if event.Kind == agent.EventTextDelta {
@@ -401,7 +511,11 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 		}
 		s.hooks.RunEndRun(s.hookAgentServiceContext(), s.hookAgentParent(request), request.Work.SessionID, string(outcome.Status), message)
 	}
-	if err := s.finalizeRunCandidate(context.Background(), request); err != nil {
+	if lease != nil {
+		if _, err := manager.ReleaseCompletedWriter(context.Background(), *lease); err != nil {
+			s.broadcastRun(ServerMsg{Type: "error", RunID: request.RunID, Error: "could not settle workspace writer: " + err.Error()}, request.Work.SessionID, request.RunID, 0)
+		}
+	} else if err := s.finalizeRunCandidate(context.Background(), request); err != nil {
 		s.broadcastRun(ServerMsg{Type: "error", RunID: request.RunID, Error: "could not finalize candidate: " + err.Error()}, request.Work.SessionID, request.RunID, 0)
 	}
 	s.broadcastRun(ServerMsg{Type: "run_outcome", RunID: request.RunID, Outcome: &outcome}, request.Work.SessionID, request.RunID, 0)
@@ -409,6 +523,8 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 	s.mu.Lock()
 	delete(s.activeRuns, request.RunID)
 	delete(s.activeRequests, request.RunID)
+	delete(s.runDone, request.RunID)
+	delete(s.workspaceRuns, request.RunID)
 	s.mu.Unlock()
 	s.eventMu.Unlock()
 	if s.deps.AgentTasks != nil {

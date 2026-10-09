@@ -111,8 +111,11 @@ func validAgentIdentity(value string, max int) bool {
 
 func (st *agentTaskState) checkStarted(start RunStarted) error {
 	if start.AgentTaskID == "" {
-		if start.AgentName != "" || start.WorkspaceID != "" || start.WorkspaceGeneration != 0 || (start.TeamID == "" && (start.OriginRunID != "" || start.OriginCallID != "")) {
+		if start.AgentName != "" || (start.TeamID == "" && (start.OriginRunID != "" || start.OriginCallID != "")) {
 			return errors.New("agent source fields require agent_task_id")
+		}
+		if start.WorkspaceID == "" && start.WorkspaceGeneration != 0 || start.WorkspaceID != "" && (!validAgentIdentity(start.WorkspaceID, 128) || start.WorkspaceGeneration == 0) {
+			return errors.New("run workspace identity is invalid")
 		}
 	} else {
 		if !validAgentIdentity(start.AgentTaskID, 128) || !validAgentIdentity(start.AgentName, 64) {
