@@ -49,7 +49,7 @@ mewcode 的 TUI 主文件直接引用二十多个内部模块，涵盖模型、�
 
 ### M09 当前进度（2026-10-09）
 
-M09-A（同步只读协作）、M09-B（fork skill）、M09-C（hook agent）和 M09-D（agent 定义与后台任务 AC1–9）已完成实现与验收；M09-E/F 已实现并提交，但仍有逐项验收缺口，**M09 整体仍未完成**。最新代码验证 SHA `e92b321` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 全部通过：[Go run 37873085954](https://github.com/kikoiio/Stable/actions/runs/37873085954)、[E2E run 37873085933](https://github.com/kikoiio/Stable/actions/runs/37873085933)、[Workspace Linux run 37873085983](https://github.com/kikoiio/Stable/actions/runs/37873085983)。此前 E2E 的 Launchpad PPA signing key endpoint 曾暂时返回 500，失败 job 在后续复跑成功。
+M09-A（同步只读协作）、M09-B（fork skill）、M09-C（hook agent）和 M09-D（agent 定义与后台任务 AC1–9）已完成实现与验收；M09-E/F 已实现并提交，但仍有逐项验收缺口，**M09 整体仍未完成**。最新代码验证 SHA `eba916a` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 全部通过：[Go run 37874596313](https://github.com/kikoiio/Stable/actions/runs/37874596313)、[E2E run 37874596359](https://github.com/kikoiio/Stable/actions/runs/37874596359)、[Workspace Linux run 37874596321](https://github.com/kikoiio/Stable/actions/runs/37874596321)。E2E 的 M03 isolated computer bridge 首次启动返回 EOF，复跑失败 job 后通过。
 
 完整源端对照、已通过证据和剩余完成条件见 [M09 范围与进度](specs/M09/README.md)。D/E/F 的规格均已批准；总体验收以各自 checklist 中的证据和未完成项为准。
 
