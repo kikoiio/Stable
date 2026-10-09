@@ -1,6 +1,6 @@
 # M09-F 受控工作树与并行写入 Checklist
 
-> 状态：规格已批准，实施代码已提交；AC1–9 仍需逐项验收。SHA `ac817faf` 的真实 Linux writer/sandbox/quota workflow、Go build/unit、package 与 E2E 全部 jobs 通过；A/B/C/D旧CI不作为F实现证据（2026-10-09）。
+> 状态：规格已批准，实施代码已提交；AC1–9 仍需逐项验收。SHA `26eafc55` 的真实 Linux writer/sandbox/quota workflow、Go build/unit、package 与 E2E 全部 jobs 通过；A/B/C/D旧CI不作为F实现证据（2026-10-09）。
 
 ## 审批与追溯
 
@@ -94,6 +94,7 @@
 | 当前 task graph service/replay 与 E/F 组合回归 | `f61e2fb` | [Go run 37824906854](https://github.com/kikoiio/Stable/actions/runs/37824906854), [E2E run 37824906843](https://github.com/kikoiio/Stable/actions/runs/37824906843), [M09 Workspace Linux run 37824906787](https://github.com/kikoiio/Stable/actions/runs/37824906787) | Go `build-and-test`/`test-package`、E2E 全部 jobs 与真实 writer sandbox/quota 成功。F 行为未改动，仍记录当前组合回归；不代表 F AC1–9 完整验收。 |
 | 最新 E/F 组合验证 | `35b130bb` | [Go run 37826465763](https://github.com/kikoiio/Stable/actions/runs/37826465763), [E2E run 37826465801](https://github.com/kikoiio/Stable/actions/runs/37826465801), [M09 Workspace Linux run 37826465661](https://github.com/kikoiio/Stable/actions/runs/37826465661) | Go `build-and-test`/`test-package`、E2E 全部 jobs 与真实 writer sandbox/quota 成功。F 行为未改动；不代表 F AC1–9 生命周期/并行写入/用户接收完整验收。 |
 | 最新 E/F 组合验证 | `ac817faf` | [Go run 37828073176](https://github.com/kikoiio/Stable/actions/runs/37828073176), [E2E run 37828073232](https://github.com/kikoiio/Stable/actions/runs/37828073232), [M09 Workspace Linux run 37828073186](https://github.com/kikoiio/Stable/actions/runs/37828073186) | Go `build-and-test`/`test-package`、E2E 全部 jobs 与真实 writer sandbox/quota 成功。F 行为未改动；不代表 F AC1–9 生命周期/并行写入/用户接收完整验收。 |
+| 最新 E/F 组合验证 | `26eafc55` | [Go run 37869857770](https://github.com/kikoiio/Stable/actions/runs/37869857770), [E2E run 37869857737](https://github.com/kikoiio/Stable/actions/runs/37869857737), [M09 Workspace Linux run 37869857758](https://github.com/kikoiio/Stable/actions/runs/37869857758) | Go `build-and-test`/`test-package`、E2E 全部 jobs 与真实 writer sandbox/quota 成功；首次 E2E 仅因 setup 中 Launchpad PPA 暂时 500 失败，重跑失败 job 后成功。F 行为未改动；不代表 F AC1–9 完整验收。 |
 | 当前组合 Go/package、E2E 与真实 writer sandbox/quota | `6121f543e342330dcd90eb38469138b5317074ec` | [Go run 37822847214](https://github.com/kikoiio/Stable/actions/runs/37822847214) `build-and-test`/`test-package`; [E2E run 37822847081](https://github.com/kikoiio/Stable/actions/runs/37822847081); [Workspace Linux run 37822846869](https://github.com/kikoiio/Stable/actions/runs/37822846869) `writer-sandbox-volume` | Go 两 jobs、E2E 所有 jobs 与 disposable ext4 writer sandbox/quota job 全部成功；仍不替代 F AC1–9 生命周期/并行写入/用户接收闭环。 |
 | 全量 E2E workflow | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [E2E run 37640598926](https://github.com/kikoiio/Stable/actions/runs/37640598926), `unit`, `e2e-core`, `e2e-m03`, `e2e-m04`, `e2e-sessions`, `cases` | 所有 job 通过；workflow 没有覆盖 F 的冲突用户 resolution、真实 writer quota/sandbox 集成和生命周期用户接受闭环。 |
 | Go package acceptance | `8a34ea045a13435b955c0c1fb8b57afe1f417aba` | [Go run 37640598695](https://github.com/kikoiio/Stable/actions/runs/37640598695), `test-package` | 通过；run 总结由 in_progress 更新为 success，job 完成于 2026-10-07 15:16 UTC。仅是预览改动前 SHA 的结果。 |
