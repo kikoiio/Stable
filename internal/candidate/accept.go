@@ -67,7 +67,7 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 	if store == nil {
 		return Receipt{}, errors.New("acceptance journal is unavailable")
 	}
-	unlock := lockProjectTransaction(c.FormalRoot)
+	unlock := LockProjectTransaction(c.FormalRoot)
 	defer unlock()
 	exists, existingReceipt, hasReceipt, err := store.CheckAcceptance(ctx, decision)
 	if err != nil {

@@ -64,6 +64,11 @@ func (e workspaceCandidateExporter) ExportWorkspace(ctx context.Context, scope w
 	if formalRoot == "" || !filepath.IsAbs(formalRoot) {
 		return workspace.Snapshot{}, workspace.ErrOwnership
 	}
+	// Serialize the complete formal-root observation and candidate creation
+	// window with acceptance. This guard is outermost for formal-root work;
+	// do not acquire workspace lifecycle locks while holding it.
+	unlockFormalRoot := candidate.LockProjectTransaction(formalRoot)
+	defer unlockFormalRoot()
 	baseline, err := workspace.BuildManifest(ctx, paths.Baseline, workspace.DefaultLimits())
 	if err != nil {
 		return workspace.Snapshot{}, err

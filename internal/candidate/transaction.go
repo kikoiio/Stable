@@ -77,7 +77,13 @@ var projectTransactionLocks = struct {
 	items map[string]*projectTransactionLock
 }{items: map[string]*projectTransactionLock{}}
 
-func lockProjectTransaction(root string) func() {
+// LockProjectTransaction serializes an operation that observes or mutates a
+// formal project root with candidate acceptance and other directory
+// transactions for that same root. Callers must release the returned guard
+// exactly once. Keep this as the outermost formal-root lock: code holding it
+// must not acquire workspace lifecycle locks, and callers must not recursively
+// acquire it for the same root.
+func LockProjectTransaction(root string) func() {
 	key, err := filepath.Abs(filepath.Clean(root))
 	if err != nil {
 		key = filepath.Clean(root)
@@ -110,7 +116,7 @@ type TransactionCoordinator struct{}
 func NewTransactionCoordinator() *TransactionCoordinator { return &TransactionCoordinator{} }
 
 func (c *TransactionCoordinator) Apply(ctx context.Context, tx DirectoryTransaction, journal TransactionJournal) error {
-	unlock := lockProjectTransaction(tx.CurrentRoot)
+	unlock := LockProjectTransaction(tx.CurrentRoot)
 	defer unlock()
 	return c.applyLocked(ctx, tx, journal)
 }
