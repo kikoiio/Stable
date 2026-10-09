@@ -21,7 +21,13 @@ import (
 // workspaceCandidateExporter turns an uncontested B/F/W merge into an
 // ordinary frozen candidate. Candidate review and acceptance remain on the
 // existing M03 path and are never performed by the workspace service.
-type workspaceCandidateExporter struct{ service *Service }
+type workspaceCandidateExporter struct {
+	service *Service
+
+	// afterCandidateEntry is an optional observation point for crash-boundary
+	// tests. Production exporters leave it nil; callbacks must not alter files.
+	afterCandidateEntry func(string)
+}
 
 func (e workspaceCandidateExporter) PreviewWorkspace(ctx context.Context, scope workspace.Scope, record workspace.Record, paths workspace.Paths) (workspace.Snapshot, error) {
 	if e.service == nil || !record.Scope.SameOwner(scope) || scope.Validate() != nil || paths.FormalRoot == "" {
@@ -154,7 +160,7 @@ func (e workspaceCandidateExporter) ExportWorkspace(ctx context.Context, scope w
 		}
 		return cause
 	}
-	if err := installMergedManifest(ctx, created.CandidateRoot, formalRoot, paths.Checkout, formal, working, preview.Manifest); err != nil {
+	if err := installMergedManifestObserved(ctx, created.CandidateRoot, formalRoot, paths.Checkout, formal, working, preview.Manifest, e.afterCandidateEntry); err != nil {
 		return workspace.Snapshot{}, cleanupPartial(err)
 	}
 	if err := workspace.ValidateRootIdentity(formalRoot, record.FormalRootIdentity); err != nil {
@@ -225,6 +231,10 @@ func removeOwnedPartialCandidate(path, expectedIdentity string) error {
 }
 
 func installMergedManifest(ctx context.Context, target, formalRoot, workspaceRoot string, formal, working, merged workspace.Manifest) error {
+	return installMergedManifestObserved(ctx, target, formalRoot, workspaceRoot, formal, working, merged, nil)
+}
+
+func installMergedManifestObserved(ctx context.Context, target, formalRoot, workspaceRoot string, formal, working, merged workspace.Manifest, afterEntry func(string)) error {
 	if _, err := workspace.ManifestDigest(merged.Entries); err != nil {
 		return err
 	}
@@ -321,6 +331,9 @@ func installMergedManifest(ctx context.Context, target, formalRoot, workspaceRoo
 		}
 		if err := secfile.ChmodRoot(root, filepath.FromSlash(entry.Path), os.FileMode(entry.Mode)); err != nil {
 			return err
+		}
+		if afterEntry != nil {
+			afterEntry(entry.Path)
 		}
 	}
 	currentIdentity, err := os.Lstat(target)
