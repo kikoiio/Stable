@@ -35,6 +35,12 @@ func (s *Service) SubmitTeamPlan(ctx context.Context, request agent.ExecutionReq
 	if !member.PlanRequired || member.PlanApproved || member.Status != teams.MemberRunning {
 		return teams.Request{}, errors.New("member is not awaiting an initial plan submission")
 	}
+	for _, pending := range projection.Requests {
+		if pending.TeamID == teamID && pending.MemberID == actor.MemberID && pending.Type == teams.RequestPlan &&
+			(pending.Status == teams.RequestPending || pending.Status == teams.RequestDeferred) {
+			return teams.Request{}, teams.ErrCapacity
+		}
+	}
 	return s.createTeamRequest(root, team, request.RunID, actorID(actor), actor.MemberID, teams.RequestPlan, body)
 }
 
@@ -58,6 +64,12 @@ func (s *Service) RequestTeamShutdown(ctx context.Context, request agent.Executi
 	member, ok := projection.Members[memberID]
 	if !ok || member.TeamID != teamID || member.Status.IsTerminal() || member.Status == teams.MemberStopping {
 		return teams.Request{}, teams.ErrNotFound
+	}
+	for _, pending := range projection.Requests {
+		if pending.TeamID == teamID && pending.MemberID == memberID && pending.Type == teams.RequestShutdown &&
+			(pending.Status == teams.RequestPending || pending.Status == teams.RequestDeferred) {
+			return teams.Request{}, teams.ErrCapacity
+		}
 	}
 	requestFact, err := s.createTeamRequest(root, team, request.RunID, teams.Lead, memberID, teams.RequestShutdown, "")
 	if err != nil {
