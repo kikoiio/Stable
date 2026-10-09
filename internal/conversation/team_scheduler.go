@@ -835,6 +835,17 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 		return teams.Member{}, teams.ErrPermission
 	}
 	planRequestID := s.teamPlanTrigger(member.ID, request.RunID, team.ID, scope, grantGeneration)
+	if planRequestID == "" && member.PlanRequired && member.PlanApproved {
+		// A lead can explicitly resume a recovered approved member before the
+		// original approval retry arrives. Persist the approved request ID on
+		// that turn so a later retry recognizes the resume as its one-shot
+		// follow-up instead of scheduling another child.
+		transcript, replayErr := sessionlog.Replay(root, scope.SessionID)
+		if replayErr != nil {
+			return teams.Member{}, replayErr
+		}
+		planRequestID = latestUnconsumedApprovedTeamPlanRequestID(transcript.Events, projection, team.ID, member.ID)
+	}
 	if planRequestID != "" && member.TurnID != "" {
 		if turn, exists := projection.Turns[member.TurnID]; exists && turn.MemberID == member.ID && turn.PlanRequestID == planRequestID && turn.Status != "intent" && turn.Status != "aborted" {
 			// A plan response is a one-shot scheduler trigger. If its follow-up
@@ -1067,6 +1078,35 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 	s.teamScheduler.mu.Unlock()
 	s.teamScheduler.clearReady(memberID, readyGeneration)
 	return accepted, nil
+}
+
+// latestUnconsumedApprovedTeamPlanRequestID uses durable event order to select
+// the newest approved plan request that no accepted or terminal member turn
+// has already consumed. Map iteration must not decide which approval a manual
+// resume satisfies when a member has multiple historical plan approvals.
+func latestUnconsumedApprovedTeamPlanRequestID(events []sessionlog.Event, projection sessionlog.TeamProjection, teamID, memberID string) string {
+	consumed := make(map[string]bool)
+	for _, turn := range projection.Turns {
+		if turn.MemberID == memberID && turn.PlanRequestID != "" && turn.Status != "intent" && turn.Status != "aborted" {
+			consumed[turn.PlanRequestID] = true
+		}
+	}
+	latest := ""
+	for _, event := range events {
+		if event.Type != sessionlog.EventTeam {
+			continue
+		}
+		var fact sessionlog.TeamEvent
+		if decodeSessionData(event.Data, &fact) != nil || fact.TeamID != teamID || fact.Kind != sessionlog.TeamRequestResponded || fact.Request == nil {
+			continue
+		}
+		request := fact.Request
+		current, exists := projection.Requests[request.ID]
+		if exists && current.Status == teams.RequestApproved && request.TeamID == teamID && request.MemberID == memberID && request.Type == teams.RequestPlan && request.Status == teams.RequestApproved && !consumed[request.ID] {
+			latest = request.ID
+		}
+	}
+	return latest
 }
 
 func validateTeamLeadAuthority(request agent.ExecutionRequest, scope teams.Scope) error {

@@ -301,7 +301,7 @@ func (s *Service) RespondTeamRequest(ctx context.Context, request agent.Executio
 						return teams.Request{}, err
 					}
 				}
-				if s.teamScheduler != nil {
+				if s.teamScheduler != nil && !teamPlanRequestHasFollowUpTurn(projection, prior.ID) {
 					s.teamScheduler.signalPlanResponse(request, scope, team.ID, member.ID, prior.ID)
 				}
 			}
@@ -404,6 +404,15 @@ func teamRequestAppliedDecision(status teams.RequestStatus, decision string) boo
 	default:
 		return false
 	}
+}
+
+func teamPlanRequestHasFollowUpTurn(projection sessionlog.TeamProjection, requestID string) bool {
+	for _, turn := range projection.Turns {
+		if turn.PlanRequestID == requestID && turn.Status != "intent" && turn.Status != "aborted" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) createTeamRequest(root string, team teams.Team, runID, requester, memberID string, kind teams.RequestType, body string) (teams.Request, error) {
