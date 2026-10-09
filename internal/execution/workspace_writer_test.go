@@ -84,6 +84,93 @@ func TestWorkspaceWriterUsesTrustedLeaseAndCurrentCheckout(t *testing.T) {
 	}
 }
 
+func TestWorkspaceWriterPermissionDenyPrecedesSandbox(t *testing.T) {
+	manager, lease, _, fake := writerExecutorFixture(t)
+
+	formalSentinel := filepath.Join(lease.Scope.Authority.FormalRoot, "base.txt")
+	formalBefore, err := os.ReadFile(formalSentinel)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("plan mode is rejected when creating the writer executor", func(t *testing.T) {
+		planAuthority := lease.Authority
+		planAuthority.Mode = permission.ModePlan
+		bounds, err := json.Marshal(planAuthority)
+		if err != nil {
+			t.Fatal(err)
+		}
+		factory := WorkspaceWriterExecutorFactory(
+			NewToolExecutorFactory(ToolExecutorDeps{
+				Gate:       &executorTestGate{decision: permission.PermissionDecision{Kind: permission.DecisionAllow}},
+				Sandbox:    fake,
+				HelperPath: helper,
+			}),
+			lease,
+			manager,
+		)
+		_, err = factory.ForRun(agent.ExecutionRequest{
+			RunID:            lease.RunID,
+			Work:             lease.Scope.Work,
+			PermissionBounds: bounds,
+		})
+		if err == nil {
+			t.Fatal("workspace writer factory accepted plan-mode authority")
+		}
+		if len(fake.argv) != 0 {
+			t.Fatalf("plan-mode factory rejection reached sandbox: argv=%v", fake.argv)
+		}
+	})
+
+	t.Run("permission denial stops before sandbox or mutation", func(t *testing.T) {
+		gate := &executorTestGate{decision: permission.PermissionDecision{Kind: permission.DecisionDeny, Reason: "fixture denied"}}
+		factory := WorkspaceWriterExecutorFactory(
+			NewToolExecutorFactory(ToolExecutorDeps{Gate: gate, Sandbox: fake, HelperPath: helper}),
+			lease,
+			manager,
+		)
+		bounds, err := json.Marshal(lease.Authority)
+		if err != nil {
+			t.Fatal(err)
+		}
+		executor, err := factory.ForRun(agent.ExecutionRequest{
+			RunID:            lease.RunID,
+			Work:             lease.Scope.Work,
+			PermissionBounds: bounds,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		const target = "denied-write.txt"
+		outcome, err := executor.Execute(context.Background(), llm.ToolUse{
+			ID: "denied-write", Name: "write_file",
+			Arguments: json.RawMessage(`{"file_path":"denied-write.txt","content":"must not be written"}`),
+		})
+		if err != nil || !outcome.IsError || outcome.Status != agent.ToolDenied {
+			t.Fatalf("denied writer outcome=%+v err=%v", outcome, err)
+		}
+		if gate.calls != 1 || gate.seen.Kind != permission.OpWrite {
+			t.Fatalf("permission gate calls=%d operation=%+v, want one write authorization", gate.calls, gate.seen)
+		}
+		if len(fake.argv) != 0 {
+			t.Fatalf("denied write reached sandbox: argv=%v", fake.argv)
+		}
+		if _, err := os.Lstat(filepath.Join(lease.Paths.Checkout, target)); !os.IsNotExist(err) {
+			t.Fatalf("denied write mutated workspace checkout: %v", err)
+		}
+		formalAfter, err := os.ReadFile(formalSentinel)
+		if err != nil || string(formalAfter) != string(formalBefore) {
+			t.Fatalf("denied write mutated formal project: before=%q after=%q err=%v", formalBefore, formalAfter, err)
+		}
+	})
+}
+
 func TestWorkspaceCommandWithoutBoundedVolumeFailsClosed(t *testing.T) {
 	_, lease, executor, fake := writerExecutorFixture(t)
 	if err := sandbox.BoundedWorkspaceVolume(lease.Paths.Root, lease.Paths.Checkout, lease.Paths.Run); err == nil {
