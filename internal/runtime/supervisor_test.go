@@ -132,14 +132,15 @@ func TestReconcileBeforeDispatchBlocksConflict(t *testing.T) {
 }
 
 // The runtime tool whitelist covers the five file tools, the controlled
-// command executor and the six M06 interaction/task tools, sorted by name
-// without duplicates.
+// command executor, the six M06 interaction/task tools and three parent-only
+// workspace lifecycle tools, sorted by name without duplicates.
 func TestRuntimeToolSchemas(t *testing.T) {
 	schemas := runtimeToolSchemas()
 	want := []string{
-		"ask_user", "command", "edit_file", "exit_plan_mode", "glob", "grep",
-		"load_skill", "read_file", "task_create", "task_get", "task_list",
-		"task_update", "write_file",
+		"ask_user", "command", "edit_file", "enter_worktree", "exit_plan_mode",
+		"exit_worktree", "glob", "grep", "load_skill", "read_file",
+		"task_create", "task_get", "task_list", "task_update", "worktree_export",
+		"write_file",
 	}
 	if len(schemas) != len(want) {
 		t.Fatalf("schema count = %d, want %d", len(schemas), len(want))
