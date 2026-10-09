@@ -157,16 +157,31 @@ func TestTwoMemberTwoRoundMessagingScenarioKeepsParentRunAndRoutesNextTurn(t *te
 	if strings.Contains(secondA.Task.Instruction, parentMarker) || strings.Contains(secondB.Task.Instruction, parentMarker) || strings.Contains(secondB.Task.Instruction, "Investigate parser recovery") {
 		t.Fatal("a second-round child received parent history or sibling task context")
 	}
+	// Receiving ChildRunInput only proves the scheduler dispatched the round.
+	// Wait for both child terminal facts before temp-project cleanup, or the
+	// asynchronous team watcher can still append while testing.T removes root.
+	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, memberA.ID, teams.MemberIdle)
+	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, memberB.ID, teams.MemberIdle)
 
-	projection, err := sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+	facts, err := sessionlog.TeamHistory(root, request.Work.SessionID, team.ID, 0, teams.MaxPageSize)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projection.Messages) != 3 {
-		t.Fatalf("durable team message count=%d, want p2p, broadcast, and member result: %+v", len(projection.Messages), projection.Messages)
+	var sentMessages []teams.Message
+	for _, event := range facts {
+		var fact sessionlog.TeamEvent
+		if err := decodeSessionData(event.Data, &fact); err != nil {
+			t.Fatal(err)
+		}
+		if fact.Kind == sessionlog.TeamMessageSent && fact.Message != nil {
+			sentMessages = append(sentMessages, *fact.Message)
+		}
+	}
+	if len(sentMessages) != 3 {
+		t.Fatalf("durable team message count=%d, want p2p, broadcast, and member result: %+v", len(sentMessages), sentMessages)
 	}
 	var leadResult teams.Message
-	for _, message := range projection.Messages {
+	for _, message := range sentMessages {
 		if message.Body == "Parser recovery path is verified." {
 			leadResult = message
 		}
