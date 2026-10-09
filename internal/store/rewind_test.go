@@ -323,3 +323,72 @@ func TestReconcileRewindBlocksAndRetainsUnknownProtectedMetadata(t *testing.T) {
 		t.Fatalf("candidate changed by blocked recovery: %+v err=%v", rec, err)
 	}
 }
+
+func TestLegacyRewindBlocksProtectedMewcode(t *testing.T) {
+	s, _ := newGoalStore(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "board"), []byte("original board"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	metadata := filepath.Join(root, ".mewcode", "history")
+	if err := os.MkdirAll(filepath.Dir(metadata), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadata, []byte("legacy protected metadata"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	metadataInfo, err := os.Stat(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, oldDigest, err := candidate.BuildManifestForPolicy(root, candidate.ManifestPolicyLegacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveCandidate(ctx, CandidateRecord{Candidate: candidate.Candidate{
+		ID: "legacy-mewcode-candidate", ManifestPolicy: candidate.ManifestPolicyLegacy,
+		FormalRoot: t.TempDir(), CandidateRoot: root, BaselineDigest: oldDigest,
+		CandidateDigest: oldDigest, Status: "ready",
+	}, ActionID: "legacy-mewcode-action", GoalID: "goal-1"}); err != nil {
+		t.Fatal(err)
+	}
+	staging := t.TempDir()
+	if err := os.WriteFile(filepath.Join(staging, "board"), []byte("snapshot board"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, targetDigest, err := candidate.BuildManifestForPolicy(staging, candidate.ManifestPolicyLegacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := RewindJournal{
+		ID: "legacy-mewcode-rewind", CandidateID: "legacy-mewcode-candidate", SnapshotID: "legacy-mewcode-snapshot",
+		ExpectedDigest: oldDigest, TargetDigest: targetDigest, StagingDir: staging,
+	}
+	if err := s.BeginRewind(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileRewinds(ctx); err == nil {
+		t.Fatal("legacy rewind with protected .mewcode was accepted")
+	}
+	var phase string
+	if err := s.DB().QueryRow(`SELECT phase FROM rewind_journal WHERE id=?`, j.ID).Scan(&phase); err != nil || phase != RewindBlocked {
+		t.Fatalf("rewind phase=%q err=%v; want blocked", phase, err)
+	}
+	if got, err := os.ReadFile(metadata); err != nil || string(got) != "legacy protected metadata" {
+		t.Fatalf(".mewcode bytes changed: got=%q err=%v", got, err)
+	}
+	currentMetadataInfo, err := os.Stat(metadata)
+	if err != nil || !os.SameFile(metadataInfo, currentMetadataInfo) {
+		t.Fatalf(".mewcode inode changed: before=%v after=%v err=%v", metadataInfo, currentMetadataInfo, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "board")); err != nil || string(got) != "original board" {
+		t.Fatalf("candidate root changed: board=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(staging, "board")); err != nil || string(got) != "snapshot board" {
+		t.Fatalf("staging root changed: board=%q err=%v", got, err)
+	}
+	if rec, err := s.GetCandidate(ctx, j.CandidateID); err != nil || rec.Candidate.CandidateDigest != oldDigest || rec.Candidate.Status != "ready" {
+		t.Fatalf("candidate changed after blocked rewind: %+v err=%v", rec, err)
+	}
+}

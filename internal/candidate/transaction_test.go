@@ -148,3 +148,42 @@ func TestLegacyGitTransactionRequiresNewExport(t *testing.T) {
 		t.Fatal("legacy Git recovery was permitted")
 	}
 }
+
+func TestLegacyMewcodeTransactionRequiresNewExport(t *testing.T) {
+	current, oldDigest := transactionRoot(t, "formal", "old")
+	incoming, newDigest := transactionRoot(t, "incoming", "new")
+	metadata := filepath.Join(current, ".mewcode", "history")
+	if err := os.MkdirAll(filepath.Dir(metadata), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadata, []byte("protected formal metadata"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Stat(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx := DirectoryTransaction{ID: "legacy-mewcode", Kind: TransactionAcceptance, CurrentRoot: current, IncomingRoot: incoming, ExpectedDigest: oldDigest, TargetDigest: newDigest, Mode: "atomic-exchange"}
+	coordinator := NewTransactionCoordinator()
+	journal := &transactionJournalRecorder{}
+	if err := coordinator.Apply(context.Background(), tx, journal); err == nil {
+		t.Fatal("legacy transaction with protected .mewcode was permitted")
+	}
+	if err := coordinator.Recover(context.Background(), tx, PhasePrepared, journal); err == nil {
+		t.Fatal("legacy transaction recovery with protected .mewcode was permitted")
+	}
+	got, err := os.ReadFile(metadata)
+	if err != nil || string(got) != "protected formal metadata" {
+		t.Fatalf("formal .mewcode bytes changed: got=%q err=%v", got, err)
+	}
+	afterInfo, err := os.Stat(metadata)
+	if err != nil || !os.SameFile(beforeInfo, afterInfo) {
+		t.Fatalf("formal .mewcode inode changed: before=%v after=%v err=%v", beforeInfo, afterInfo, err)
+	}
+	if _, err := os.Stat(filepath.Join(current, "file.txt")); err != nil {
+		t.Fatalf("formal root was exchanged despite rejection: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(incoming, "file.txt")); err != nil {
+		t.Fatalf("incoming root was exchanged despite rejection: %v", err)
+	}
+}

@@ -578,7 +578,7 @@ func validateTransaction(tx DirectoryTransaction) error {
 		return err
 	}
 	if policy == ManifestPolicyLegacy {
-		return RejectLegacyGitMetadata(tx.CurrentRoot, tx.IncomingRoot, tx.RollbackRoot)
+		return RejectLegacyProtectedMetadata(tx.CurrentRoot, tx.IncomingRoot, tx.RollbackRoot)
 	}
 	if tx.ExpectedRootIdentity == "" || tx.TargetRootIdentity == "" {
 		return errors.New("project-v2 transaction root identities are missing; explicit reconciliation is required")
@@ -600,20 +600,29 @@ func validateTransaction(tx DirectoryTransaction) error {
 	return nil
 }
 
-// RejectLegacyGitMetadata prevents old reviews and unfinished transactions
-// from exchanging Git entities under the unprotected legacy manifest policy.
-func RejectLegacyGitMetadata(roots ...string) error {
+// RejectLegacyProtectedMetadata prevents old reviews and unfinished
+// transactions from exchanging protected project metadata under the legacy
+// manifest policy, which only excludes .stable from its digest.
+func RejectLegacyProtectedMetadata(roots ...string) error {
 	for _, root := range roots {
 		if root == "" {
 			continue
 		}
-		if _, err := os.Lstat(filepath.Join(root, ".git")); err == nil {
-			return errors.New("legacy candidate contains Git metadata; safely re-export and create a new review")
-		} else if !os.IsNotExist(err) {
-			return err
+		for _, name := range []string{".git", ".mewcode"} {
+			if _, err := os.Lstat(filepath.Join(root, name)); err == nil {
+				return fmt.Errorf("legacy candidate contains protected metadata %s; safely re-export and create a new review", name)
+			} else if !os.IsNotExist(err) {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// RejectLegacyGitMetadata is kept as a compatibility wrapper for callers that
+// used the original helper name before legacy .mewcode protection was added.
+func RejectLegacyGitMetadata(roots ...string) error {
+	return RejectLegacyProtectedMetadata(roots...)
 }
 
 func verifyTransactionRoots(tx DirectoryTransaction) error {

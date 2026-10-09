@@ -274,6 +274,75 @@ func TestProjectV2AcceptanceRestoresProtectedMetadata(t *testing.T) {
 	}
 }
 
+func TestLegacyAcceptanceRejectsMewcodeReplacementOrOmission(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(string) error
+	}{
+		{
+			name: "replacement",
+			change: func(candidateRoot string) error {
+				return os.WriteFile(filepath.Join(candidateRoot, ".mewcode", "settings.json"), []byte("candidate metadata"), 0600)
+			},
+		},
+		{
+			name: "omission",
+			change: func(candidateRoot string) error {
+				return os.RemoveAll(filepath.Join(candidateRoot, ".mewcode"))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			formal := filepath.Join(root, "formal")
+			metadata := filepath.Join(formal, ".mewcode", "settings.json")
+			if err := os.MkdirAll(filepath.Dir(metadata), 0700); err != nil {
+				t.Fatal(err)
+			}
+			const original = "formal metadata"
+			if err := os.WriteFile(metadata, []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			beforeInfo, err := os.Stat(metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidateRoot := filepath.Join(root, "candidates")
+			c, err := CreateCandidateForPolicy("legacy-mewcode-"+test.name, formal, candidateRoot, ManifestPolicyLegacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.change(c.CandidateRoot); err != nil {
+				t.Fatal(err)
+			}
+			c, err = FreezeCandidate(c, nil, context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			review, err := BuildReview(context.Background(), c, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision := AcceptanceDecision{
+				ID: "accept-legacy-mewcode-" + test.name, UserID: "test-user", CandidateID: c.ID,
+				CandidateDigest: review.CandidateDigest, PreviewDigest: review.Digest,
+				FormalDigest: review.FormalDigest, Mode: AcceptNormal,
+			}
+			if _, err := AcceptCandidate(context.Background(), c, review, decision, "session-test", "", &memoryAcceptance{}, time.Time{}); err == nil {
+				t.Fatal("legacy acceptance with protected .mewcode was permitted")
+			}
+			got, err := os.ReadFile(metadata)
+			if err != nil || string(got) != original {
+				t.Fatalf("formal .mewcode bytes changed: got=%q err=%v", got, err)
+			}
+			afterInfo, err := os.Stat(metadata)
+			if err != nil || !os.SameFile(beforeInfo, afterInfo) {
+				t.Fatalf("formal .mewcode inode changed: before=%v after=%v err=%v", beforeInfo, afterInfo, err)
+			}
+		})
+	}
+}
+
 func TestManifestRejectsSymlink(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target")

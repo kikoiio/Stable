@@ -212,7 +212,7 @@ func validateAcceptance(ctx context.Context, c Candidate, review Review, decisio
 		return err
 	}
 	if candidatePolicy == ManifestPolicyLegacy {
-		if err := RejectLegacyGitMetadata(c.FormalRoot, c.CandidateRoot); err != nil {
+		if err := RejectLegacyProtectedMetadata(c.FormalRoot, c.CandidateRoot); err != nil {
 			return err
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"stable/internal/agent"
 	"stable/internal/execution"
@@ -47,6 +48,23 @@ func (m *coordinatorExecutorMCPProbe) ResolveTarget(string) (string, string, err
 	return "fixture", "erase", nil
 }
 func (*coordinatorExecutorMCPProbe) Instructions() string { return "" }
+
+type coordinatorExecutorAgentTaskProbe struct{ run, output, stop int }
+
+func (a *coordinatorExecutorAgentTaskProbe) Run(context.Context, agent.ParentRun, agent.AgentTaskRequest) (agent.AgentTaskSnapshot, error) {
+	a.run++
+	return agent.AgentTaskSnapshot{}, nil
+}
+
+func (a *coordinatorExecutorAgentTaskProbe) Output(context.Context, agent.ParentRun, string, time.Duration) (agent.AgentTaskSnapshot, error) {
+	a.output++
+	return agent.AgentTaskSnapshot{}, nil
+}
+
+func (a *coordinatorExecutorAgentTaskProbe) Stop(context.Context, agent.ParentRun, string) (agent.AgentTaskSnapshot, error) {
+	a.stop++
+	return agent.AgentTaskSnapshot{}, nil
+}
 
 func TestCoordinatorExecutorDeniesForgedDirectMCPInvocation(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "project")
@@ -102,9 +120,9 @@ func TestCoordinatorExecutorDeniesForgedNonTeamToolsBeforeSideEffects(t *testing
 		Mode: permission.ModeDefault,
 	}
 	request.PermissionBounds, _ = json.Marshal(authority)
-	gate, hook, mcp := &coordinatorExecutorGateProbe{}, &coordinatorExecutorHookProbe{}, &coordinatorExecutorMCPProbe{}
+	gate, hook, mcp, tasks := &coordinatorExecutorGateProbe{}, &coordinatorExecutorHookProbe{}, &coordinatorExecutorMCPProbe{}, &coordinatorExecutorAgentTaskProbe{}
 	factory := execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
-		Gate: gate, MCP: mcp,
+		Gate: gate, MCP: mcp, AgentTasks: tasks,
 	}, execution.WithHookRunner(hook))
 	executor, err := factory.ForRun(request)
 	if err != nil {
@@ -112,17 +130,21 @@ func TestCoordinatorExecutorDeniesForgedNonTeamToolsBeforeSideEffects(t *testing
 	}
 	for _, name := range []string{
 		"read_file", "write_file", "glob", "grep", "command", "fetch_url",
-		"run_agent", "delegate_tasks", "load_skill", "todo_write", "task_update",
+		"run_agent", "task_output", "task_stop", "delegate_tasks", "load_skill", "todo_write", "task_update",
 	} {
+		arguments := []byte(`{"path":"project","command":"true"}`)
+		if name == "task_output" || name == "task_stop" {
+			arguments = []byte(`{"task_id":"fixture-task"}`)
+		}
 		outcome, err := executor.Execute(t.Context(), llm.ToolUse{
-			ID: "forged-" + name, Name: name, Arguments: []byte(`{"path":"project","command":"true"}`),
+			ID: "forged-" + name, Name: name, Arguments: arguments,
 		})
 		if err != nil || outcome.Status != agent.ToolDenied {
 			t.Fatalf("direct coordinator call %s = %+v, %v; want denied", name, outcome, err)
 		}
 	}
-	if gate.calls != 0 || hook.pre != 0 || hook.post != 0 || mcp.resolve != 0 || mcp.call != 0 {
-		t.Fatalf("denied coordinator calls reached downstream effects: gate=%d hook=%+v MCP=%+v", gate.calls, hook, mcp)
+	if gate.calls != 0 || hook.pre != 0 || hook.post != 0 || mcp.resolve != 0 || mcp.call != 0 || tasks.run != 0 || tasks.output != 0 || tasks.stop != 0 {
+		t.Fatalf("denied coordinator calls reached downstream effects: gate=%d hook=%+v MCP=%+v tasks=%+v", gate.calls, hook, mcp, tasks)
 	}
 }
 

@@ -268,7 +268,7 @@ func (s *Store) reconcileRewind(ctx context.Context, j RewindJournal) error {
 		return s.blockRewind(ctx, j, errors.New("rewind target is the formal project"))
 	}
 	if j.ManifestPolicy == candidate.ManifestPolicyLegacy || j.ManifestPolicy == "" {
-		if err := candidate.RejectLegacyGitMetadata(rec.Candidate.CandidateRoot, j.StagingDir, j.RollbackPath); err != nil {
+		if err := candidate.RejectLegacyProtectedMetadata(rec.Candidate.CandidateRoot, j.StagingDir, j.RollbackPath); err != nil {
 			return s.blockRewind(ctx, j, err)
 		}
 	}
