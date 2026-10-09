@@ -112,6 +112,43 @@ func TestTeamPlanApprovalAutomaticallyStartsReadOnlyFollowUp(t *testing.T) {
 	if revision.TeamTurn == nil || revision.TeamTurn.MemberID != member.ID || revision.TeamTurn.TurnID == first.TeamTurn.TurnID {
 		t.Fatalf("plan rejection did not start a fresh revision turn: first=%+v revision=%+v", first.TeamTurn, revision.TeamTurn)
 	}
+	// The same request cannot be answered again with either the stale revision
+	// from the original submission or its current terminal revision. In
+	// particular, an opposite lead decision must not append another response
+	// fact or trigger a second follow-up turn.
+	if _, err := service.RespondTeamRequest(t.Context(), request, team.ID, submitted.ID, submitted.Revision, string(teams.RequestApproved), ""); !errors.Is(err, teams.ErrRevisionConflict) {
+		t.Fatalf("conflicting stale plan response error = %v, want revision conflict", err)
+	}
+	if _, err := service.RespondTeamRequest(t.Context(), request, team.ID, submitted.ID, rejected.Revision, string(teams.RequestApproved), ""); err == nil {
+		t.Fatal("terminal rejected plan request accepted a conflicting approval")
+	}
+	transcript, err := sessionlog.Replay(root, request.Work.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseFacts := 0
+	for _, event := range transcript.Events {
+		if event.Type != sessionlog.EventTeam {
+			continue
+		}
+		data, err := json.Marshal(event.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fact sessionlog.TeamEvent
+		if err := json.Unmarshal(data, &fact); err != nil {
+			t.Fatal(err)
+		}
+		if fact.Kind == sessionlog.TeamRequestResponded && fact.Request != nil && fact.Request.ID == submitted.ID {
+			responseFacts++
+		}
+	}
+	if responseFacts != 1 {
+		t.Fatalf("plan request has %d response facts after duplicate responses, want exactly one", responseFacts)
+	}
+	if runner.childCount() != 2 {
+		t.Fatalf("conflicting duplicate plan response started another turn: child count=%d, want two", runner.childCount())
+	}
 	assertTeamPlanToolSchemas(t, revision.ToolSchemas)
 	if !strings.Contains(revision.Task.Instruction, "Revise the inspection plan to include the parser entry point.") {
 		t.Fatalf("revision turn omitted lead feedback: %q", revision.Task.Instruction)
