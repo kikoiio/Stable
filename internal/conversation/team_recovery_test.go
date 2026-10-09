@@ -105,7 +105,7 @@ func TestTeamRecoveryDoesNotRunCapacityWaitersAutomatically(t *testing.T) {
 	}
 }
 
-func TestTeamRecoveryPreservesMembersWithoutActiveTurns(t *testing.T) {
+func TestTeamRecoveryInterruptsMembersWithoutActiveTurns(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "project")
 	if err := os.MkdirAll(root, 0700); err != nil {
 		t.Fatal(err)
@@ -172,11 +172,11 @@ func TestTeamRecoveryPreservesMembersWithoutActiveTurns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := projection.Members[created.ID].Status; got != teams.MemberCreated {
-		t.Fatalf("created member status after recovery=%s, want created", got)
+	if got := projection.Members[created.ID].Status; got != teams.MemberInterrupted {
+		t.Fatalf("created member status after recovery=%s, want interrupted", got)
 	}
-	if got := projection.Members[idle.ID].Status; got != teams.MemberIdle {
-		t.Fatalf("idle member status after recovery=%s, want idle", got)
+	if got := projection.Members[idle.ID].Status; got != teams.MemberInterrupted {
+		t.Fatalf("idle member status after recovery=%s, want interrupted", got)
 	}
 }
 
