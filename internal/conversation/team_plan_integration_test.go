@@ -423,7 +423,53 @@ func TestExpiredTeamRequestIsPersistedAndCannotBeAnswered(t *testing.T) {
 		t.Fatalf("request expiration replay=%+v/%+v, expiration events=%d", projection.Requests[pending.ID], projection.Requests[shutdown.ID], expiredEvents)
 	}
 	runner.release <- struct{}{}
+	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberIdle)
+	projection, err = sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := projection.Members[member.ID]; got.Status != teams.MemberIdle || got.PlanApproved {
+		t.Fatalf("expired plan terminal state=%+v, want idle and unapproved", got)
+	}
+	if runner.childCount() != 1 {
+		t.Fatalf("expired plan automatically reran provider %d times, want only the initial turn", runner.childCount())
+	}
+	if _, err := service.ResumeTeamMember(t.Context(), request, team.ID, member.ID, "call-resume-expired-plan"); err != nil {
+		t.Fatalf("explicit resume after plan expiry: %v", err)
+	}
+	revision := receiveTeamChildInput(t, runner.inputs)
+	if revision.TeamTurn == nil || revision.TeamTurn.MemberID != member.ID || runner.childCount() != 2 {
+		t.Fatalf("explicit expired-plan resume child=%+v starts=%d", revision.TeamTurn, runner.childCount())
+	}
+	childRequest := agent.ExecutionRequest{RunID: revision.ChildRunID, Work: request.Work, TeamTurn: revision.TeamTurn}
+	planCall := llm.ToolUse{ID: "resubmit-expired-plan", Name: "team_plan_submit", Arguments: json.RawMessage(`{"team_id":"` + team.ID + `","body":"Inspect the parser again."}`)}
+	if outcome, err := service.ExecuteTeamTool(t.Context(), childRequest, planCall); err != nil || outcome.Status != agent.ToolSucceeded {
+		t.Fatalf("resubmitted plan outcome=%+v err=%v", outcome, err)
+	}
+	runner.release <- struct{}{}
 	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberAwaitingPlan)
+	for _, preserved := range []teams.MemberStatus{teams.MemberInterrupted, teams.MemberStopped} {
+		projection, err = sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state := projection.Members[member.ID]
+		state.Status = preserved
+		state.Revision++
+		if err := appendTeamFactLocked(root, request.Work.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: state.OriginRunID, Member: &state}); err != nil {
+			t.Fatalf("persist terminal preservation fixture %s: %v", preserved, err)
+		}
+		if _, err := service.ListTeamRequests(t.Context(), request, team.ID); err != nil {
+			t.Fatalf("reconcile requests with member %s: %v", preserved, err)
+		}
+		projection, err = sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := projection.Members[member.ID]; got.Status != preserved {
+			t.Fatalf("historical expired plan changed %s member to %s", preserved, got.Status)
+		}
+	}
 }
 
 func TestBusyTeamShutdownCanBeDeferredThenRejectedByMember(t *testing.T) {

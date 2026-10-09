@@ -204,6 +204,13 @@ func (s *Service) ListTeamRequestsPage(ctx context.Context, request agent.Execut
 		}
 		projection.Requests[item.ID] = item
 	}
+	if err := s.reconcileExpiredPlanMembers(root, scope.SessionID, teamID); err != nil {
+		return nil, err
+	}
+	team, projection, err = s.teamForOperation(root, scope, teamID, actor)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]teams.Request, 0, len(projection.Requests))
 	for _, item := range projection.Requests {
 		if item.TeamID != teamID || (!actor.Lead && item.MemberID != actor.MemberID) {
@@ -269,6 +276,11 @@ func (s *Service) RespondTeamRequest(ctx context.Context, request agent.Executio
 		team, prior, err = s.expireTeamRequest(root, team, prior)
 		if err != nil {
 			return teams.Request{}, err
+		}
+		if prior.Type == teams.RequestPlan {
+			if err := s.reconcileExpiredPlanMembers(root, scope.SessionID, teamID); err != nil {
+				return prior, err
+			}
 		}
 		return prior, errors.New("team request has expired")
 	}
@@ -362,12 +374,177 @@ func (s *Service) expireTeamRequest(root string, team teams.Team, request teams.
 	return team, request, nil
 }
 
+// reconcileExpiredPlanMembers completes the second durable half of plan
+// expiry. If expiry was recorded but the process stopped before updating an
+// awaiting-plan member, a later list/response/resume retries this transition.
+// Active turns are left alone; their terminal hook chooses idle after exit.
+func (s *Service) reconcileExpiredPlanMembers(root, sessionID, teamID string) error {
+	projection, err := sessionlog.ReplayTeams(root, sessionID, teamID)
+	if err != nil {
+		return err
+	}
+	team, ok := projection.Teams[teamID]
+	if !ok {
+		return teams.ErrNotFound
+	}
+	now := time.Now().UTC()
+	due := make([]teams.Request, 0)
+	for _, request := range projection.Requests {
+		if request.TeamID == teamID && request.Type == teams.RequestPlan && (request.Status == teams.RequestPending || request.Status == teams.RequestDeferred) && !now.Before(request.ExpiresAt) {
+			due = append(due, request)
+		}
+	}
+	sort.Slice(due, func(i, j int) bool {
+		if due[i].ExpiresAt.Equal(due[j].ExpiresAt) {
+			return due[i].ID < due[j].ID
+		}
+		return due[i].ExpiresAt.Before(due[j].ExpiresAt)
+	})
+	for _, request := range due {
+		if _, _, err := s.expireTeamRequest(root, team, request); err != nil {
+			return err
+		}
+		projection, err = sessionlog.ReplayTeams(root, sessionID, teamID)
+		if err != nil {
+			return err
+		}
+		team = projection.Teams[teamID]
+	}
+	for _, member := range projection.Members {
+		if member.TeamID != teamID || !member.PlanRequired || member.PlanApproved {
+			continue
+		}
+		if member.Status != teams.MemberQueued && member.Status != teams.MemberRunning && member.Status != teams.MemberStopping && member.Status != teams.MemberAwaitingPlan {
+			continue
+		}
+		turn, hasTurn := projection.Turns[member.TurnID]
+		if !hasTurn || !turnTerminalTeamStatus(turn.Status) {
+			continue
+		}
+		planExpired, pendingPlan := false, false
+		for _, request := range projection.Requests {
+			if request.TeamID != teamID || request.MemberID != member.ID || request.Type != teams.RequestPlan {
+				continue
+			}
+			switch request.Status {
+			case teams.RequestExpired:
+				planExpired = true
+			case teams.RequestPending, teams.RequestDeferred:
+				pendingPlan = true
+			}
+		}
+		if member.Status == teams.MemberAwaitingPlan {
+			if planExpired && !pendingPlan {
+				member.Status = teams.MemberIdle
+				member.Revision++
+				if err := appendTeamFactLocked(root, team.Scope.SessionID, teamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: member.OriginRunID, Member: &member}); err != nil {
+					return err
+				}
+				projection.Members[member.ID] = member
+			}
+			continue
+		}
+		target := teams.MemberInterrupted
+		if turn.Status == "succeeded" {
+			target = teams.MemberIdle
+		}
+		if member.Status == teams.MemberStopping {
+			target = teams.MemberStopped
+		} else if target == teams.MemberIdle && planExpired && !pendingPlan {
+			target = teams.MemberIdle
+		} else if target == teams.MemberIdle {
+			target = teams.MemberAwaitingPlan
+		}
+		if member.Budget.CanAccept() != nil && target != teams.MemberStopped {
+			target = teams.MemberBudgetExhausted
+		}
+		if member.Status == target {
+			continue
+		}
+		member.Status = target
+		member.Revision++
+		if err := appendTeamFactLocked(root, team.Scope.SessionID, teamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: member.OriginRunID, Member: &member}); err != nil {
+			return err
+		}
+		projection.Members[member.ID] = member
+	}
+	return nil
+}
+
+// expireDueTeamRequestsForMember is called at turn completion so a request
+// that reached its deadline while the child was active is made durable before
+// the member's terminal state is selected.
+func (s *Service) expireDueTeamRequestsForMember(root, sessionID, teamID, memberID string) error {
+	projection, err := sessionlog.ReplayTeams(root, sessionID, teamID)
+	if err != nil {
+		return err
+	}
+	team, ok := projection.Teams[teamID]
+	if !ok {
+		return teams.ErrNotFound
+	}
+	now := time.Now().UTC()
+	due := make([]teams.Request, 0)
+	for _, request := range projection.Requests {
+		if request.TeamID == teamID && request.MemberID == memberID && (request.Status == teams.RequestPending || request.Status == teams.RequestDeferred) && !now.Before(request.ExpiresAt) {
+			due = append(due, request)
+		}
+	}
+	sort.Slice(due, func(i, j int) bool {
+		if due[i].ExpiresAt.Equal(due[j].ExpiresAt) {
+			return due[i].ID < due[j].ID
+		}
+		return due[i].ExpiresAt.Before(due[j].ExpiresAt)
+	})
+	for _, request := range due {
+		team, _, err = s.expireTeamRequest(root, team, request)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) expireDueTeamRequestsForTeam(root, sessionID, teamID string) error {
+	projection, err := sessionlog.ReplayTeams(root, sessionID, teamID)
+	if err != nil {
+		return err
+	}
+	team, ok := projection.Teams[teamID]
+	if !ok {
+		return teams.ErrNotFound
+	}
+	now := time.Now().UTC()
+	due := make([]teams.Request, 0)
+	for _, request := range projection.Requests {
+		if request.TeamID == teamID && (request.Status == teams.RequestPending || request.Status == teams.RequestDeferred) && !now.Before(request.ExpiresAt) {
+			due = append(due, request)
+		}
+	}
+	sort.Slice(due, func(i, j int) bool {
+		if due[i].ExpiresAt.Equal(due[j].ExpiresAt) {
+			return due[i].ID < due[j].ID
+		}
+		return due[i].ExpiresAt.Before(due[j].ExpiresAt)
+	})
+	for _, request := range due {
+		team, _, err = s.expireTeamRequest(root, team, request)
+		if err != nil {
+			return err
+		}
+	}
+	return s.reconcileExpiredPlanMembers(root, sessionID, teamID)
+}
+
 func (s *Service) appendTeamRequest(root string, team teams.Team, runID, actor, kind string, request teams.Request) error {
 	id, err := sessionlog.NewID()
 	if err != nil {
 		return err
 	}
 	_, err = sessionlog.Append(root, team.Scope.SessionID, sessionlog.EventTeam, sessionlog.TeamEvent{ID: id, TeamID: team.ID, SessionID: team.Scope.SessionID, Kind: kind, Revision: team.Revision + 1, ActorID: actor, ActorRunID: runID, Request: &request})
+	if err == nil && s.teamScheduler != nil {
+		s.teamScheduler.trackExpiryScope(root, team.Scope.SessionID, team.ID)
+	}
 	return err
 }
 

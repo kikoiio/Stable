@@ -51,6 +51,12 @@ type teamWorkspaceRun struct {
 	done    chan struct{}
 }
 
+type teamExpiryScope struct {
+	root      string
+	sessionID string
+	teamID    string
+}
+
 type teamScheduler struct {
 	service         *Service
 	submitter       agent.CommittedTaskSubmitter
@@ -69,7 +75,9 @@ type teamScheduler struct {
 	ready           []string
 	readySet        map[string]bool
 	readyGeneration map[string]uint64
+	expiryScopes    map[teamExpiryScope]struct{}
 	wake            chan struct{}
+	expiryWake      chan struct{}
 	done            chan struct{}
 	closed          bool
 }
@@ -78,15 +86,144 @@ func newTeamScheduler(service *Service) *teamScheduler {
 	scheduler := &teamScheduler{
 		service: service, active: map[string]context.CancelFunc{}, activeOrigin: map[string]string{}, activeMember: map[string]string{}, activeTeam: map[string]string{}, workspaceRuns: map[string]teamWorkspaceRun{},
 		roles: map[string]agentcatalog.Definition{}, grants: map[string]teamParentGrant{}, grantGeneration: map[string]uint64{},
-		readySet: map[string]bool{}, readyGeneration: map[string]uint64{}, wake: make(chan struct{}, 1), done: make(chan struct{}),
+		readySet: map[string]bool{}, readyGeneration: map[string]uint64{}, expiryScopes: map[teamExpiryScope]struct{}{}, wake: make(chan struct{}, 1), expiryWake: make(chan struct{}, 1), done: make(chan struct{}),
 	}
 	if service != nil {
 		scheduler.submitter, _ = service.deps.Delegator.(agent.CommittedTaskSubmitter)
 		if scheduler.submitter != nil {
 			go scheduler.capacityLoop(service.lifeCtx)
 		}
+		go func() {
+			scheduler.seedExpiryScopes(service.deps.ProjectRoot)
+			scheduler.expiryLoop(service.lifeCtx)
+		}()
 	}
 	return scheduler
+}
+
+func (s *teamScheduler) seedExpiryScopes(root string) {
+	if root == "" {
+		return
+	}
+	sessions, err := sessionlog.List(root)
+	if err != nil {
+		return
+	}
+	for _, session := range sessions {
+		projection, replayErr := sessionlog.ReplayTeams(root, session.ID)
+		if replayErr != nil {
+			continue
+		}
+		for teamID, team := range projection.Teams {
+			for _, request := range projection.Requests {
+				if request.TeamID == teamID && (request.Status == teams.RequestPending || request.Status == teams.RequestDeferred) {
+					s.trackExpiryScope(root, team.Scope.SessionID, teamID)
+					break
+				}
+			}
+		}
+	}
+}
+
+func (s *teamScheduler) trackExpiryScope(root, sessionID, teamID string) {
+	if s == nil || root == "" || sessionlog.ValidateID(sessionID) != nil || teams.ValidateID(teamID) != nil {
+		return
+	}
+	s.mu.Lock()
+	s.expiryScopes[teamExpiryScope{root: root, sessionID: sessionID, teamID: teamID}] = struct{}{}
+	s.mu.Unlock()
+	select {
+	case s.expiryWake <- struct{}{}:
+	default:
+	}
+}
+
+// expiryLoop is the single timer owner for durable team request deadlines.
+// It tracks only teams touched by this service, then recomputes the nearest
+// pending deadline whenever a request is created, answered, or expires.
+func (s *teamScheduler) expiryLoop(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var timer *time.Timer
+	for {
+		next, scopes := s.nextTeamRequestExpiry()
+		if next.IsZero() {
+			select {
+			case <-s.done:
+				return
+			case <-ctx.Done():
+				return
+			case <-s.expiryWake:
+				continue
+			}
+		}
+		delay := time.Until(next)
+		if delay <= 0 {
+			// A failed append is retried with a bounded pause instead of spinning.
+			delay = time.Second
+		}
+		if timer == nil {
+			timer = time.NewTimer(delay)
+		} else {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(delay)
+		}
+		select {
+		case <-s.done:
+			timer.Stop()
+			return
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-s.expiryWake:
+			timer.Stop()
+			continue
+		case <-timer.C:
+		}
+		for _, scope := range scopes {
+			s.service.eventMu.Lock()
+			err := s.service.expireDueTeamRequestsForTeam(scope.root, scope.sessionID, scope.teamID)
+			s.service.eventMu.Unlock()
+			if err != nil {
+				// Revisit the same persisted deadline after the loop's retry pause.
+				select {
+				case s.expiryWake <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}
+}
+
+func (s *teamScheduler) nextTeamRequestExpiry() (time.Time, []teamExpiryScope) {
+	s.mu.Lock()
+	scopes := make([]teamExpiryScope, 0, len(s.expiryScopes))
+	for scope := range s.expiryScopes {
+		scopes = append(scopes, scope)
+	}
+	s.mu.Unlock()
+	var next time.Time
+	for _, scope := range scopes {
+		projection, err := sessionlog.ReplayTeams(scope.root, scope.sessionID, scope.teamID)
+		if err != nil {
+			continue
+		}
+		for _, request := range projection.Requests {
+			if request.TeamID != scope.teamID || request.Status != teams.RequestPending && request.Status != teams.RequestDeferred {
+				continue
+			}
+			if next.IsZero() || request.ExpiresAt.Before(next) {
+				next = request.ExpiresAt
+			}
+		}
+	}
+	return next, scopes
 }
 
 // capacityLoop owns the single coalescing pool capacity subscription. It drains
@@ -604,7 +741,13 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 	if err := validateTeamLeadAuthority(request, scope); err != nil {
 		return teams.Member{}, err
 	}
+	s.eventMu.Lock()
+	if err := s.reconcileExpiredPlanMembers(root, scope.SessionID, teamID); err != nil {
+		s.eventMu.Unlock()
+		return teams.Member{}, err
+	}
 	team, projection, err := s.teamForOperation(root, scope, teamID, actor)
+	s.eventMu.Unlock()
 	if err != nil {
 		return teams.Member{}, err
 	}
@@ -628,7 +771,7 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 	}
 	planRevisionAllowed := false
 	for _, planRequest := range projection.Requests {
-		if planRequest.TeamID == team.ID && planRequest.MemberID == member.ID && planRequest.Type == teams.RequestPlan && planRequest.Status == teams.RequestRejected {
+		if planRequest.TeamID == team.ID && planRequest.MemberID == member.ID && planRequest.Type == teams.RequestPlan && (planRequest.Status == teams.RequestRejected || planRequest.Status == teams.RequestExpired) {
 			planRevisionAllowed = true
 			break
 		}
@@ -1433,11 +1576,28 @@ func (s *Service) watchTeamMember(root, sessionID, teamID, memberID, turnID stri
 	if appendTeamFactLocked(root, sessionID, teamID, sessionlog.TeamEvent{Kind: sessionlog.TeamTurnTerminal, ActorID: "service", ActorRunID: turn.OriginRunID, Turn: &terminal}) != nil {
 		return
 	}
+	// Request expiry is an independent durable fact. If its append fails, keep
+	// committing the child terminal/member state; the single expiry timer retries
+	// the request and reconciles an awaiting-plan member after the write recovers.
+	_ = s.expireDueTeamRequestsForMember(root, sessionID, teamID, memberID)
 	projection, err = sessionlog.ReplayTeams(root, sessionID, teamID)
 	if err != nil {
 		return
 	}
 	member = projection.Members[memberID]
+	planExpired := false
+	pendingPlan := false
+	for _, request := range projection.Requests {
+		if request.TeamID != teamID || request.MemberID != memberID || request.Type != teams.RequestPlan {
+			continue
+		}
+		switch request.Status {
+		case teams.RequestExpired:
+			planExpired = true
+		case teams.RequestPending, teams.RequestDeferred:
+			pendingPlan = true
+		}
+	}
 	if member.Status == teams.MemberStopping {
 		member.Status = teams.MemberStopped
 	} else {
@@ -1450,8 +1610,12 @@ func (s *Service) watchTeamMember(root, sessionID, teamID, memberID, turnID stri
 			member.Status = teams.MemberInterrupted
 		}
 	}
-	if member.Status == teams.MemberIdle && member.PlanRequired && !member.PlanApproved {
-		member.Status = teams.MemberAwaitingPlan
+	if member.Status != teams.MemberStopped && member.PlanRequired && !member.PlanApproved {
+		if member.Status == teams.MemberIdle && planExpired && !pendingPlan {
+			member.Status = teams.MemberIdle
+		} else if member.Status == teams.MemberIdle {
+			member.Status = teams.MemberAwaitingPlan
+		}
 	}
 	if member.Budget.CanAccept() != nil && member.Status != teams.MemberStopped {
 		member.Status = teams.MemberBudgetExhausted
