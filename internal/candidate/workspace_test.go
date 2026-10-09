@@ -185,6 +185,15 @@ func TestCreateCandidateProjectV2OmitsProtectedMetadata(t *testing.T) {
 	}
 }
 
+func TestAcceptanceRejectsReviewWithDifferentManifestPolicy(t *testing.T) {
+	candidate := Candidate{ID: "candidate-policy", Status: "reviewed", ManifestPolicy: ManifestPolicyProject}
+	review := Review{CandidateID: candidate.ID, ManifestPolicy: ManifestPolicyLegacy}
+	err := validateAcceptance(context.Background(), candidate, review, AcceptanceDecision{})
+	if err == nil || err.Error() != "review manifest policy does not match candidate" {
+		t.Fatalf("acceptance silently accepted a mismatched manifest contract: %v", err)
+	}
+}
+
 func TestProjectV2AcceptanceRestoresProtectedMetadata(t *testing.T) {
 	root := t.TempDir()
 	formal := filepath.Join(root, "formal")

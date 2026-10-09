@@ -130,11 +130,14 @@ func TestGoalTeamIsIsolatedByGoalAndWorkItem(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer state.Close()
-	goalRoot := filepath.Join(root, "goal")
-	if err := os.MkdirAll(goalRoot, 0700); err != nil {
-		t.Fatal(err)
+	goalRoots := map[string]string{
+		"goal-one": filepath.Join(root, "goal-one-root"),
+		"goal-two": filepath.Join(root, "goal-two-root"),
 	}
-	for _, id := range []string{"goal-one", "goal-two"} {
+	for id, goalRoot := range goalRoots {
+		if err := os.MkdirAll(goalRoot, 0700); err != nil {
+			t.Fatal(err)
+		}
 		goal := coreGoal(id, goalRoot, session.ID)
 		goal.Objective = "team scope fixture"
 		if _, err := state.CreateGoal(context.Background(), goal); err != nil {
@@ -145,8 +148,13 @@ func TestGoalTeamIsIsolatedByGoalAndWorkItem(t *testing.T) {
 	if _, err := sessionlog.Append(root, session.ID, sessionlog.EventRunStarted, sessionlog.RunStarted{RunID: "goal-run", WorkKind: string(work.Kind), GoalID: work.GoalID, WorkItemID: work.WorkItemID, Intent: "team scope fixture"}); err != nil {
 		t.Fatal(err)
 	}
-	service := &Service{deps: Deps{ProjectRoot: root, Store: state}, activeRuns: map[string]string{"goal-run": session.ID}}
+	otherWork := agent.WorkRef{Kind: agent.WorkGoal, SessionID: session.ID, GoalID: "goal-two", WorkItemID: "item-two"}
+	if _, err := sessionlog.Append(root, session.ID, sessionlog.EventRunStarted, sessionlog.RunStarted{RunID: "other-goal-run", WorkKind: string(otherWork.Kind), GoalID: otherWork.GoalID, WorkItemID: otherWork.WorkItemID, Intent: "other goal team scope fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{deps: Deps{ProjectRoot: root, Store: state}, activeRuns: map[string]string{"goal-run": session.ID, "other-goal-run": session.ID}}
 	request := agent.ExecutionRequest{RunID: "goal-run", Work: work}
+	otherGoalRequest := agent.ExecutionRequest{RunID: "other-goal-run", Work: otherWork}
 	team, err := service.CreateTeam(context.Background(), request, "goal-research")
 	if err != nil {
 		t.Fatal(err)
@@ -157,6 +165,12 @@ func TestGoalTeamIsIsolatedByGoalAndWorkItem(t *testing.T) {
 	addTeamMessageMember(t, service, request, team.ID, "goal-member", "reader")
 	if _, err := service.SendTeamMessage(context.Background(), request, TeamSendRequest{TeamID: team.ID, Recipient: "goal-member", Body: "authorized goal message", Token: "goal-message-valid"}); err != nil {
 		t.Fatalf("matching goal work item could not message its team: %v", err)
+	}
+	if _, err := service.GetTeam(context.Background(), otherGoalRequest, team.ID); err == nil {
+		t.Fatal("valid lead run for a different goal/root queried the first goal's team")
+	}
+	if _, err := service.SendTeamMessage(context.Background(), otherGoalRequest, TeamSendRequest{TeamID: team.ID, Recipient: "goal-member", Body: "cross-goal message", Token: "goal-message-cross-goal"}); err == nil {
+		t.Fatal("valid lead run for a different goal/root messaged the first goal's team")
 	}
 	for _, forged := range []agent.WorkRef{
 		{Kind: agent.WorkGoal, SessionID: session.ID, GoalID: "goal-one", WorkItemID: "item-two"},
