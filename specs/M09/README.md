@@ -30,7 +30,7 @@
 
 随后并行补入 E 任务 assignee 归属校验及 F workspace ownership 跨 Project/Goal/WorkItem 伪造 scope 拒绝测试，分别记录于 E/F checklist；定向测试通过。SHA `a156e76` 包含两项实现/测试，需等待该 SHA 的云端组合验证；SHA `23e89f1` 的 Go 与 Workspace Linux workflow 已通过，E2E 仍在运行。E/F 整体验收仍未完成。
 
-继续并行补入 E 父 run 正常完成后已接收 child 继续运行测试，以及 F clean-remove 保留 ignored/private Git 数据和 manifest 字节配额精确边界测试；对应定向测试通过，记录在 E/F checklist。SHA `5fdf043` 包含 E/F 这些新增测试，待云端复验；M09-E/F 仍有广泛 AC 与组合场景开放。
+继续并行补入 E 父 run 正常完成后已接收 child 继续运行、已完成任务拒绝成员认领，以及 F clean-remove 保留 ignored/private Git 数据、活跃 writer/binding 防移除和 manifest 字节配额精确边界测试；对应定向测试通过，记录在 E/F checklist。SHA `b0d994c` 包含这些新增 E/F 证据，待云端复验；M09-E/F 仍有广泛 AC 与组合场景开放。
 
 ## 全部完成的条件
 
