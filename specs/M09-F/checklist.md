@@ -1,6 +1,6 @@
 # M09-F 受控工作树与并行写入 Checklist
 
-> 状态：规格已批准，实施代码已提交；AC1–9 仍需逐项验收。最新 SHA `eba916a` 的真实 Linux writer/sandbox/quota workflow、Go build/unit、package 与 E2E 全部 jobs 通过；A/B/C/D旧CI不作为F实现证据（2026-10-09）。
+> 状态：规格已批准，实施代码已提交；AC1–9 仍需逐项验收。最新 SHA `60a3cc6` 的真实 Linux writer/sandbox/quota workflow、Go build/unit、package 与 E2E 全部 jobs 通过；E2E 的 `e2e-m03` 首次 bridge EOF 后复跑成功；A/B/C/D旧CI不作为F实现证据（2026-10-09）。
 
 ## 审批与追溯
 
@@ -123,3 +123,4 @@
 | 并行导出/用户接受/TUI恢复 | `TestSequentialWorkspaceCandidateAcceptsPreserveIndependentChanges`、`TestWorkspaceConflictResolutionExportsReviewedCandidateForAcceptance`、`TestWorkspaceConflictResolutionClientRequestRequiresSeparateAcceptance`；Go run 37874596313 `build-and-test`、E2E run 37874596359 `unit` | [Go run 37874596313](https://github.com/kikoiio/Stable/actions/runs/37874596313), [E2E run 37874596359](https://github.com/kikoiio/Stable/actions/runs/37874596359) | 已验证顺序候选接受保留独立文件、并发重复 export 幂等、真实 socket resolution 后单独接受；尚未覆盖同时 export+accept、真实 TUI 到 accept 的完整恢复闭环。 |
 | Go全量 / package | SHA `eba916a` | [Go run 37874596313](https://github.com/kikoiio/Stable/actions/runs/37874596313), `build-and-test`, `test-package` | Go build、`go test ./...` 与 package acceptance 均通过。 |
 | E2E及M09组合 | SHA `eba916a` | [E2E run 37874596359](https://github.com/kikoiio/Stable/actions/runs/37874596359), [Workspace Linux run 37874596321](https://github.com/kikoiio/Stable/actions/runs/37874596321) | 所有 E2E jobs 与 `writer-sandbox-volume` 成功；M03 isolated computer bridge 首次 EOF，复跑失败 job 后全绿。workflow 未覆盖 E/F AC1–9 全部 lifecycle 和组合场景。 |
+| 当前 Go、package、E2E 与 Workspace Linux 组合回归 | SHA `60a3cc669e8cd950c8bcb0cf4ed9345b92b4cf96` | [Go run 37876744035](https://github.com/kikoiio/Stable/actions/runs/37876744035), [E2E run 37876744085](https://github.com/kikoiio/Stable/actions/runs/37876744085), [Workspace Linux run 37876743971](https://github.com/kikoiio/Stable/actions/runs/37876743971) | Go `build-and-test`/`test-package`、E2E 全部 jobs 与 `writer-sandbox-volume` 均成功；E2E `e2e-m03` 首次 isolated computer bridge EOF，单独复跑失败 job 后成功。通用回归仍不替代 F AC1–9 的生命周期、并行导出/接收组合验收。 |
