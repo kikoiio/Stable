@@ -57,6 +57,7 @@ type ClientMsg struct {
 	TeamToken            string                  `json:"team_token,omitempty"`
 	TeamBroadcast        bool                    `json:"team_broadcast,omitempty"`
 	TeamRequestID        string                  `json:"team_request_id,omitempty"`
+	AfterTeamRequestID   string                  `json:"after_team_request_id,omitempty"`
 	TeamDecision         string                  `json:"team_decision,omitempty"`
 	TeamFeedback         string                  `json:"team_feedback,omitempty"`
 	TeamMemberID         string                  `json:"team_member_id,omitempty"`
@@ -530,15 +531,15 @@ func validateClient(m ClientMsg) error {
 		}
 		switch m.Op {
 		case "team_request_list":
-			if m.Limit < 0 || m.Limit > teams.MaxPageSize {
-				return fmt.Errorf("team_request_list page size exceeds the maximum")
+			if m.Limit < 0 || m.Limit > teams.MaxPageSize || m.AfterTeamRequestID != "" && teams.ValidateID(m.AfterTeamRequestID) != nil {
+				return fmt.Errorf("team_request_list requires a bounded page and valid cursor")
 			}
 		case "team_request_respond":
-			if m.Limit != 0 || teams.ValidateID(m.TeamRequestID) != nil || m.ExpectedRevision == 0 || (m.TeamDecision != string(teams.RequestApproved) && m.TeamDecision != string(teams.RequestRejected) && m.TeamDecision != string(teams.RequestDeferred)) || teams.ValidateText(m.TeamFeedback, teams.MaxFeedbackBytes, false) != nil {
+			if m.Limit != 0 || m.AfterTeamRequestID != "" || teams.ValidateID(m.TeamRequestID) != nil || m.ExpectedRevision == 0 || (m.TeamDecision != string(teams.RequestApproved) && m.TeamDecision != string(teams.RequestRejected) && m.TeamDecision != string(teams.RequestDeferred)) || teams.ValidateText(m.TeamFeedback, teams.MaxFeedbackBytes, false) != nil {
 				return fmt.Errorf("team_request_respond requires a current request revision and bounded response")
 			}
 		case "team_shutdown_request":
-			if m.Limit != 0 || teams.ValidateID(m.TeamMemberID) != nil {
+			if m.Limit != 0 || m.AfterTeamRequestID != "" || teams.ValidateID(m.TeamMemberID) != nil {
 				return fmt.Errorf("team_shutdown_request requires member_id")
 			}
 		}

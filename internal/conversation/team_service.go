@@ -597,7 +597,7 @@ func (s *Service) handleTeamRequest(ctx context.Context, msg ClientMsg) (ServerM
 		}
 		switch msg.Op {
 		case "team_request_list":
-			requests, requestErr := s.ListTeamRequests(ctx, request, msg.TeamID, msg.Limit)
+			requests, requestErr := s.ListTeamRequestsPage(ctx, request, msg.TeamID, msg.AfterTeamRequestID, msg.Limit)
 			return ServerMsg{Type: msg.Op, TeamRequests: requests}, requestErr
 		case "team_request_respond":
 			requestFact, requestErr := s.RespondTeamRequest(ctx, request, msg.TeamID, msg.TeamRequestID, msg.ExpectedRevision, msg.TeamDecision, msg.TeamFeedback)

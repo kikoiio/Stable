@@ -18,29 +18,30 @@ func (s *Service) ExecuteTeamTool(ctx context.Context, request agent.ExecutionRe
 		return out, nil
 	}
 	var args struct {
-		Name             *string   `json:"name"`
-		MemberName       string    `json:"member_name"`
-		AgentName        string    `json:"agent_name"`
-		Instruction      string    `json:"instruction"`
-		PlanRequired     bool      `json:"plan_required"`
-		TeamID           string    `json:"team_id"`
-		MemberID         string    `json:"member_id"`
-		TaskID           string    `json:"task_id"`
-		Title            *string   `json:"title"`
-		Description      *string   `json:"description"`
-		Assignee         *string   `json:"assignee"`
-		BlockedBy        *[]string `json:"blocked_by"`
-		Status           *string   `json:"status"`
-		ExpectedRevision uint64    `json:"expected_revision"`
-		Recipient        string    `json:"recipient"`
-		Body             string    `json:"body"`
-		Broadcast        bool      `json:"broadcast"`
-		AfterSeq         uint64    `json:"after_seq"`
-		AfterTaskID      string    `json:"after_task_id"`
-		Limit            int       `json:"limit"`
-		RequestID        string    `json:"request_id"`
-		Decision         string    `json:"decision"`
-		Feedback         string    `json:"feedback"`
+		Name               *string   `json:"name"`
+		MemberName         string    `json:"member_name"`
+		AgentName          string    `json:"agent_name"`
+		Instruction        string    `json:"instruction"`
+		PlanRequired       bool      `json:"plan_required"`
+		TeamID             string    `json:"team_id"`
+		MemberID           string    `json:"member_id"`
+		TaskID             string    `json:"task_id"`
+		Title              *string   `json:"title"`
+		Description        *string   `json:"description"`
+		Assignee           *string   `json:"assignee"`
+		BlockedBy          *[]string `json:"blocked_by"`
+		Status             *string   `json:"status"`
+		ExpectedRevision   uint64    `json:"expected_revision"`
+		Recipient          string    `json:"recipient"`
+		Body               string    `json:"body"`
+		Broadcast          bool      `json:"broadcast"`
+		AfterSeq           uint64    `json:"after_seq"`
+		AfterTaskID        string    `json:"after_task_id"`
+		Limit              int       `json:"limit"`
+		RequestID          string    `json:"request_id"`
+		AfterTeamRequestID string    `json:"after_team_request_id"`
+		Decision           string    `json:"decision"`
+		Feedback           string    `json:"feedback"`
 	}
 	if err := json.Unmarshal(call.Arguments, &args); err != nil {
 		out.Content = "Error: invalid team tool arguments"
@@ -121,7 +122,7 @@ func (s *Service) ExecuteTeamTool(ctx context.Context, request agent.ExecutionRe
 	case "team_plan_submit":
 		result, err = s.SubmitTeamPlan(ctx, request, args.TeamID, args.Body)
 	case "team_request_list":
-		result, err = s.ListTeamRequests(ctx, request, args.TeamID, args.Limit)
+		result, err = s.ListTeamRequestsPage(ctx, request, args.TeamID, args.AfterTeamRequestID, args.Limit)
 	case "team_request_respond":
 		result, err = s.RespondTeamRequest(ctx, request, args.TeamID, args.RequestID, args.ExpectedRevision, args.Decision, args.Feedback)
 	case "team_shutdown_request":

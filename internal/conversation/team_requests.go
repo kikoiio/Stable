@@ -160,6 +160,14 @@ func (s *Service) ListTeamRequests(ctx context.Context, request agent.ExecutionR
 	if len(requestedLimit) == 1 {
 		limit = requestedLimit[0]
 	}
+	return s.ListTeamRequestsPage(ctx, request, teamID, "", limit)
+}
+
+// ListTeamRequestsPage returns a bounded expiry/ID-ordered page after a visible request ID.
+func (s *Service) ListTeamRequestsPage(ctx context.Context, request agent.ExecutionRequest, teamID, afterRequestID string, limit int) ([]teams.Request, error) {
+	if afterRequestID != "" && teams.ValidateID(afterRequestID) != nil {
+		return nil, errors.New("team request cursor is invalid")
+	}
 	root, scope, actor, err := s.teamOperationScope(ctx, request)
 	if err != nil {
 		return nil, err
@@ -209,6 +217,19 @@ func (s *Service) ListTeamRequests(ctx context.Context, request agent.ExecutionR
 		}
 		return out[i].ExpiresAt.Before(out[j].ExpiresAt)
 	})
+	if afterRequestID != "" {
+		cursorIndex := -1
+		for i := range out {
+			if out[i].ID == afterRequestID {
+				cursorIndex = i
+				break
+			}
+		}
+		if cursorIndex < 0 {
+			return nil, teams.ErrNotFound
+		}
+		out = out[cursorIndex+1:]
+	}
 	pageSize := teams.PageSize(limit)
 	if len(out) > pageSize {
 		out = out[:pageSize]
