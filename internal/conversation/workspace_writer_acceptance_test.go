@@ -304,6 +304,9 @@ func TestWorkspaceWriterRealSyncBackgroundDefinitionAndDirect(t *testing.T) {
 			}
 			role := fmt.Sprintf("---\nname: builder\ndescription: bounded writer\nisolation: %s\n---\nWrite only the assigned checkout.\n", isolation)
 			runner := agentTaskTestRunner(func(ctx context.Context, input agent.ChildRunInput) agent.ChildRunResult {
+				if input.WorkspaceID == "" || input.WorkspaceGeneration == 0 {
+					return agent.ChildRunResult{Status: agent.DelegationFailed, Error: "delegated child did not receive workspace ID and generation"}
+				}
 				executor, err := input.ExecutorFactory.ForRun(agent.ExecutionRequest{RunID: input.ChildRunID, Work: input.Work, PermissionBounds: input.PermissionBounds})
 				if err != nil {
 					return agent.ChildRunResult{Status: agent.DelegationFailed, Error: err.Error()}

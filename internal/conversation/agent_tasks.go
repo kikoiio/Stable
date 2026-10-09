@@ -145,6 +145,14 @@ func (c *AgentTaskCoordinator) run(ctx context.Context, parent agent.ParentRun, 
 			return agent.AgentTaskSnapshot{}, acquireErr
 		}
 		writerLease = &lease
+		// Keep the acquired workspace identity on the trusted delegation
+		// context as well as in the executor closure and durable RunStarted
+		// event. ChildRunInput is the execution boundary used by synchronous,
+		// background, and definition-isolated named agents; carrying the lease
+		// generation there lets every runner attribute work to the exact
+		// workspace generation it is authorized to write.
+		parent.WorkspaceID = lease.WorkspaceID
+		parent.WorkspaceGeneration = lease.Generation
 		parent.ExecutorFactory = execution.WorkspaceWriterExecutorFactory(parent.ExecutorFactory, lease, manager)
 		if parent.ExecutorFactory == nil {
 			_, _ = manager.ReleaseCompletedWriter(context.Background(), lease)

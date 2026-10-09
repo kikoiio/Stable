@@ -81,6 +81,9 @@ func TestWorkspaceBackgroundWriterSurvivesSocketDisconnectAndParentCompletion(t 
 	if invocation.ctx.Err() != nil {
 		t.Fatalf("request disconnect canceled background writer: %v", invocation.ctx.Err())
 	}
+	if invocation.input.WorkspaceID != background.WorkspaceID || invocation.input.WorkspaceGeneration != background.WorkspaceGeneration || invocation.input.WorkspaceID == "" || invocation.input.WorkspaceGeneration == 0 {
+		t.Fatalf("delegated child lost its trusted workspace generation: input=%q/%d task=%q/%d", invocation.input.WorkspaceID, invocation.input.WorkspaceGeneration, background.WorkspaceID, background.WorkspaceGeneration)
+	}
 	if invocation.input.ProjectRoot == root {
 		t.Fatal("writer child was given the formal project root")
 	}

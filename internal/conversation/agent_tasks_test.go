@@ -12,6 +12,7 @@ import (
 
 	"stable/internal/agent"
 	"stable/internal/agentcatalog"
+	"stable/internal/execution"
 	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/sessionlog"
@@ -198,6 +199,69 @@ func TestAgentTaskSocketDisconnectAndParentCompletionKeepBackgroundAlive(t *test
 	}
 	if got := waitAgentTaskTerminal(t, svc, parent, direct.ID); got.Status != agent.DelegationSucceeded {
 		t.Fatalf("direct background=%+v", got)
+	}
+}
+
+func TestNamedWorktreeAgentChildReceivesLeaseAcrossEntryModes(t *testing.T) {
+	for _, entry := range []string{"sync", "background", "definition"} {
+		t.Run(entry, func(t *testing.T) {
+			isolation := "none"
+			if entry == "definition" {
+				isolation = "worktree"
+			}
+			role := fmt.Sprintf("---\nname: builder\ndescription: isolated writer\nisolation: %s\n---\nWrite only the assigned checkout.\n", isolation)
+			seen := make(chan agent.ChildRunInput, 1)
+			runner := agentTaskTestRunner(func(_ context.Context, input agent.ChildRunInput) agent.ChildRunResult {
+				seen <- input
+				return agent.ChildRunResult{Status: agent.DelegationSucceeded, Summary: "done"}
+			})
+			svc, root, session := newAgentTaskTestService(t, runner, role)
+			stateRoot, err := os.MkdirTemp(filepath.Dir(root), "named-writer-state-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(stateRoot) })
+			svc.deps.WorkspaceStateRoot = stateRoot
+
+			parentRunID, err := sessionlog.NewID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			parent := agentTaskTestParent(t, svc, session, parentRunID)
+			parent.ExecutorFactory = execution.NewToolExecutorFactory(execution.ToolExecutorDeps{})
+			svc.mu.Lock()
+			svc.activeRuns[parent.RunID] = session
+			svc.activeRequests[parent.RunID] = agent.ExecutionRequest{RunID: parent.RunID, Work: parent.Work, PermissionBounds: parent.PermissionBounds}
+			svc.mu.Unlock()
+
+			req := agent.AgentTaskRequest{AgentName: "builder", Instruction: "write a bounded change", Isolation: "worktree", Background: entry == "background"}
+			if entry == "definition" {
+				req.Isolation = "" // Definition isolation must select the same leased path.
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			task, err := svc.deps.AgentTasks.Run(ctx, parent, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !task.Status.IsTerminal() {
+				task, err = svc.deps.AgentTasks.Output(ctx, parent, task.ID, time.Second)
+			}
+			if err != nil || task.Status != agent.DelegationSucceeded {
+				t.Fatalf("worktree task did not complete: %+v err=%v", task, err)
+			}
+			input := <-seen
+			if input.WorkspaceID == "" || input.WorkspaceID != task.WorkspaceID || input.WorkspaceGeneration == 0 || input.WorkspaceGeneration != task.WorkspaceGeneration {
+				t.Fatalf("child lost its trusted workspace generation: input=%q/%d task=%q/%d", input.WorkspaceID, input.WorkspaceGeneration, task.WorkspaceID, task.WorkspaceGeneration)
+			}
+			if filepath.Clean(input.ProjectRoot) == filepath.Clean(root) {
+				t.Fatalf("child received formal root instead of its workspace: %q", input.ProjectRoot)
+			}
+			svc.mu.Lock()
+			delete(svc.activeRuns, parent.RunID)
+			delete(svc.activeRequests, parent.RunID)
+			svc.mu.Unlock()
+		})
 	}
 }
 
