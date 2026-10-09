@@ -22,7 +22,10 @@ import (
 	"stable/internal/platform/secfile"
 )
 
-const privateGitVersion = 1
+// Version 2 binds a workspace to the physical formal root that was captured
+// during materialization. Version 1 receipts lack that identity and fail
+// closed for operations that can execute or export workspace changes.
+const privateGitVersion = 2
 const gitStateName = "git-state.json"
 const privateGitConfiguration = "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n\tlogallrefupdates = false\n"
 const baselineRef = "refs/stable/baseline"
@@ -37,6 +40,7 @@ type GitState struct {
 	Generation           uint64       `json:"generation"`
 	BaselineDigest       string       `json:"baseline_digest"`
 	BaselineCommit       string       `json:"baseline_commit"`
+	FormalRootIdentity   RootIdentity `json:"formal_root_identity"`
 	BaselineIdentity     RootIdentity `json:"baseline_identity"`
 	RepositoryIdentity   RootIdentity `json:"repository_identity"`
 	CheckoutIdentity     RootIdentity `json:"checkout_identity"`
@@ -160,6 +164,10 @@ func (g *PrivateGit) Materialize(ctx context.Context, scope Scope, id string) (r
 		return GitState{}, err
 	}
 	defer sourceHandle.Close()
+	formalRootIdentity, err := rootIdentity(sourceIdentity)
+	if err != nil {
+		return GitState{}, err
+	}
 	expected, err := BuildManifest(ctx, g.layout.FormalRoot(), g.limits)
 	if err != nil {
 		return GitState{}, err
@@ -262,7 +270,7 @@ func (g *PrivateGit) Materialize(ctx context.Context, scope Scope, id string) (r
 	if err := revalidateRoot(g.layout.FormalRoot(), sourceIdentity); err != nil {
 		return GitState{}, err
 	}
-	result = GitState{Version: privateGitVersion, WorkspaceID: id, Generation: record.Snapshot.Generation, BaselineDigest: baseline.Digest, BaselineCommit: commit}
+	result = GitState{Version: privateGitVersion, WorkspaceID: id, Generation: record.Snapshot.Generation, BaselineDigest: baseline.Digest, BaselineCommit: commit, FormalRootIdentity: formalRootIdentity}
 	identities := []struct {
 		path     string
 		identity *RootIdentity
@@ -737,6 +745,9 @@ func (g *PrivateGit) Validate(ctx context.Context, scope Scope, id string) (GitS
 	if state.Version != privateGitVersion || state.WorkspaceID != id || state.Generation == 0 || state.Generation > record.Snapshot.Generation || !validGitOID(state.BaselineCommit) || state.UsedBytes < 0 {
 		return GitState{}, ErrOwnership
 	}
+	if err := g.validateFormalRootIdentity(state.FormalRootIdentity); err != nil {
+		return GitState{}, ErrOwnership
+	}
 	if record.Snapshot.BaselineDigest != "" && record.Snapshot.BaselineDigest != state.BaselineDigest {
 		return GitState{}, ErrOwnership
 	}
@@ -745,6 +756,55 @@ func (g *PrivateGit) Validate(ctx context.Context, scope Scope, id string) (GitS
 	}
 	state.UsedBytes, err = DiskUsage(ctx, paths.Root, g.limits)
 	return state, err
+}
+
+// validateFormalRoot performs the cheap identity-only check used on every
+// workspace tool call. Full Validate additionally scans private Git metadata
+// and the immutable baseline, which is unnecessary for each tool invocation.
+func (g *PrivateGit) validateFormalRoot(ctx context.Context, scope Scope, id string) error {
+	record, err := g.store.Load(ctx, scope, id)
+	if err != nil {
+		return err
+	}
+	paths, err := g.layout.Paths(id)
+	if err != nil {
+		return err
+	}
+	root, _, err := openVerifiedRoot(paths.Root)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	raw, err := readPrivateFile(root, gitStateName, 4096)
+	if err != nil {
+		return err
+	}
+	var state GitState
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil {
+		return err
+	}
+	if decoder.Decode(new(any)) != io.EOF || state.Version != privateGitVersion || state.WorkspaceID != id || state.Generation == 0 || state.Generation > record.Snapshot.Generation {
+		return ErrOwnership
+	}
+	return g.validateFormalRootIdentity(state.FormalRootIdentity)
+}
+
+func (g *PrivateGit) validateFormalRootIdentity(expected RootIdentity) error {
+	formalRoot, formalInfo, err := openVerifiedRoot(g.layout.FormalRoot())
+	if err != nil {
+		return err
+	}
+	defer formalRoot.Close()
+	current, err := rootIdentity(formalInfo)
+	if err != nil || current != expected {
+		return ErrOwnership
+	}
+	if err := revalidateRoot(g.layout.FormalRoot(), formalInfo); err != nil {
+		return ErrOwnership
+	}
+	return nil
 }
 
 func (g *PrivateGit) validateContents(ctx context.Context, paths Paths, state GitState) error {

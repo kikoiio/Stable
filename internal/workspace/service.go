@@ -781,6 +781,9 @@ func (s *LifecycleService) ReserveWriterWrite(ctx context.Context, lease WriterL
 	if record.Snapshot.State != StateWriting || record.Snapshot.WriterRunID != lease.RunID || record.Snapshot.Generation != lease.Generation {
 		return nil, ErrOwnership
 	}
+	if err := s.git.validateFormalRoot(ctx, lease.Scope, lease.WorkspaceID); err != nil {
+		return nil, err
+	}
 	reservation, err := s.budget.ReserveWrite(lease.WorkspaceID, growth)
 	if err != nil {
 		return nil, err
@@ -806,6 +809,9 @@ func (s *LifecycleService) RegisterWriterProcess(ctx context.Context, lease Writ
 	}
 	if record.Snapshot.State != StateWriting || record.Snapshot.WriterRunID != lease.RunID || record.Snapshot.Generation != lease.Generation || record.Operation.Process != nil {
 		return ErrOwnership
+	}
+	if err := s.git.validateFormalRoot(ctx, lease.Scope, lease.WorkspaceID); err != nil {
+		return err
 	}
 	if process.PID <= 0 || process.ProcessGroup != process.PID || process.StartTimeTicks == 0 || len(process.Token) != 64 || process.WorkspaceID != lease.WorkspaceID || process.RunID != lease.RunID || process.Generation != lease.Generation {
 		return ErrOwnership
@@ -1066,6 +1072,9 @@ func (s *LifecycleService) Export(ctx context.Context, scope Scope, id string) (
 	if record.Snapshot.State != StateReady && record.Snapshot.State != StateKept && record.Snapshot.State != StateExported {
 		return Snapshot{}, ErrOwnership
 	}
+	if _, err := s.git.Validate(ctx, scope, id); err != nil {
+		return Snapshot{}, err
+	}
 	if record.Snapshot.State == StateExported && record.Snapshot.CandidateID != "" {
 		paths, err := s.layout.Paths(id)
 		if err != nil {
@@ -1142,6 +1151,9 @@ func (s *LifecycleService) Preview(ctx context.Context, scope Scope, id string) 
 	}
 	if record.Snapshot.State != StateReady && record.Snapshot.State != StateKept {
 		return Snapshot{}, ErrOwnership
+	}
+	if _, err := s.git.Validate(ctx, scope, id); err != nil {
+		return Snapshot{}, err
 	}
 	paths, err := s.layout.Paths(id)
 	if err != nil {
