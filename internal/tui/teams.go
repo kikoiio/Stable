@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -74,7 +75,7 @@ func registerTeamCommands(host *commandHost, registry *commands.Registry) {
 		sendTeamRequest(host, req, "正在读取团队…")
 	}})
 
-	registry.Register(&commands.Command{Name: "team", Description: "查看团队、任务、消息和请求", ArgPrompt: "ID get|members [limit]|tasks list [limit [after-task-id]]|messages|requests [list [limit [after-request-id]]]|send|respond|shutdown", Kind: commands.KindLocal, Local: func(args string) {
+	registry.Register(&commands.Command{Name: "team", Description: "查看团队、任务、消息和请求", ArgPrompt: "ID get|members [limit [after-member-id]]|tasks list [limit [after-task-id]]|messages|requests [list [limit [after-request-id]]]|send|respond|shutdown", Kind: commands.KindLocal, Local: func(args string) {
 		m := host.model
 		fields := strings.Fields(args)
 		if m.ActiveSession == "" {
@@ -99,20 +100,30 @@ func registerTeamCommands(host *commandHost, registry *commands.Registry) {
 			req = base
 		case "members":
 			limit := 0
+			afterMemberID := ""
 			if rest != "" {
 				fields := strings.Fields(rest)
-				if len(fields) != 1 {
-					m.Status = "用法：/team <ID> members [条数，1-100]"
+				if len(fields) < 1 || len(fields) > 2 {
+					m.Status = "用法：/team <ID> members [条数，1-100 [上一页末尾成员ID]]"
 					return
 				}
 				parsed, err := strconv.Atoi(fields[0])
 				if err != nil || parsed < 1 || parsed > teams.MaxPageSize {
-					m.Status = "用法：/team <ID> members [条数，1-100]"
+					m.Status = "用法：/team <ID> members [条数，1-100 [上一页末尾成员ID]]"
 					return
 				}
 				limit = parsed
+				if len(fields) == 2 {
+					if teams.ValidateID(fields[1]) != nil {
+						m.Status = "用法：/team <ID> members [条数，1-100 [上一页末尾成员ID]]"
+						return
+					}
+					afterMemberID = fields[1]
+				}
 			}
-			m.showTeamMembers(teamID, limit)
+			if err := m.showTeamMembers(teamID, limit, afterMemberID); err != nil {
+				m.Status = err.Error()
+			}
 			return
 		case "tasks":
 			req, m.Status = teamTaskRequest(base, rest)
@@ -520,11 +531,10 @@ func upsertTeamRequest(items []teams.Request, item teams.Request) []teams.Reques
 	return append(items, item)
 }
 
-func (m *Model) showTeamMembers(teamID string, limit int) {
+func (m *Model) showTeamMembers(teamID string, limit int, afterMemberID string) error {
 	projection, err := sessionlog.ProjectTeams(sessionlog.Transcript{Session: sessionlog.SessionInfo{ID: m.ActiveSession}, Events: m.Events})
 	if err != nil {
-		m.Status = "无法读取会话团队投影：" + err.Error()
-		return
+		return fmt.Errorf("无法读取会话团队投影：%w", err)
 	}
 	members := make([]teams.Member, 0)
 	for _, member := range projection.Members {
@@ -533,12 +543,16 @@ func (m *Model) showTeamMembers(teamID string, limit int) {
 		}
 	}
 	if _, ok := projection.Teams[teamID]; !ok {
-		m.Status = "当前会话中找不到该团队。"
-		return
+		return errors.New("当前会话中找不到该团队。")
 	}
-	m.TeamMembers = teams.MembersPage(members, limit)
+	page, err := teams.MembersPageAfter(members, afterMemberID, limit)
+	if err != nil {
+		return err
+	}
+	m.TeamMembers = page
 	m.appendTeamNote(formatTeamMembers(teamID, m.TeamMembers))
 	m.Status = fmt.Sprintf("团队成员：%d/%d", len(m.TeamMembers), len(members))
+	return nil
 }
 
 func (m *Model) appendTeamNote(text string) {

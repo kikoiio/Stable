@@ -41,6 +41,7 @@ func (s *Service) ExecuteTeamTool(ctx context.Context, request agent.ExecutionRe
 		Limit              int       `json:"limit"`
 		RequestID          string    `json:"request_id"`
 		AfterTeamRequestID string    `json:"after_team_request_id"`
+		AfterMemberID      string    `json:"after_member_id"`
 		Decision           string    `json:"decision"`
 		Feedback           string    `json:"feedback"`
 	}
@@ -104,7 +105,7 @@ func (s *Service) ExecuteTeamTool(ctx context.Context, request agent.ExecutionRe
 					members = append(members, member)
 				}
 			}
-			result = teams.MembersPage(members, args.Limit)
+			result, err = teams.MembersPageAfter(members, args.AfterMemberID, args.Limit)
 		}
 	case "team_close":
 		if args.TeamID == "" {

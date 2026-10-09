@@ -108,6 +108,15 @@ func PageSize(limit int) int {
 
 // MembersPage returns a stable, bounded copy of a team's member history.
 func MembersPage(members []Member, limit int) []Member {
+	page, _ := MembersPageAfter(members, "", limit)
+	return page
+}
+
+// MembersPageAfter returns a stable page after the previous visible member ID.
+func MembersPageAfter(members []Member, afterMemberID string, limit int) ([]Member, error) {
+	if afterMemberID != "" && ValidateID(afterMemberID) != nil {
+		return nil, errors.New("team member cursor is invalid")
+	}
 	page := append([]Member(nil), members...)
 	sort.Slice(page, func(i, j int) bool {
 		if page[i].Name == page[j].Name {
@@ -115,11 +124,24 @@ func MembersPage(members []Member, limit int) []Member {
 		}
 		return page[i].Name < page[j].Name
 	})
+	if afterMemberID != "" {
+		cursorIndex := -1
+		for i := range page {
+			if page[i].ID == afterMemberID {
+				cursorIndex = i
+				break
+			}
+		}
+		if cursorIndex < 0 {
+			return nil, errors.New("team member cursor was not found")
+		}
+		page = page[cursorIndex+1:]
+	}
 	pageSize := PageSize(limit)
 	if len(page) > pageSize {
 		page = page[:pageSize]
 	}
-	return page
+	return page, nil
 }
 
 func WaitDuration(wait time.Duration) time.Duration {
