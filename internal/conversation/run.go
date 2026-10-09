@@ -147,8 +147,8 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		if bindingErr != nil {
 			return bindingErr
 		}
-		if boundID != "" {
-			if mode == permission.ModePlan || teamCoordinatorMode || request.TeamTurn != nil || request.TeamUser {
+		if boundID != "" && !teamCoordinatorMode {
+			if mode == permission.ModePlan || request.TeamTurn != nil || request.TeamUser {
 				return workspace.ErrOwnership
 			}
 			if _, ok := s.deps.Runner.(agent.TrustedExecutorRunner); !ok {

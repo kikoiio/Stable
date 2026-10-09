@@ -106,24 +106,26 @@ func (l DelegationLimits) narrowed(request DelegationLimits) DelegationLimits {
 }
 
 type ParentRun struct {
-	// ChildRunID is assigned by a trusted named-task host before lease creation.
-	// It is only consumed by single-task admission, never by model arguments.
-	ChildRunID       string
-	TeamTurn         *TeamTurnIdentity
-	TeamLifecycle    *TeamRunLifecycle
-	RoleInstruction  string
-	ToolCallID       string
-	RunID            string
-	Deadline         time.Time
-	Budget           DelegationLimits
-	Work             WorkRef
-	ProjectRoot      string
-	PermissionBounds json.RawMessage
-	Provider         llm.Provider
-	ProviderName     string
-	Model            string
-	ToolSchemas      []llm.ToolSchema
-	ExecutorFactory  ExecutorFactory
+	// ChildRunID is assigned by a trusted host before lease creation for a
+	// single named task or accepted team-member turn. It is never model input.
+	ChildRunID          string
+	WorkspaceID         string
+	WorkspaceGeneration uint64
+	TeamTurn            *TeamTurnIdentity
+	TeamLifecycle       *TeamRunLifecycle
+	RoleInstruction     string
+	ToolCallID          string
+	RunID               string
+	Deadline            time.Time
+	Budget              DelegationLimits
+	Work                WorkRef
+	ProjectRoot         string
+	PermissionBounds    json.RawMessage
+	Provider            llm.Provider
+	ProviderName        string
+	Model               string
+	ToolSchemas         []llm.ToolSchema
+	ExecutorFactory     ExecutorFactory
 }
 
 type Delegator interface {
@@ -167,22 +169,24 @@ var (
 )
 
 type ChildRunInput struct {
-	TeamTurn         *TeamTurnIdentity
-	RoleInstruction  string
-	ParentRunID      string
-	BatchID          string
-	ChildRunID       string
-	Work             WorkRef
-	Task             DelegationTask
-	ProjectRoot      string
-	PermissionBounds json.RawMessage
-	Provider         llm.Provider
-	ProviderName     string
-	Model            string
-	Budget           DelegationLimits
-	ToolSchemas      []llm.ToolSchema
-	ExecutorFactory  ExecutorFactory
-	Progress         DelegationProgress
+	TeamTurn            *TeamTurnIdentity
+	RoleInstruction     string
+	ParentRunID         string
+	BatchID             string
+	ChildRunID          string
+	WorkspaceID         string
+	WorkspaceGeneration uint64
+	Work                WorkRef
+	Task                DelegationTask
+	ProjectRoot         string
+	PermissionBounds    json.RawMessage
+	Provider            llm.Provider
+	ProviderName        string
+	Model               string
+	Budget              DelegationLimits
+	ToolSchemas         []llm.ToolSchema
+	ExecutorFactory     ExecutorFactory
+	Progress            DelegationProgress
 }
 
 type ChildRunResult struct {
@@ -412,12 +416,20 @@ func (d *PoolDelegator) SubmitTaskCommitted(ctx context.Context, parent ParentRu
 	}
 	if parent.ChildRunID != "" {
 		decoded, err := hex.DecodeString(parent.ChildRunID)
-		if err != nil || len(decoded) != 16 || parent.ChildRunID != parent.RunID || parent.TeamTurn != nil || d.boundRuns[parent.ChildRunID] {
+		if err != nil || len(decoded) != 16 || d.boundRuns[parent.ChildRunID] {
+			return nil, errors.New("invalid or active prebound child run ID")
+		}
+		// Named tasks retain their historical parent-run lease identity. Team
+		// member workspaces need a distinct child identity, supplied by the
+		// service before admission so the writer lease can be acquired without
+		// doing workspace work under submitMu.
+		if (parent.TeamTurn == nil && parent.ChildRunID != parent.RunID) ||
+			(parent.TeamTurn != nil && parent.ChildRunID == parent.RunID) {
 			return nil, errors.New("invalid or active prebound child run ID")
 		}
 	}
 	childRunID := parent.ChildRunID
-	if parent.TeamTurn != nil {
+	if parent.TeamTurn != nil && childRunID == "" {
 		childRunID, err = d.newID()
 		if err != nil {
 			return nil, fmt.Errorf("create child run ID: %w", err)
@@ -609,10 +621,17 @@ func (d *PoolDelegator) runWork(work delegationWork) DelegationResult {
 	}
 	input, inputErr := d.childInput(work, budget)
 	if inputErr != nil {
+		if work.parent.TeamLifecycle != nil && work.parent.TeamLifecycle.Finished != nil {
+			failed := ChildRunInput{TeamTurn: cloneTeamTurnIdentity(work.parent.TeamTurn), ParentRunID: work.parent.RunID, ChildRunID: work.childRunID, WorkspaceID: work.parent.WorkspaceID, WorkspaceGeneration: work.parent.WorkspaceGeneration, Work: work.parent.Work}
+			_ = work.parent.TeamLifecycle.Finished(failed, ChildRunResult{Status: DelegationFailed, Error: "child run authority is invalid"})
+		}
 		return d.terminal(work, DelegationFailed, "", "child run authority is invalid")
 	}
 	if work.parent.TeamLifecycle != nil && work.parent.TeamLifecycle.Started != nil {
 		if err := work.parent.TeamLifecycle.Started(input); err != nil {
+			if work.parent.TeamLifecycle.Finished != nil {
+				_ = work.parent.TeamLifecycle.Finished(input, ChildRunResult{Status: DelegationFailed, Error: "could not persist team child run start"})
+			}
 			return d.terminal(work, DelegationFailed, "", "could not persist team child run start")
 		}
 	}
@@ -709,7 +728,11 @@ func (d *PoolDelegator) childInput(work delegationWork, budget DelegationLimits)
 		return ChildRunInput{}, errors.New("parent permission bounds are invalid")
 	}
 	var parentAuthorityRunID string
-	if json.Unmarshal(authority["run_id"], &parentAuthorityRunID) != nil || parentAuthorityRunID != work.parent.RunID {
+	if json.Unmarshal(authority["run_id"], &parentAuthorityRunID) != nil {
+		return ChildRunInput{}, errors.New("parent permission bounds are invalid")
+	}
+	workspaceChildAuthority := work.parent.TeamTurn != nil && work.parent.WorkspaceID != "" && work.parent.WorkspaceGeneration != 0 && work.parent.ChildRunID == childID && parentAuthorityRunID == childID
+	if parentAuthorityRunID != work.parent.RunID && !workspaceChildAuthority {
 		return ChildRunInput{}, errors.New("parent permission bounds are invalid")
 	}
 	authority["run_id"], _ = json.Marshal(childID)
@@ -719,7 +742,7 @@ func (d *PoolDelegator) childInput(work delegationWork, budget DelegationLimits)
 	}
 	return ChildRunInput{
 		TeamTurn: cloneTeamTurnIdentity(work.parent.TeamTurn), ParentRunID: work.parent.RunID,
-		BatchID: work.batchID, ChildRunID: childID, Task: work.task, RoleInstruction: work.parent.RoleInstruction,
+		BatchID: work.batchID, ChildRunID: childID, WorkspaceID: work.parent.WorkspaceID, WorkspaceGeneration: work.parent.WorkspaceGeneration, Task: work.task, RoleInstruction: work.parent.RoleInstruction,
 		Work: work.parent.Work, ProjectRoot: work.parent.ProjectRoot, Provider: work.parent.Provider,
 		PermissionBounds: childBounds, ProviderName: work.parent.ProviderName, Model: work.parent.Model,
 		Budget: budget, ToolSchemas: append([]llm.ToolSchema(nil), work.parent.ToolSchemas...),

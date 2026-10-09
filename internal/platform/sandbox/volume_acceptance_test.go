@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +37,22 @@ func TestWorkspaceRealVolumeQuotaAndMetadataAttacks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(p.ProjectRoot, "baseline.txt"), []byte("baseline"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	target := filepath.Join(root, "network-target.txt")
+	if err := os.WriteFile(target, []byte(listener.Addr().String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p.ReadOnlyFiles = []ReadOnlyFileMount{{HostPath: target, GuestPath: "/workspace/runtime/network-target.txt"}}
+	p.ReadOnlyFiles = append(p.ReadOnlyFiles, ReadOnlyFileMount{HostPath: os.Args[0], GuestPath: "/workspace/runtime/sandbox.test"})
+	probe := SandboxProfile{ProjectRoot: p.ProjectRoot, CandidateRoot: p.CandidateRoot, RunRoot: p.RunRoot, WorkspaceIsolation: true, WorkspaceVolumeRoot: root, Timeout: 5 * time.Second, ReadOnlyFiles: p.ReadOnlyFiles}
+	networkResult, err := New().RunIsolated(context.Background(), probe, []string{"/workspace/runtime/sandbox.test", "-test.run=^TestWorkspaceNetworkProbeHelper$"}, nil)
+	if err != nil || networkResult.ExitCode != 0 {
+		t.Fatalf("workspace command network probe result=%+v error=%v", networkResult, err)
+	}
 	attack := `set -eu
  test ! -s .git
  if printf attack > .git 2>/dev/null; then exit 31; fi
@@ -64,5 +81,17 @@ func TestWorkspaceRealVolumeQuotaAndMetadataAttacks(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(p.RunRoot, "quota.bin")); !os.IsNotExist(err) {
 		t.Fatalf("quota fixture leaked file: %v", err)
+	}
+}
+
+func TestWorkspaceNetworkProbeHelper(t *testing.T) {
+	target, err := os.ReadFile("/workspace/runtime/network-target.txt")
+	if err != nil {
+		t.Skip("helper is only invoked from the real workspace sandbox")
+	}
+	conn, err := net.DialTimeout("tcp", strings.TrimSpace(string(target)), 500*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("workspace command connected to host loopback")
 	}
 }

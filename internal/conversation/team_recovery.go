@@ -152,7 +152,7 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 			return fmt.Errorf("accepted turn %s has no member", turnID)
 		}
 		if _, ok := started[turn.RunID]; !ok {
-			work := sessionlog.RunStarted{RunID: turn.RunID, WorkKind: team.Scope.WorkKind, GoalID: team.Scope.GoalID, WorkItemID: team.Scope.WorkItemID, Intent: "recovered interrupted team turn", TeamID: team.ID, TeamMemberID: member.ID, TeamTurnID: turn.ID, OriginRunID: turn.OriginRunID, OriginCallID: turn.OriginCallID}
+			work := sessionlog.RunStarted{RunID: turn.RunID, WorkKind: team.Scope.WorkKind, GoalID: team.Scope.GoalID, WorkItemID: team.Scope.WorkItemID, Intent: "recovered interrupted team turn", TeamID: team.ID, TeamMemberID: member.ID, TeamTurnID: turn.ID, WorkspaceID: turn.WorkspaceID, WorkspaceGeneration: turn.WorkspaceGeneration, OriginRunID: turn.OriginRunID, OriginCallID: turn.OriginCallID}
 			if _, err := sessionlog.Append(root, sessionID, sessionlog.EventRunStarted, work); err != nil {
 				return err
 			}

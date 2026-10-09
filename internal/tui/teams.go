@@ -838,6 +838,9 @@ func formatTeamMembers(teamID string, members []teams.Member) string {
 	fmt.Fprintf(&b, "团队成员 %s（%d）\n", teamID, len(members))
 	for _, member := range members {
 		fmt.Fprintf(&b, "- %s · %s · %s · %s", member.Name, member.ID, member.AgentName, member.Status)
+		if member.WorkspaceID != "" {
+			fmt.Fprintf(&b, "\n  工作树：%s", member.WorkspaceID)
+		}
 		if member.Summary != "" {
 			fmt.Fprintf(&b, "\n  %s", member.Summary)
 		}

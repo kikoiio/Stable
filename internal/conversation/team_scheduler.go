@@ -14,10 +14,12 @@ import (
 
 	"stable/internal/agent"
 	"stable/internal/agentcatalog"
+	"stable/internal/execution"
 	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/sessionlog"
 	"stable/internal/teams"
+	"stable/internal/workspace"
 )
 
 // TeamMemberSpawnRequest contains member configuration from a trusted lead
@@ -40,6 +42,13 @@ type teamParentGrant struct {
 	Generation   uint64
 }
 
+type teamWorkspaceRun struct {
+	manager *workspace.LifecycleService
+	lease   workspace.WriterLease
+	cancel  context.CancelFunc
+	done    chan struct{}
+}
+
 type teamScheduler struct {
 	service         *Service
 	submitter       agent.CommittedTaskSubmitter
@@ -50,6 +59,7 @@ type teamScheduler struct {
 	activeOrigin    map[string]string
 	activeMember    map[string]string
 	activeTeam      map[string]string
+	workspaceRuns   map[string]teamWorkspaceRun
 	roles           map[string]agentcatalog.Definition
 	waiting         []func() error
 	grants          map[string]teamParentGrant
@@ -64,7 +74,7 @@ type teamScheduler struct {
 
 func newTeamScheduler(service *Service) *teamScheduler {
 	scheduler := &teamScheduler{
-		service: service, active: map[string]context.CancelFunc{}, activeOrigin: map[string]string{}, activeMember: map[string]string{}, activeTeam: map[string]string{},
+		service: service, active: map[string]context.CancelFunc{}, activeOrigin: map[string]string{}, activeMember: map[string]string{}, activeTeam: map[string]string{}, workspaceRuns: map[string]teamWorkspaceRun{},
 		roles: map[string]agentcatalog.Definition{}, grants: map[string]teamParentGrant{}, grantGeneration: map[string]uint64{},
 		readySet: map[string]bool{}, readyGeneration: map[string]uint64{}, wake: make(chan struct{}, 1), done: make(chan struct{}),
 	}
@@ -390,9 +400,12 @@ func (s *Service) SpawnTeamMember(ctx context.Context, request agent.ExecutionRe
 	if !ok {
 		return teams.Member{}, errors.New("unknown team member role")
 	}
+	if definition.Isolation == "worktree" && (!request.TeamCoordinator || request.TeamCoordinatorTeamID != spawn.TeamID) {
+		return teams.Member{}, teams.ErrPermission
+	}
 	tools := definition.EffectiveTools()
 	if len(tools) == 0 {
-		return teams.Member{}, errors.New("team member role has no permitted inspection tools")
+		return teams.Member{}, errors.New("team member role has no permitted tools")
 	}
 	team, projection, err := s.teamForOperation(root, scope, spawn.TeamID, actor)
 	if err != nil {
@@ -456,6 +469,18 @@ func (s *Service) SpawnTeamMember(ctx context.Context, request agent.ExecutionRe
 		Provider: s.deps.ForkProvider, ProviderName: request.ProviderName, Model: model,
 		Budget: agent.DefaultDelegationLimits(), RoleInstruction: definition.Instruction,
 	}
+	var memberWorkspace *workspace.LifecycleService
+	var writerLease *workspace.WriterLease
+	workspaceCreated := false
+	if definition.Isolation == "worktree" {
+		parent, memberWorkspace, writerLease, workspaceCreated, err = s.bindTeamMemberWorkspace(ctx, request, team.Scope, member, parent, tools)
+		if err != nil {
+			return teams.Member{}, err
+		}
+		member.WorkspaceID = writerLease.WorkspaceID
+	} else if member.WorkspaceID != "" {
+		return teams.Member{}, errors.New("team member worktree isolation cannot be removed after workspace creation")
+	}
 	if parent.ProviderName == "" {
 		parent.ProviderName = s.deps.ProviderName
 	}
@@ -465,18 +490,23 @@ func (s *Service) SpawnTeamMember(ctx context.Context, request agent.ExecutionRe
 	if member.Budget.RemainingDuration() < parent.Budget.MaxDuration {
 		parent.Budget.MaxDuration = member.Budget.RemainingDuration()
 	}
-	parent.ToolSchemas, err = agent.TeamMemberToolSchemas(s.deps.ToolSchemas, tools)
-	if err != nil {
-		return teams.Member{}, err
-	}
-	parent.ExecutorFactory, err = agent.NewTeamMemberExecutorFactory(s.deps.ForkExecutorFactory, tools, s.executeTeamMemberTool)
-	if err != nil {
-		return teams.Member{}, err
+	if definition.Isolation != "worktree" {
+		parent.ToolSchemas, err = agent.TeamMemberToolSchemas(s.deps.ToolSchemas, tools)
+		if err != nil {
+			return teams.Member{}, err
+		}
+		parent.ExecutorFactory, err = agent.NewTeamMemberExecutorFactory(s.deps.ForkExecutorFactory, tools, s.executeTeamMemberTool)
+		if err != nil {
+			return teams.Member{}, err
+		}
 	}
 	input, err := agent.BuildTeamTurnTask(turnID, definition.Instruction+"\n\nAssigned task:\n"+spawn.Instruction, agent.TeamTurnInput{
 		Identity: *parent.TeamTurn,
 	})
 	if err != nil {
+		if writerLease != nil {
+			cleanupTeamMemberWorkspace(memberWorkspace, *writerLease, workspaceCreated)
+		}
 		return teams.Member{}, err
 	}
 	input.Name = member.Name
@@ -498,6 +528,12 @@ func (s *Service) SpawnTeamMember(ctx context.Context, request agent.ExecutionRe
 		Finished: func(child agent.ChildRunInput, result agent.ChildRunResult) error {
 			lifecycleMu.Lock()
 			defer lifecycleMu.Unlock()
+			if writerLease != nil {
+				if _, releaseErr := memberWorkspace.ReleaseCompletedWriter(context.Background(), *writerLease); releaseErr != nil {
+					result.Status = agent.DelegationInterrupted
+					result.Error = "team member workspace writer could not be safely released: " + releaseErr.Error()
+				}
+			}
 			if err := s.persistTeamChildFinish(root, request.Work.SessionID, team.ID, member.ID, turnID, child, result, &runSeq); err != nil {
 				return err
 			}
@@ -506,8 +542,11 @@ func (s *Service) SpawnTeamMember(ctx context.Context, request agent.ExecutionRe
 			return nil
 		},
 	}
-	accepted, err := s.submitTeamMember(ctx, root, scope, team, member, request, parent, input, &startedAt, &runSeq, &durableTerminal, &durableResult, false, nil, false, 0)
+	accepted, err := s.submitTeamMember(ctx, root, scope, team, member, request, parent, input, &startedAt, &runSeq, &durableTerminal, &durableResult, false, nil, false, 0, memberWorkspace, writerLease)
 	if err != nil {
+		if writerLease != nil {
+			cleanupTeamMemberWorkspaceUnlessReferenced(root, request.Work.SessionID, team.ID, member.ID, memberWorkspace, *writerLease, workspaceCreated)
+		}
 		return teams.Member{}, err
 	}
 	s.teamScheduler.mu.Lock()
@@ -571,6 +610,12 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 	if !ok || member.TeamID != team.ID || (member.Status != teams.MemberIdle && member.Status != teams.MemberInterrupted) {
 		return teams.Member{}, teams.ErrPermission
 	}
+	// A persisted worktree member can write on every resumed turn. Keep the
+	// same server-side team binding required for its initial spawn; callers
+	// cannot turn an ordinary lead run into workspace writer authority.
+	if grantGeneration == 0 && member.WorkspaceID != "" && (!request.TeamCoordinator || request.TeamCoordinatorTeamID != team.ID) {
+		return teams.Member{}, teams.ErrPermission
+	}
 	planRevisionAllowed := false
 	for _, planRequest := range projection.Requests {
 		if planRequest.TeamID == team.ID && planRequest.MemberID == member.ID && planRequest.Type == teams.RequestPlan && planRequest.Status == teams.RequestRejected {
@@ -631,6 +676,18 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 		Provider: s.deps.ForkProvider, ProviderName: request.ProviderName, Model: member.Model,
 		Budget: agent.DefaultDelegationLimits(), RoleInstruction: definition.Instruction,
 	}
+	var memberWorkspace *workspace.LifecycleService
+	var writerLease *workspace.WriterLease
+	workspaceCreated := false
+	if definition.Isolation == "worktree" {
+		parent, memberWorkspace, writerLease, workspaceCreated, err = s.bindTeamMemberWorkspace(ctx, request, team.Scope, member, parent, member.Tools)
+		if err != nil {
+			return teams.Member{}, err
+		}
+		member.WorkspaceID = writerLease.WorkspaceID
+	} else if member.WorkspaceID != "" {
+		return teams.Member{}, errors.New("team member worktree isolation cannot be removed after workspace creation")
+	}
 	if parent.ProviderName == "" {
 		parent.ProviderName = s.deps.ProviderName
 	}
@@ -640,13 +697,15 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 	if remaining := member.Budget.RemainingDuration(); remaining < parent.Budget.MaxDuration {
 		parent.Budget.MaxDuration = remaining
 	}
-	parent.ToolSchemas, err = agent.TeamMemberToolSchemas(s.deps.ToolSchemas, member.Tools)
-	if err != nil {
-		return teams.Member{}, err
-	}
-	parent.ExecutorFactory, err = agent.NewTeamMemberExecutorFactory(s.deps.ForkExecutorFactory, member.Tools, s.executeTeamMemberTool)
-	if err != nil {
-		return teams.Member{}, err
+	if definition.Isolation != "worktree" {
+		parent.ToolSchemas, err = agent.TeamMemberToolSchemas(s.deps.ToolSchemas, member.Tools)
+		if err != nil {
+			return teams.Member{}, err
+		}
+		parent.ExecutorFactory, err = agent.NewTeamMemberExecutorFactory(s.deps.ForkExecutorFactory, member.Tools, s.executeTeamMemberTool)
+		if err != nil {
+			return teams.Member{}, err
+		}
 	}
 	startedAt := time.Time{}
 	runSeq := uint64(0)
@@ -666,6 +725,12 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 		Finished: func(child agent.ChildRunInput, result agent.ChildRunResult) error {
 			lifecycleMu.Lock()
 			defer lifecycleMu.Unlock()
+			if writerLease != nil {
+				if _, releaseErr := memberWorkspace.ReleaseCompletedWriter(context.Background(), *writerLease); releaseErr != nil {
+					result.Status = agent.DelegationInterrupted
+					result.Error = "team member workspace writer could not be safely released: " + releaseErr.Error()
+				}
+			}
 			if err := s.persistTeamChildFinish(root, request.Work.SessionID, team.ID, member.ID, turnID, child, result, &runSeq); err != nil {
 				return err
 			}
@@ -673,13 +738,23 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 			return nil
 		},
 	}
-	accepted, err := s.submitTeamMember(ctx, root, scope, team, member, request, parent, task, &startedAt, &runSeq, &durableTerminal, &durableResult, true, handoffs, false, grantGeneration)
+	accepted, err := s.submitTeamMember(ctx, root, scope, team, member, request, parent, task, &startedAt, &runSeq, &durableTerminal, &durableResult, true, handoffs, false, grantGeneration, memberWorkspace, writerLease)
 	if errors.Is(err, agent.ErrDelegationQueueFull) {
 		waiting, waitErr := s.markMemberWaitingCapacity(root, request.Work.SessionID, team.ID, member)
 		if waitErr != nil {
+			if writerLease != nil {
+				cleanupTeamMemberWorkspaceUnlessReferenced(root, request.Work.SessionID, team.ID, member.ID, memberWorkspace, *writerLease, workspaceCreated)
+			}
 			return teams.Member{}, err
 		}
 		member = waiting
+		if writerLease != nil {
+			if _, releaseErr := memberWorkspace.ReleaseCompletedWriter(context.Background(), *writerLease); releaseErr != nil {
+				_ = s.restoreCapacityWaiter(root, request.Work.SessionID, team.ID, member.ID)
+				return teams.Member{}, releaseErr
+			}
+			writerLease = nil
+		}
 		s.teamScheduler.mu.Lock()
 		s.teamScheduler.roles[member.ID] = definition
 		s.teamScheduler.mu.Unlock()
@@ -694,20 +769,41 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 				_ = s.restoreCapacityWaiter(root, queuedRequest.Work.SessionID, team.ID, member.ID)
 				return nil
 			}
-			_, retryErr := s.submitTeamMember(s.lifeCtx, root, scope, team, member, queuedRequest, parent, task, &startedAt, &runSeq, &durableTerminal, &durableResult, true, handoffs, true, grantGeneration)
-			if retryErr != nil && !errors.Is(retryErr, agent.ErrDelegationQueueFull) {
+			if definition.Isolation == "worktree" {
+				parent, memberWorkspace, writerLease, workspaceCreated, err = s.bindTeamMemberWorkspace(s.lifeCtx, queuedRequest, team.Scope, member, parent, member.Tools)
+				if err != nil {
+					_ = s.restoreCapacityWaiter(root, queuedRequest.Work.SessionID, team.ID, member.ID)
+					return err
+				}
+			}
+			_, retryErr := s.submitTeamMember(s.lifeCtx, root, scope, team, member, queuedRequest, parent, task, &startedAt, &runSeq, &durableTerminal, &durableResult, true, handoffs, true, grantGeneration, memberWorkspace, writerLease)
+			if errors.Is(retryErr, agent.ErrDelegationQueueFull) && writerLease != nil {
+				_, _ = memberWorkspace.ReleaseCompletedWriter(context.Background(), *writerLease)
+				writerLease = nil
+				return retryErr
+			}
+			if retryErr != nil {
 				_ = s.restoreCapacityWaiter(root, queuedRequest.Work.SessionID, team.ID, member.ID)
+				if writerLease != nil {
+					cleanupTeamMemberWorkspaceUnlessReferenced(root, queuedRequest.Work.SessionID, team.ID, member.ID, memberWorkspace, *writerLease, workspaceCreated)
+				}
 			}
 			return retryErr
 		}
 		if enqueueErr := s.teamScheduler.enqueueCapacityResume(deferred); enqueueErr != nil {
 			_ = s.restoreCapacityWaiter(root, request.Work.SessionID, team.ID, member.ID)
+			if writerLease != nil {
+				cleanupTeamMemberWorkspaceUnlessReferenced(root, request.Work.SessionID, team.ID, member.ID, memberWorkspace, *writerLease, workspaceCreated)
+			}
 			return teams.Member{}, enqueueErr
 		}
 		s.teamScheduler.clearReady(memberID, readyGeneration)
 		return member, nil
 	}
 	if err != nil {
+		if writerLease != nil {
+			cleanupTeamMemberWorkspaceUnlessReferenced(root, request.Work.SessionID, team.ID, member.ID, memberWorkspace, *writerLease, workspaceCreated)
+		}
 		return teams.Member{}, err
 	}
 	s.teamScheduler.mu.Lock()
@@ -748,7 +844,7 @@ func (s *Service) teamMemberRoleSnapshot(member teams.Member, acceptChange bool)
 	hash := teamRoleHash(definition)
 	changed := hex.EncodeToString(hash[:]) != member.RoleHash || !sameStringList(definition.EffectiveTools(), member.Tools) || (definition.Model != "" && definition.Model != "inherit" && definition.Model != member.Model)
 	if definition.Name != member.AgentName || len(definition.EffectiveTools()) == 0 {
-		return agentcatalog.Definition{}, errors.New("original team member role is unavailable or no longer has permitted inspection tools")
+		return agentcatalog.Definition{}, errors.New("original team member role is unavailable or no longer has permitted tools")
 	}
 	if changed && !acceptChange {
 		model := definition.Model
@@ -861,13 +957,16 @@ func resumableMemberTasks(projection sessionlog.TeamProjection, teamID, memberID
 	return out, nil
 }
 
-func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams.Scope, team teams.Team, member teams.Member, request agent.ExecutionRequest, parent agent.ParentRun, task agent.DelegationTask, startedAt *time.Time, runSeq *uint64, durableTerminal *bool, durableResult *agent.ChildRunResult, memberExists bool, handoffs []sessionlog.HandoffFact, waitingRetry bool, grantGeneration uint64) (teams.Member, error) {
+func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams.Scope, team teams.Team, member teams.Member, request agent.ExecutionRequest, parent agent.ParentRun, task agent.DelegationTask, startedAt *time.Time, runSeq *uint64, durableTerminal *bool, durableResult *agent.ChildRunResult, memberExists bool, handoffs []sessionlog.HandoffFact, waitingRetry bool, grantGeneration uint64, memberWorkspace *workspace.LifecycleService, writerLease *workspace.WriterLease) (teams.Member, error) {
 	turnID := parent.TeamTurn.TurnID
 	messageIDs := make([]string, 0, len(handoffs))
 	for _, handoff := range handoffs {
 		messageIDs = append(messageIDs, handoff.MessageID)
 	}
 	turn := sessionlog.TurnFact{ID: turnID, MemberID: member.ID, TaskID: task.ID, MessageIDs: messageIDs, OriginRunID: request.RunID, OriginCallID: parent.ToolCallID, Status: "intent"}
+	if writerLease != nil {
+		turn.WorkspaceID, turn.WorkspaceGeneration = writerLease.WorkspaceID, writerLease.Generation
+	}
 	poolCtx := s.lifeCtx
 	if poolCtx == nil {
 		poolCtx = context.Background()
@@ -946,27 +1045,28 @@ func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams
 		turn.RunID = admission.ChildRunID
 		childRunID = admission.ChildRunID
 		turn.Status = "intent"
+		childInput = agent.ChildRunInput{TeamTurn: parent.TeamTurn, ParentRunID: request.RunID, BatchID: admission.BatchID, ChildRunID: admission.ChildRunID, WorkspaceID: parent.WorkspaceID, WorkspaceGeneration: parent.WorkspaceGeneration, Task: task, Work: parent.Work}
 		if !memberExists {
 			if err := appendTeamFactLocked(root, scope.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberAdded, ActorID: teams.Lead, ActorRunID: request.RunID, Member: &member}); err != nil {
 				return err
 			}
+			admissionCommitted = true
 		}
 		if err := appendTeamFactLocked(root, scope.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamTurnIntent, ActorID: "service", ActorRunID: request.RunID, Turn: &turn}); err != nil {
 			return err
 		}
+		admissionCommitted = true
 		accepted := turn
 		accepted.Status = "queued"
 		if err := appendTeamFactLocked(root, scope.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamTurnAccepted, ActorID: "service", ActorRunID: request.RunID, Turn: &accepted}); err != nil {
 			return err
 		}
-		childInput = agent.ChildRunInput{TeamTurn: parent.TeamTurn, ParentRunID: request.RunID, BatchID: admission.BatchID, ChildRunID: admission.ChildRunID, Task: task, Work: parent.Work}
 		if err := s.persistTeamChildQueuedLocked(root, scope, request.RunID, parent.ToolCallID, childInput, runSeq); err != nil {
 			return err
 		}
 		// The reservation is still private to the pool until this callback
 		// returns. If the following handoff append fails, compensate the durable
 		// accepted turn so it cannot be mistaken for work that may run.
-		admissionCommitted = true
 		for _, handoff := range handoffs {
 			handoff.DestinationRunID = admission.ChildRunID
 			handoff.DestinationTurnID = turnID
@@ -995,6 +1095,11 @@ func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams
 	s.teamScheduler.activeOrigin[turnID] = request.RunID
 	s.teamScheduler.activeMember[turnID] = member.ID
 	s.teamScheduler.activeTeam[turnID] = team.ID
+	var workspaceRunDone chan struct{}
+	if writerLease != nil {
+		workspaceRunDone = make(chan struct{})
+		s.teamScheduler.workspaceRuns[writerLease.RunID] = teamWorkspaceRun{manager: memberWorkspace, lease: *writerLease, cancel: handle.Cancel, done: workspaceRunDone}
+	}
 	closed = s.teamScheduler.closed
 	grantCurrent := grantGeneration == 0
 	if grantGeneration != 0 {
@@ -1005,9 +1110,119 @@ func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams
 	if closed || !grantCurrent {
 		handle.Cancel()
 	}
-	go s.watchTeamMember(root, scope.SessionID, team.ID, member.ID, turnID, handle, startedAt, durableTerminal, durableResult)
+	go s.watchTeamMember(root, scope.SessionID, team.ID, member.ID, turnID, handle, startedAt, durableTerminal, durableResult, memberWorkspace, writerLease, workspaceRunDone)
 	member.Status, member.RunID, member.TurnID = teams.MemberQueued, childRunID, turnID
 	return member, nil
+}
+
+// prepareTeamMemberWorkspace materializes or reuses the member's service-owned
+// worktree and acquires its writer lease before the turn becomes visible to the
+// shared child pool. The child RunID is generated by the service before any
+// queue or event locks are taken.
+func (s *Service) bindTeamMemberWorkspace(ctx context.Context, request agent.ExecutionRequest, teamScope teams.Scope, member teams.Member, parent agent.ParentRun, roleTools []string) (agent.ParentRun, *workspace.LifecycleService, *workspace.WriterLease, bool, error) {
+	childRunID, err := sessionlog.NewID()
+	if err != nil {
+		return parent, nil, nil, false, err
+	}
+	parent.ChildRunID = childRunID
+	manager, lease, created, err := s.prepareTeamMemberWorkspace(ctx, request, teamScope, member, childRunID)
+	if err != nil {
+		return parent, nil, nil, false, err
+	}
+	parent.WorkspaceID, parent.WorkspaceGeneration = lease.WorkspaceID, lease.Generation
+	parent.ProjectRoot = lease.Authority.AllowedRoot
+	parent.PermissionBounds, err = json.Marshal(lease.Authority)
+	if err == nil {
+		parent.ExecutorFactory = execution.WorkspaceWriterExecutorFactory(s.deps.ForkExecutorFactory, *lease, manager)
+		parent.ToolSchemas, err = worktreeTeamMemberSchemas(s.deps.ToolSchemas, roleTools)
+	}
+	if err == nil {
+		parent.ExecutorFactory, err = agent.NewWorktreeTeamMemberExecutorFactory(parent.ExecutorFactory, roleTools, s.executeTeamMemberTool)
+	}
+	if err != nil {
+		cleanupTeamMemberWorkspace(manager, *lease, created)
+		return parent, nil, nil, false, err
+	}
+	return parent, manager, lease, created, nil
+}
+
+func (s *Service) prepareTeamMemberWorkspace(ctx context.Context, request agent.ExecutionRequest, teamScope teams.Scope, member teams.Member, childRunID string) (*workspace.LifecycleService, *workspace.WriterLease, bool, error) {
+	var authority permission.Authority
+	if s.deps.WorkspaceStateRoot == "" || json.Unmarshal(request.PermissionBounds, &authority) != nil || authority.RunID != request.RunID || authority.SessionID != request.Work.SessionID || authority.GoalID != request.Work.GoalID || authority.WorkItemID != request.Work.WorkItemID || authority.AllowedRoot != teamScope.ProjectRoot || authority.Mode == permission.ModePlan {
+		return nil, nil, false, workspace.ErrOwnership
+	}
+	projectRoot, scope, err := s.workspaceScope(ctx, ClientMsg{SessionID: request.Work.SessionID, WorkKind: string(request.Work.Kind), GoalID: request.Work.GoalID, WorkItemID: request.Work.WorkItemID})
+	if err != nil || projectRoot != teamScope.ProjectRoot {
+		return nil, nil, false, workspace.ErrOwnership
+	}
+	scope.Authority = authority
+	scope.OriginRunID = request.RunID
+	scope.OriginTaskID = member.ID
+	if err := scope.ValidateAuthority(); err != nil {
+		return nil, nil, false, workspace.ErrOwnership
+	}
+	manager, err := s.workspaceService(projectRoot)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	created := false
+	workspaceID := member.WorkspaceID
+	if workspaceID == "" {
+		snapshot, createErr := manager.Create(ctx, scope, member.Name)
+		if createErr != nil {
+			return nil, nil, false, createErr
+		}
+		workspaceID, created = snapshot.ID, true
+	} else {
+		if _, getErr := manager.Get(ctx, scope, workspaceID); getErr != nil {
+			return nil, nil, false, getErr
+		}
+	}
+	lease, err := manager.AcquireWriter(ctx, scope, workspaceID, childRunID)
+	if err != nil {
+		if created {
+			_, _ = manager.RemoveClean(context.Background(), scope, workspaceID)
+		}
+		return nil, nil, false, err
+	}
+	return manager, &lease, created, nil
+}
+
+func worktreeTeamMemberSchemas(serviceSchemas []llm.ToolSchema, roleTools []string) ([]llm.ToolSchema, error) {
+	memberTools, err := agent.TeamMemberToolSchemas(serviceSchemas, nil)
+	if err != nil {
+		return nil, err
+	}
+	schemas := append(execution.WorkspaceWriterToolSchemas(), memberTools...)
+	return agent.WorktreeTeamMemberToolSchemas(schemas, roleTools)
+}
+
+func cleanupTeamMemberWorkspace(manager *workspace.LifecycleService, lease workspace.WriterLease, created bool) {
+	if manager == nil {
+		return
+	}
+	if _, err := manager.ReleaseCompletedWriter(context.Background(), lease); err != nil {
+		return
+	}
+	if created {
+		_, _ = manager.RemoveClean(context.Background(), lease.Scope, lease.WorkspaceID)
+	}
+}
+
+func cleanupTeamMemberWorkspaceUnlessReferenced(root, sessionID, teamID, memberID string, manager *workspace.LifecycleService, lease workspace.WriterLease, created bool) {
+	if manager == nil {
+		return
+	}
+	if created {
+		projection, err := sessionlog.ReplayTeams(root, sessionID, teamID)
+		if err == nil {
+			if member, ok := projection.Members[memberID]; ok && member.WorkspaceID == lease.WorkspaceID {
+				_, _ = manager.ReleaseCompletedWriter(context.Background(), lease)
+				return
+			}
+		}
+	}
+	cleanupTeamMemberWorkspace(manager, lease, created)
 }
 
 // compensateUnpublishedTeamAdmission closes a durable accepted turn when the
@@ -1021,11 +1236,34 @@ func (s *Service) compensateUnpublishedTeamAdmission(root, sessionID, teamID, me
 		return err
 	}
 	turn, ok := projection.Turns[turnID]
-	if !ok || turn.Status == "aborted" || turnTerminalTeamStatus(turn.Status) {
+	if !ok {
+		member, exists := projection.Members[memberID]
+		if exists && member.Status == teams.MemberCreated {
+			member.Status = teams.MemberInterrupted
+			member.Revision++
+			return appendTeamFactLocked(root, sessionID, teamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", Member: &member})
+		}
+		return nil
+	}
+	if turn.Status == "aborted" || turnTerminalTeamStatus(turn.Status) {
+		return nil
+	}
+	if turn.Status == "intent" {
+		turn.Status = "aborted"
+		if err := appendTeamFactLocked(root, sessionID, teamID, sessionlog.TeamEvent{Kind: sessionlog.TeamTurnAborted, ActorID: "service", ActorRunID: turn.OriginRunID, Turn: &turn}); err != nil {
+			return err
+		}
 		return nil
 	}
 	if turn.Status != "queued" || turn.RunID != child.ChildRunID {
 		return teams.ErrPermission
+	}
+	if _, found, startErr := sessionlog.FindRunStart(root, sessionID, child.ChildRunID); startErr != nil {
+		return startErr
+	} else if !found {
+		// Recovery will reconcile a queued turn whose RunStarted append did not
+		// complete; keep any attached workspace reference intact for that repair.
+		return nil
 	}
 	reason := "shared pool could not publish the accepted turn"
 	causeText := truncateDelegationText(redactRunCredential(cause.Error(), s.deps.ProviderCredential), teams.MaxErrorBytes-len(reason)-2)
@@ -1073,6 +1311,11 @@ func (s *Service) markMemberWaitingCapacity(root, sessionID, teamID string, expe
 	if !ok || member.Revision != expected.Revision || member.Status != expected.Status || member.Status != teams.MemberIdle && member.Status != teams.MemberInterrupted {
 		return teams.Member{}, teams.ErrPermission
 	}
+	member.RoleHash, member.Model = expected.RoleHash, expected.Model
+	member.Tools = append([]string(nil), expected.Tools...)
+	if member.WorkspaceID == "" && expected.WorkspaceID != "" {
+		member.WorkspaceID = expected.WorkspaceID
+	}
 	member.Status = teams.MemberWaitingCapacity
 	member.Revision++
 	if err := appendTeamFactLocked(root, sessionID, teamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: member.OriginRunID, Member: &member}); err != nil {
@@ -1101,18 +1344,30 @@ func (s *Service) restoreCapacityWaiter(root, sessionID, teamID, memberID string
 	return appendTeamFactLocked(root, sessionID, teamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: member.OriginRunID, Member: &member})
 }
 
-func (s *Service) watchTeamMember(root, sessionID, teamID, memberID, turnID string, handle *agent.TaskHandle, startedAt *time.Time, durableTerminal *bool, durableResult *agent.ChildRunResult) {
+func (s *Service) watchTeamMember(root, sessionID, teamID, memberID, turnID string, handle *agent.TaskHandle, startedAt *time.Time, durableTerminal *bool, durableResult *agent.ChildRunResult, memberWorkspace *workspace.LifecycleService, writerLease *workspace.WriterLease, workspaceRunDone chan struct{}) {
 	defer func() {
 		s.teamScheduler.mu.Lock()
 		delete(s.teamScheduler.active, turnID)
 		delete(s.teamScheduler.activeOrigin, turnID)
 		delete(s.teamScheduler.activeMember, turnID)
 		delete(s.teamScheduler.activeTeam, turnID)
+		if writerLease != nil {
+			delete(s.teamScheduler.workspaceRuns, writerLease.RunID)
+		}
+		if workspaceRunDone != nil {
+			close(workspaceRunDone)
+		}
 		s.teamScheduler.mu.Unlock()
 	}()
 	_, ok := <-handle.Results
 	if !ok {
 		// The durable child hook remains the authority for the outcome.
+	}
+	if memberWorkspace != nil && writerLease != nil {
+		if _, releaseErr := memberWorkspace.ReleaseCompletedWriter(context.Background(), *writerLease); releaseErr != nil {
+			*durableTerminal = false
+			*durableResult = agent.ChildRunResult{Status: agent.DelegationInterrupted, Error: "team member workspace writer could not be safely released: " + releaseErr.Error()}
+		}
 	}
 	s.eventMu.Lock()
 	defer s.eventMu.Unlock()
@@ -1191,7 +1446,7 @@ func (s *Service) persistTeamChildStart(root string, scope teams.Scope, memberID
 		return teams.ErrPermission
 	}
 	start, found, err := sessionlog.FindRunStart(root, scope.SessionID, child.ChildRunID)
-	if err != nil || !found || start.TeamID != child.TeamTurn.TeamID || start.TeamMemberID != memberID || start.TeamTurnID != turnID || start.OriginRunID != originRunID || start.OriginCallID != originCallID {
+	if err != nil || !found || start.TeamID != child.TeamTurn.TeamID || start.TeamMemberID != memberID || start.TeamTurnID != turnID || start.WorkspaceID != child.WorkspaceID || start.WorkspaceGeneration != child.WorkspaceGeneration || start.OriginRunID != originRunID || start.OriginCallID != originCallID {
 		return teams.ErrPermission
 	}
 	if *runSeq != 1 {
@@ -1214,7 +1469,7 @@ func (s *Service) persistTeamChildQueuedLocked(root string, scope teams.Scope, o
 	if child.TeamTurn == nil {
 		return teams.ErrPermission
 	}
-	start := sessionlog.RunStarted{TeamID: child.TeamTurn.TeamID, TeamMemberID: child.TeamTurn.MemberID, TeamTurnID: child.TeamTurn.TurnID, RunID: child.ChildRunID, WorkKind: scope.WorkKind, GoalID: scope.GoalID, WorkItemID: scope.WorkItemID, Intent: "team member turn", OriginRunID: originRunID, OriginCallID: originCallID}
+	start := sessionlog.RunStarted{TeamID: child.TeamTurn.TeamID, TeamMemberID: child.TeamTurn.MemberID, TeamTurnID: child.TeamTurn.TurnID, RunID: child.ChildRunID, WorkKind: scope.WorkKind, GoalID: scope.GoalID, WorkItemID: scope.WorkItemID, Intent: "team member turn", WorkspaceID: child.WorkspaceID, WorkspaceGeneration: child.WorkspaceGeneration, OriginRunID: originRunID, OriginCallID: originCallID}
 	if _, err := sessionlog.Append(root, scope.SessionID, sessionlog.EventRunStarted, start); err != nil {
 		return err
 	}

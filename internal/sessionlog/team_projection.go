@@ -229,7 +229,7 @@ func (st *teamScan) checkEvent(sessionID string, e TeamEvent, at time.Time) erro
 		m := e.Member
 		name, err := teams.NormalizeMemberName(m.Name)
 		role, roleErr := teams.NormalizeName(m.AgentName)
-		if !validTeamIDs(m.ID) || m.ID == teams.Lead || m.ID == "service" || m.TeamID != e.TeamID || err != nil || name != m.Name || roleErr != nil || role != m.AgentName || m.Status != teams.MemberCreated || m.Revision != 1 || m.TurnID != "" || m.RunID != "" || m.Budget.AcceptedTurns != 0 || m.Budget.Elapsed != 0 {
+		if !validTeamIDs(m.ID) || m.ID == teams.Lead || m.ID == "service" || m.TeamID != e.TeamID || m.WorkspaceID != "" && !validAgentIdentity(m.WorkspaceID, 128) || err != nil || name != m.Name || roleErr != nil || role != m.AgentName || m.Status != teams.MemberCreated || m.Revision != 1 || m.TurnID != "" || m.RunID != "" || m.Budget.AcceptedTurns != 0 || m.Budget.Elapsed != 0 {
 			return errors.New("invalid member creation metadata")
 		}
 		if err := checkMemberText(*m); err != nil {
@@ -259,7 +259,9 @@ func (st *teamScan) checkEvent(sessionID string, e TeamEvent, at time.Time) erro
 		if !ok || prior.TeamID != e.TeamID || m.TeamID != e.TeamID || m.Revision != prior.Revision+1 {
 			return errors.New("member state requires exact member revision")
 		}
-		if m.Name != prior.Name || m.AgentName != prior.AgentName || m.PlanRequired != prior.PlanRequired {
+		workspaceChanged := m.WorkspaceID != prior.WorkspaceID
+		workspaceAttached := prior.WorkspaceID == "" && validAgentIdentity(m.WorkspaceID, 128)
+		if m.Name != prior.Name || m.AgentName != prior.AgentName || m.PlanRequired != prior.PlanRequired || workspaceChanged && !workspaceAttached {
 			return errors.New("member identity cannot change")
 		}
 		if err := checkMemberText(m); err != nil {
@@ -349,8 +351,12 @@ func checkMemberText(m teams.Member) error {
 	}
 	seen := map[string]bool{}
 	for _, name := range m.Tools {
-		if (name != "read_file" && name != "grep" && name != "glob") || seen[name] {
-			return errors.New("member role tools must be unique read-only inspection tools")
+		allowed := name == "read_file" || name == "grep" || name == "glob"
+		if m.WorkspaceID != "" && (name == "write_file" || name == "edit_file" || name == "command") {
+			allowed = true
+		}
+		if !allowed || seen[name] {
+			return errors.New("member role tools must match the recorded isolation mode")
 		}
 		seen[name] = true
 	}
@@ -364,6 +370,9 @@ func (st *teamScan) checkTurn(e TeamEvent) error {
 	m, ok := st.Members[t.MemberID]
 	if !ok || m.TeamID != e.TeamID || !validTeamIDs(t.ID, t.MemberID, t.RunID, t.TaskID) || teams.ValidateText(t.Summary, teams.MaxSummaryBytes, false) != nil || teams.ValidateText(t.Error, teams.MaxErrorBytes, false) != nil || t.Elapsed < 0 || t.Elapsed > teams.MaxTurnDuration {
 		return errors.New("invalid team turn metadata")
+	}
+	if t.WorkspaceID == "" && t.WorkspaceGeneration != 0 || t.WorkspaceID != "" && (!validAgentIdentity(t.WorkspaceID, 128) || t.WorkspaceGeneration == 0) || t.WorkspaceID != m.WorkspaceID {
+		return errors.New("team turn workspace authority must match its member")
 	}
 	if len(t.MessageIDs) > teams.MaxBatchMessages {
 		return teams.ErrCapacity
@@ -483,12 +492,13 @@ func (st *teamScan) checkStarted(start RunStarted) error {
 		return errors.New("team source fields must be present together")
 	}
 	if count == 3 {
-		if !validTeamIDs(start.TeamID, start.TeamMemberID, start.TeamTurnID, start.RunID) || start.AgentTaskID != "" || start.AgentName != "" || start.ForkSkill != "" || start.ForkEntry != "" {
+		if !validTeamIDs(start.TeamID, start.TeamMemberID, start.TeamTurnID, start.RunID) || start.AgentTaskID != "" || start.AgentName != "" || start.ForkSkill != "" || start.ForkEntry != "" || start.WorkspaceID == "" && start.WorkspaceGeneration != 0 || start.WorkspaceID != "" && (!validAgentIdentity(start.WorkspaceID, 128) || start.WorkspaceGeneration == 0) {
 			return errors.New("team run source is invalid or conflicts with another source")
 		}
 		team, ok := st.Teams[start.TeamID]
 		turn, exists := st.Turns[start.TeamTurnID]
-		if !ok || !exists || st.turnTeam[turn.ID] != team.ID || turn.MemberID != start.TeamMemberID || turn.RunID != start.RunID || turn.Status != "queued" || !teamWorkMatches(team.Scope, start) || turn.OriginRunID != start.OriginRunID || turn.OriginCallID != start.OriginCallID {
+		member, memberExists := st.Members[start.TeamMemberID]
+		if !ok || !exists || !memberExists || member.WorkspaceID != start.WorkspaceID || turn.WorkspaceID != start.WorkspaceID || turn.WorkspaceGeneration != start.WorkspaceGeneration || st.turnTeam[turn.ID] != team.ID || turn.MemberID != start.TeamMemberID || turn.RunID != start.RunID || turn.Status != "queued" || !teamWorkMatches(team.Scope, start) || turn.OriginRunID != start.OriginRunID || turn.OriginCallID != start.OriginCallID {
 			return errors.New("team run requires its exact accepted turn and work owner")
 		}
 	}

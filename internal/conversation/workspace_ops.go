@@ -82,6 +82,26 @@ func (s *Service) StopWorkspaceWriter(ctx context.Context, lease workspace.Write
 	}
 	s.mu.Unlock()
 	if !ok {
+		if s.teamScheduler != nil {
+			s.teamScheduler.mu.Lock()
+			teamRun, teamOK := s.teamScheduler.workspaceRuns[lease.RunID]
+			s.teamScheduler.mu.Unlock()
+			if teamOK {
+				if teamRun.lease.WorkspaceID != lease.WorkspaceID || teamRun.lease.Generation != lease.Generation || !teamRun.lease.Scope.SameOwner(lease.Scope) {
+					return workspace.ErrOwnership
+				}
+				if teamRun.cancel == nil || teamRun.done == nil {
+					return workspace.ErrUnavailable
+				}
+				teamRun.cancel()
+				select {
+				case <-teamRun.done:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+		}
 		if s.deps.AgentTasks != nil {
 			return s.deps.AgentTasks.StopWorkspaceWriter(ctx, lease)
 		}

@@ -214,6 +214,13 @@ func (s *Service) Close() error {
 	}
 	if s.teamScheduler != nil {
 		s.teamScheduler.close()
+		s.teamScheduler.mu.Lock()
+		for _, writer := range s.teamScheduler.workspaceRuns {
+			if writer.done != nil {
+				done = append(done, writer.done)
+			}
+		}
+		s.teamScheduler.mu.Unlock()
 	}
 	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

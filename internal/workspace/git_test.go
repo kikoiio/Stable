@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -42,6 +43,153 @@ func gitQuery(t *testing.T, g *PrivateGit, paths Paths, gitDir, worktree string,
 		t.Fatal(err)
 	}
 	return string(out)
+}
+
+func sourceGit(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	commandArgs := append([]string{"-C", root}, args...)
+	command := exec.Command("git", commandArgs...)
+	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, output)
+	}
+	return string(output)
+}
+
+func gitObjectFiles(t *testing.T, root string) []os.FileInfo {
+	t.Helper()
+	var files []os.FileInfo
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			files = append(files, info)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func TestPrivateGitMaterializePreservesActualFormalRepository(t *testing.T) {
+	g, layout, _, scope, id := privateGitFixture(t)
+	formal := layout.FormalRoot()
+	sourceGit(t, formal, "init", "--initial-branch=main")
+	sourceGit(t, formal, "config", "user.name", "M09 Fixture")
+	sourceGit(t, formal, "config", "user.email", "m09@example.invalid")
+	sourceGit(t, formal, "config", "remote.origin.url", "https://example.invalid/private")
+	fixtureFile(t, formal, ".gitignore", "cache.ignored\n", 0600)
+	fixtureFile(t, formal, "tracked.txt", "committed bytes\n", 0600)
+	sourceGit(t, formal, "add", ".gitignore", "tracked.txt")
+	sourceGit(t, formal, "commit", "-m", "fixture baseline")
+	sourceGit(t, formal, "branch", "sentinel")
+	fixtureFile(t, formal, ".git/hooks/post-commit", "#!/bin/sh\nprintf sentinel\n", 0700)
+	fixtureFile(t, formal, "tracked.txt", "staged bytes\n", 0600)
+	sourceGit(t, formal, "add", "tracked.txt")
+	fixtureFile(t, formal, "tracked.txt", "unstaged bytes\n", 0600)
+	fixtureFile(t, formal, "staged-only.txt", "staged addition\n", 0600)
+	sourceGit(t, formal, "add", "staged-only.txt")
+	fixtureFile(t, formal, "cache.ignored", "ignored working data\n", 0600)
+	if status := sourceGit(t, formal, "status", "--ignored", "--porcelain=v1"); !strings.Contains(status, "MM tracked.txt") || !strings.Contains(status, "A  staged-only.txt") || !strings.Contains(status, "!! cache.ignored") {
+		t.Fatalf("fixture does not contain staged, unstaged, and ignored changes: %q", status)
+	}
+
+	formalGit := filepath.Join(formal, ".git")
+	preservedPaths := []string{"", "config", "index", "HEAD", filepath.Join("refs", "heads", "main"), filepath.Join("refs", "heads", "sentinel"), filepath.Join("hooks", "post-commit")}
+	beforeIdentity := make(map[string]os.FileInfo, len(preservedPaths))
+	beforeBytes := make(map[string][]byte, len(preservedPaths)-1)
+	for _, relative := range preservedPaths {
+		path := formalGit
+		if relative != "" {
+			path = filepath.Join(formalGit, relative)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatalf("missing formal Git sentinel %q: %v", relative, err)
+		}
+		beforeIdentity[relative] = info
+		if relative != "" {
+			beforeBytes[relative], err = os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	formalRefs := sourceGit(t, formal, "for-each-ref", "--format=%(refname):%(objectname)")
+	formalConfig := sourceGit(t, formal, "config", "--local", "--list", "--null")
+
+	state, err := g.Materialize(context.Background(), scope, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := layout.Paths(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range preservedPaths {
+		path := formalGit
+		if relative != "" {
+			path = filepath.Join(formalGit, relative)
+		}
+		after, err := os.Lstat(path)
+		if err != nil || !os.SameFile(beforeIdentity[relative], after) {
+			t.Fatalf("formal .git identity changed at %q: before=%v after=%v err=%v", relative, beforeIdentity[relative], after, err)
+		}
+		if relative != "" {
+			got, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(got, beforeBytes[relative]) {
+				t.Fatalf("formal .git content changed at %q: %v", relative, err)
+			}
+		}
+	}
+	if got := sourceGit(t, formal, "for-each-ref", "--format=%(refname):%(objectname)"); got != formalRefs {
+		t.Fatalf("formal refs changed: before=%q after=%q", formalRefs, got)
+	}
+	if got := sourceGit(t, formal, "config", "--local", "--list", "--null"); got != formalConfig {
+		t.Fatal("formal local Git configuration changed")
+	}
+	privateConfig, err := os.ReadFile(filepath.Join(paths.Repository, "config"))
+	if err != nil || string(privateConfig) != privateGitConfiguration {
+		t.Fatalf("private bare repository inherited source configuration: %q, %v", privateConfig, err)
+	}
+	if got := gitQuery(t, g, paths, paths.Repository, "", "remote"); strings.TrimSpace(got) != "" {
+		t.Fatalf("private bare repository has remotes: %q", got)
+	}
+	for _, relative := range []string{"objects/info/alternates", "objects/info/http-alternates", "info/grafts", "refs/replace", "refs/remotes"} {
+		if _, err := os.Lstat(filepath.Join(paths.Repository, relative)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("private bare repository inherited forbidden metadata %q: %v", relative, err)
+		}
+	}
+	sourceObjects := gitObjectFiles(t, filepath.Join(formalGit, "objects"))
+	privateObjects := gitObjectFiles(t, filepath.Join(paths.Repository, "objects"))
+	for _, privateObject := range privateObjects {
+		for _, sourceObject := range sourceObjects {
+			if os.SameFile(privateObject, sourceObject) {
+				t.Fatal("private bare repository hardlinked a formal object")
+			}
+		}
+	}
+	for name, want := range map[string]string{
+		"tracked.txt":     "unstaged bytes\n",
+		"staged-only.txt": "staged addition\n",
+		"cache.ignored":   "ignored working data\n",
+	} {
+		got := gitQuery(t, g, paths, paths.Repository, "", "cat-file", "blob", state.BaselineCommit+":"+name)
+		if got != want {
+			t.Fatalf("synthetic baseline lost working tree bytes for %s: got %q want %q", name, got, want)
+		}
+	}
 }
 
 func TestPrivateGitSyntheticBaselineAndLinkedCheckout(t *testing.T) {

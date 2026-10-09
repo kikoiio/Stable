@@ -723,3 +723,75 @@ func TestNamedTaskPreboundChildRunIDIsPreservedAndRejectsDuplicate(t *testing.T)
 		t.Fatalf("first result=%+v", result)
 	}
 }
+
+func TestTeamTurnAcceptsDistinctPreboundChildRunIDAndRejectsCollision(t *testing.T) {
+	const childID = "0123456789abcdef0123456789abcdef"
+	entered := make(chan ChildRunInput, 1)
+	release := make(chan struct{})
+	pool, err := NewPoolDelegator(DelegationLimits{Workers: 1, QueueCapacity: 2}, childRunnerFunc(func(ctx context.Context, input ChildRunInput) ChildRunResult {
+		entered <- input
+		select {
+		case <-release:
+			return ChildRunResult{Status: DelegationSucceeded}
+		case <-ctx.Done():
+			return ChildRunResult{Status: DelegationCanceled}
+		}
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+
+	parent := validParent()
+	parent.ChildRunID = childID
+	parent.TeamTurn = &TeamTurnIdentity{TeamID: "team-1", MemberID: "member-1", TurnID: "turn-1", MemberName: "researcher"}
+	parent.PermissionBounds, _ = json.Marshal(map[string]any{"run_id": parent.RunID, "session_id": parent.Work.SessionID, "allowed_root": parent.ProjectRoot})
+	var admittedID string
+	handle, err := pool.SubmitTaskCommitted(context.Background(), parent, tasks(1)[0], func(admission TaskAdmission) error {
+		admittedID = admission.ChildRunID
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admittedID != childID {
+		t.Fatalf("admitted child run ID=%q, want prebound %q", admittedID, childID)
+	}
+	select {
+	case input := <-entered:
+		if input.ChildRunID != childID {
+			t.Fatalf("runner child run ID=%q, want %q", input.ChildRunID, childID)
+		}
+		var bounds struct {
+			RunID string `json:"run_id"`
+		}
+		if err := json.Unmarshal(input.PermissionBounds, &bounds); err != nil || bounds.RunID != childID {
+			t.Fatalf("child authority run ID=%q err=%v, want %q", bounds.RunID, err, childID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("team child did not start")
+	}
+
+	if duplicate, err := pool.SubmitTask(context.Background(), parent, tasks(1)[0]); err == nil || duplicate != nil {
+		t.Fatalf("active prebound child ID collision admitted: handle=%v err=%v", duplicate, err)
+	}
+
+	sameAsParent := parent
+	sameAsParent.RunID = "fedcba9876543210fedcba9876543210"
+	sameAsParent.ChildRunID = sameAsParent.RunID
+	sameAsParent.PermissionBounds, _ = json.Marshal(map[string]any{"run_id": sameAsParent.RunID, "session_id": parent.Work.SessionID, "allowed_root": parent.ProjectRoot})
+	if invalid, err := pool.SubmitTask(context.Background(), sameAsParent, tasks(1)[0]); err == nil || invalid != nil {
+		t.Fatalf("team child reused parent run ID: handle=%v err=%v", invalid, err)
+	}
+
+	nonTeamDistinct := validParent()
+	nonTeamDistinct.ChildRunID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if invalid, err := pool.SubmitTask(context.Background(), nonTeamDistinct, tasks(1)[0]); err == nil || invalid != nil {
+		t.Fatalf("named task accepted a distinct prebound child ID: handle=%v err=%v", invalid, err)
+	}
+
+	close(release)
+	if result := <-handle.Results; result.Status != DelegationSucceeded {
+		t.Fatalf("team result=%+v", result)
+	}
+}

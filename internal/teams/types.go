@@ -176,6 +176,7 @@ type Team struct {
 type Member struct {
 	ID           string       `json:"id"`
 	TeamID       string       `json:"team_id"`
+	WorkspaceID  string       `json:"workspace_id,omitempty"`
 	Name         string       `json:"name"`
 	AgentName    string       `json:"agent_name"`
 	RoleHash     string       `json:"role_hash"`

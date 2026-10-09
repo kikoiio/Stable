@@ -101,6 +101,57 @@ func TestTeamMemberHardExecutorAllowsOnlyScopedTeamAndRoleInspectionTools(t *tes
 	}
 }
 
+func TestWorktreeTeamMemberRoutesOnlyRoleWriterAndScopedTeamTools(t *testing.T) {
+	writer := &captureChildExecutor{}
+	var hostCalls []string
+	factory, err := NewWorktreeTeamMemberExecutorFactory(captureChildFactory{exec: writer}, []string{"read_file", "write_file", "command"}, func(_ context.Context, request ExecutionRequest, call llm.ToolUse) (ToolOutcome, error) {
+		if request.RunID != "member-run" {
+			t.Fatalf("host tool lost trusted child request: %+v", request)
+		}
+		hostCalls = append(hostCalls, call.Name)
+		return ToolOutcome{CallID: call.ID, ToolName: call.Name, Status: ToolSucceeded}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := factory.ForRun(ExecutionRequest{RunID: "member-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"read_file", "write_file", "command", "team_send", "team_task_update"} {
+		outcome, err := executor.Execute(context.Background(), llm.ToolUse{ID: "call", Name: name})
+		if err != nil || outcome.Status != ToolSucceeded {
+			t.Fatalf("allowed %s failed: %+v %v", name, outcome, err)
+		}
+	}
+	for _, name := range []string{"edit_file", "grep", "mcp_call", "run_agent", "delegate_tasks", "team_create", "team_member_spawn", "team_close", "team_shutdown_request"} {
+		outcome, err := executor.Execute(context.Background(), llm.ToolUse{ID: "call", Name: name})
+		if err != nil || outcome.Status != ToolDenied || !outcome.IsError {
+			t.Fatalf("forbidden %s was dispatched: %+v %v", name, outcome, err)
+		}
+	}
+	if len(writer.calls) != 3 || strings.Join(writer.calls, ",") != "read_file,write_file,command" || strings.Join(hostCalls, ",") != "team_send,team_task_update" {
+		t.Fatalf("unexpected tool dispatch: writer=%v host=%v", writer.calls, hostCalls)
+	}
+	if _, err := NewWorktreeTeamMemberExecutorFactory(captureChildFactory{exec: writer}, []string{"team_member_spawn"}, func(context.Context, ExecutionRequest, llm.ToolUse) (ToolOutcome, error) { return ToolOutcome{}, nil }); err == nil {
+		t.Fatal("worktree role accepted non-workspace tool")
+	}
+	schemas, err := WorktreeTeamMemberToolSchemas([]llm.ToolSchema{{Name: "read_file"}, {Name: "write_file"}, {Name: "edit_file"}, {Name: "command"}, {Name: "mcp_call"}, {Name: "team_send"}, {Name: "team_member_spawn"}, {Name: "team_send"}}, []string{"read_file", "write_file", "command"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, len(schemas))
+	for i, schema := range schemas {
+		got[i] = schema.Name
+	}
+	if strings.Join(got, ",") != "read_file,write_file,command,team_send" {
+		t.Fatalf("worktree member schemas exposed wrong tools: %v", got)
+	}
+	if _, err := WorktreeTeamMemberToolSchemas(nil, []string{"mcp_call"}); err == nil {
+		t.Fatal("worktree schema accepted non-workspace tool")
+	}
+}
+
 func TestStreamingTeamTurnGetsMemberGuidanceAndRetainsRolePrivacy(t *testing.T) {
 	input := validTeamTurnInput()
 	role := "PRIVATE_TEAM_ROLE_MARKER must never appear in public results."

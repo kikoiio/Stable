@@ -68,6 +68,62 @@ func TestTeamRecoveryInterruptsAcceptedTurnWithoutReplayingProvider(t *testing.T
 	}
 }
 
+func TestTeamRecoveryRestoresWorktreeAuthorityForAcceptedTurnWithoutRunStarted(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	service, request := teamServiceFixture(t, root, "parent-worktree-recovery")
+	team, err := service.CreateTeam(t.Context(), request, "worktree-recovery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := teams.Member{ID: "member-worktree-recovery", TeamID: team.ID, Name: "builder", AgentName: "builder", RoleHash: "role-hash", Model: "fixture", Tools: []string{"read_file", "write_file"}, WorkspaceID: "workspace-worktree-recovery", Status: teams.MemberCreated, Revision: 1}
+	if err := appendTeamFactLocked(root, request.Work.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberAdded, ActorID: teams.Lead, ActorRunID: request.RunID, Member: &member}); err != nil {
+		t.Fatal(err)
+	}
+	turn := sessionlog.TurnFact{ID: "turn-worktree-recovery", MemberID: member.ID, RunID: "child-worktree-recovery", TaskID: "task-worktree-recovery", WorkspaceID: member.WorkspaceID, WorkspaceGeneration: 7, OriginRunID: request.RunID, OriginCallID: "spawn-worktree-recovery", Status: "intent"}
+	if err := appendTeamFactLocked(root, request.Work.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamTurnIntent, ActorID: "service", ActorRunID: request.RunID, Turn: &turn}); err != nil {
+		t.Fatal(err)
+	}
+	accepted := turn
+	accepted.Status = "queued"
+	if err := appendTeamFactLocked(root, request.Work.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamTurnAccepted, ActorID: "service", ActorRunID: request.RunID, Turn: &accepted}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a restart in the durable gap after acceptance but before the
+	// child RunStarted fact. Recovery must use the immutable turn authority.
+	if err := recoverTeamRuns(root); err != nil {
+		t.Fatal(err)
+	}
+	transcript, err := sessionlog.Replay(root, request.Work.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recovered sessionlog.RunStarted
+	for _, event := range transcript.Events {
+		if event.Type != sessionlog.EventRunStarted {
+			continue
+		}
+		var start sessionlog.RunStarted
+		if decodeSessionData(event.Data, &start) == nil && start.RunID == turn.RunID {
+			recovered = start
+			break
+		}
+	}
+	if recovered.RunID != turn.RunID || recovered.WorkspaceID != turn.WorkspaceID || recovered.WorkspaceGeneration != turn.WorkspaceGeneration || recovered.TeamID != team.ID || recovered.TeamMemberID != member.ID || recovered.TeamTurnID != turn.ID {
+		t.Fatalf("recovered run start lost worktree authority: %+v", recovered)
+	}
+	projection, err := sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Turns[turn.ID].Status != string(agent.DelegationInterrupted) || projection.Members[member.ID].Status != teams.MemberInterrupted {
+		t.Fatalf("recovery did not close accepted turn: turn=%+v member=%+v", projection.Turns[turn.ID], projection.Members[member.ID])
+	}
+}
+
 func TestTeamRecoveryDoesNotRunCapacityWaitersAutomatically(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "project")
 	if err := os.MkdirAll(root, 0700); err != nil {

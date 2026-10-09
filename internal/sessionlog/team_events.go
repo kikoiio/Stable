@@ -53,17 +53,19 @@ type TeamEvent struct {
 }
 
 type TurnFact struct {
-	ID           string        `json:"id"`
-	MemberID     string        `json:"member_id"`
-	RunID        string        `json:"run_id"`
-	TaskID       string        `json:"task_id"`
-	OriginRunID  string        `json:"origin_run_id,omitempty"`
-	OriginCallID string        `json:"origin_call_id,omitempty"`
-	MessageIDs   []string      `json:"message_ids,omitempty"`
-	Status       string        `json:"status"`
-	Elapsed      time.Duration `json:"elapsed,omitempty"`
-	Summary      string        `json:"summary,omitempty"`
-	Error        string        `json:"error,omitempty"`
+	ID                  string        `json:"id"`
+	MemberID            string        `json:"member_id"`
+	RunID               string        `json:"run_id"`
+	TaskID              string        `json:"task_id"`
+	WorkspaceID         string        `json:"workspace_id,omitempty"`
+	WorkspaceGeneration uint64        `json:"workspace_generation,omitempty"`
+	OriginRunID         string        `json:"origin_run_id,omitempty"`
+	OriginCallID        string        `json:"origin_call_id,omitempty"`
+	MessageIDs          []string      `json:"message_ids,omitempty"`
+	Status              string        `json:"status"`
+	Elapsed             time.Duration `json:"elapsed,omitempty"`
+	Summary             string        `json:"summary,omitempty"`
+	Error               string        `json:"error,omitempty"`
 }
 
 type HandoffFact struct {
