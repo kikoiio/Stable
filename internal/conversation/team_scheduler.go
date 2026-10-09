@@ -43,6 +43,7 @@ type teamParentGrant struct {
 type teamScheduler struct {
 	service         *Service
 	submitter       agent.CommittedTaskSubmitter
+	appendHandoff   func(root, sessionID, teamID string, handoff sessionlog.HandoffFact) error
 	mu              sync.Mutex
 	drainMu         sync.Mutex
 	active          map[string]context.CancelFunc
@@ -962,14 +963,23 @@ func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams
 		if err := s.persistTeamChildQueuedLocked(root, scope, request.RunID, parent.ToolCallID, childInput, runSeq); err != nil {
 			return err
 		}
+		// The reservation is still private to the pool until this callback
+		// returns. If the following handoff append fails, compensate the durable
+		// accepted turn so it cannot be mistaken for work that may run.
+		admissionCommitted = true
 		for _, handoff := range handoffs {
 			handoff.DestinationRunID = admission.ChildRunID
 			handoff.DestinationTurnID = turnID
-			if err := appendTeamFactLocked(root, scope.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamMessageHandoff, ActorID: "service", ActorRunID: request.RunID, Handoff: &handoff}); err != nil {
-				return err
+			var appendErr error
+			if s.teamScheduler.appendHandoff != nil {
+				appendErr = s.teamScheduler.appendHandoff(root, scope.SessionID, team.ID, handoff)
+			} else {
+				appendErr = appendTeamFactLocked(root, scope.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamMessageHandoff, ActorID: "service", ActorRunID: request.RunID, Handoff: &handoff})
+			}
+			if appendErr != nil {
+				return appendErr
 			}
 		}
-		admissionCommitted = true
 		return nil
 	})
 	if err != nil {
@@ -1036,11 +1046,12 @@ func (s *Service) compensateUnpublishedTeamAdmission(root, sessionID, teamID, me
 		return err
 	}
 	member, ok := projection.Members[memberID]
-	if !ok || member.TurnID != turnID || member.Status != teams.MemberQueued {
+	if !ok || member.TeamID != teamID || member.Status.IsTerminal() || member.Status == teams.MemberStopping {
 		return teams.ErrPermission
 	}
 	member.Status = teams.MemberInterrupted
 	member.Revision++
+	member.RunID, member.TurnID = child.ChildRunID, turnID
 	if err := appendTeamFactLocked(root, sessionID, teamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: turn.OriginRunID, Member: &member}); err != nil {
 		return err
 	}
