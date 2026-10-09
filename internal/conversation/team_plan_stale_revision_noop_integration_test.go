@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"stable/internal/agent"
 	"stable/internal/agentcatalog"
@@ -40,10 +41,15 @@ func TestStalePlanRequestResponseLeavesRequestAndLogUnchanged(t *testing.T) {
 	service.deps.ProviderName, service.deps.Model = "fixture", "model-v1"
 	service.lifeCtx = context.Background()
 	service.teamScheduler = newTeamScheduler(service)
+	teamID, memberID, turnID := "", "", ""
+	var memberRevision uint64
 	t.Cleanup(func() {
 		select {
 		case runner.release <- struct{}{}:
 		default:
+		}
+		if teamID != "" && memberID != "" && turnID != "" {
+			waitForTeamTurnAndMemberRevision(t, root, request.Work.SessionID, teamID, memberID, turnID, memberRevision, string(agent.DelegationSucceeded))
 		}
 		service.teamScheduler.close()
 		pool.Close()
@@ -53,16 +59,19 @@ func TestStalePlanRequestResponseLeavesRequestAndLogUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	teamID = team.ID
 	member, err := service.SpawnTeamMember(t.Context(), request, TeamMemberSpawnRequest{
 		TeamID: team.ID, Name: "reader", AgentName: role.Name, Instruction: "Inspect the parser.", PlanRequired: true, OriginCallID: "spawn-stale-plan",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	memberID = member.ID
 	child := receiveTeamChildInput(t, runner.inputs)
 	if child.TeamTurn == nil || child.TeamTurn.MemberID != member.ID {
 		t.Fatalf("unexpected plan member turn: %+v", child.TeamTurn)
 	}
+	turnID = child.TeamTurn.TurnID
 	childRequest := agent.ExecutionRequest{RunID: child.ChildRunID, Work: request.Work, TeamTurn: child.TeamTurn}
 	pending, err := service.SubmitTeamPlan(t.Context(), childRequest, team.ID, "Inspect the parser and report findings.")
 	if err != nil || pending.Status != teams.RequestPending || pending.Revision != 1 {
@@ -93,6 +102,7 @@ func TestStalePlanRequestResponseLeavesRequestAndLogUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	afterRequest := afterProjection.Requests[pending.ID]
+	memberRevision = afterProjection.Members[member.ID].Revision
 	if afterRequest.Status != teams.RequestPending || afterRequest.Revision != pending.Revision || afterRequest.ResponderID != pending.ResponderID || afterProjection.Members[member.ID].PlanApproved {
 		t.Fatalf("stale response changed request/member state: request before=%+v after=%+v member=%+v", pending, afterRequest, afterProjection.Members[member.ID])
 	}
@@ -119,4 +129,21 @@ func TestStalePlanRequestResponseLeavesRequestAndLogUnchanged(t *testing.T) {
 			t.Fatal("stale response appended a response fact for the pending plan")
 		}
 	}
+}
+
+func waitForTeamTurnAndMemberRevision(t *testing.T, root, sessionID, teamID, memberID, turnID string, afterRevision uint64, status string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		projection, err := sessionlog.ReplayTeams(root, sessionID, teamID)
+		if err == nil && projection.Turns[turnID].Status == status && projection.Members[memberID].Revision > afterRevision {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	projection, err := sessionlog.ReplayTeams(root, sessionID, teamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Fatalf("turn status/revision=%s/%d, want %s/revision > %d", projection.Turns[turnID].Status, projection.Members[memberID].Revision, status, afterRevision)
 }

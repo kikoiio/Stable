@@ -36,6 +36,8 @@
 
 `6e79cf4ed5e02ebce6259ad8cd3009cebea14c56` 的 Go build/unit、package、E2E 六个 jobs 与 Workspace Linux 全部成功。随后并行补入 E 的 Goal/WorkItem 消息列表 scope 拒绝及同一 member 的串行 turn/显式续跑证据；F 的 dirty/untracked/ignored private baseline、rewind 遇未知受保护 metadata 时 blocked 并保留数据、leased file tool 拒绝 checkout symlink 逃逸证据。上述新定向测试及四包合并定向验证均通过，随后 F AC7 又补入生产 16 MiB 单文件 quota 精确边界测试，E AC4 补入跨 team/伪造 task ID 无副作用测试；E 又补入双成员双轮 p2p/broadcast、lead 回报与 parent event 续行组合测试。各定向测试通过；`1c15709` 云端验证运行期间追加的双轮场景尚未云端复验。M09-E/F AC1–9 与源端差异、真实 sandbox/恢复组合仍有开放项，整体 M09 保持未完成。
 
+`1c15709758d112d8f3119e6870c876bbc477ba55` 的 Workspace Linux、Go `test-package` 与 E2E `unit`/`e2e-sessions`/`e2e-m04`/`cases` 成功；Go `build-and-test` 再次因既有 `TestLegacyHistoryIsNotReplayedButLiveGoalMessagesBroadcast` socket read 超过 10 分钟失败。E2E `e2e-core` 因 `database is locked` 失败，`e2e-m03` 全量 Go 阶段发现 `TestStalePlanRequestResponseLeavesRequestAndLogUnchanged` 的测试 teardown 未等待 child terminal/member state 落盘，临时目录清理与异步写入竞态。随后 teardown 改为等待 turn terminal 和 member revision 更新，定向测试 `-count=3` 通过；修复尚待下一 SHA 云端复验。该测试夹具清理竞态已修复，M09-E/F 与 M09 整体验收仍开放。
+
 ## 全部完成的条件
 
 - [x] M09-A/B/C 已实现并通过对应 checklist。
