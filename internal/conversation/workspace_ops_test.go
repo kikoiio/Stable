@@ -2,7 +2,11 @@ package conversation
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -20,6 +24,147 @@ type passingWorkspaceChecker struct{}
 
 func (passingWorkspaceChecker) Check(context.Context, candidate.Candidate) (candidate.Finding, error) {
 	return candidate.Finding{ID: "workspace-check", Checker: "workspace-test", Result: candidate.FindingPass}, nil
+}
+
+type failAfterErrCallsContext struct {
+	context.Context
+	mu        sync.Mutex
+	remaining int
+	path      string
+	sawPath   bool
+	pathBytes string
+}
+
+func (c *failAfterErrCallsContext) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.remaining--
+	if c.remaining <= 0 {
+		if c.path != "" {
+			_, err := os.Lstat(c.path)
+			c.sawPath = err == nil
+			if err == nil {
+				if contents, readErr := os.ReadFile(filepath.Join(c.path, "change.txt")); readErr == nil {
+					c.pathBytes = string(contents)
+				}
+			}
+		}
+		return context.Canceled
+	}
+	return nil
+}
+
+func TestWorkspaceExportPartialCandidateFailureCanRetry(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	formal := filepath.Join(root, "project")
+	baseline := filepath.Join(root, "baseline")
+	checkout := filepath.Join(root, "checkout")
+	for _, path := range []string{formal, baseline, checkout} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(formal, "change.txt"), []byte("base"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(baseline, "change.txt"), []byte("base"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkout, "change.txt"), []byte("workspace"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	sessionID := "0123456789abcdef0123456789abcdef"
+	scope := workspace.Scope{ProjectID: "project1", SessionID: sessionID, Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: sessionID}}
+	workspaceID := "1123456789abcdef0123456789abcdef"
+	record := workspace.Record{Scope: scope, Snapshot: workspace.Snapshot{ID: workspaceID, Generation: 1}}
+	formalAbs, err := filepath.Abs(formal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := workspace.Paths{FormalRoot: formalAbs, Baseline: baseline, Checkout: checkout}
+	exporter := workspaceCandidateExporter{service: &Service{deps: Deps{Store: db}}}
+	base, err := workspace.BuildManifest(ctx, baseline, workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	formalManifest, err := workspace.BuildManifest(ctx, formal, workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	working, err := workspace.BuildManifest(ctx, checkout, workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := workspace.ThreeWayPreview(base, formalManifest, working, workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s\x00%s", record.Snapshot.ID, record.Snapshot.Generation, preview.BaselineDigest, preview.FormalDigest, preview.WorkspaceDigest, preview.Manifest.Digest)
+	idDigest := sha256.Sum256([]byte(identity))
+	candidateID := "worktree-" + hex.EncodeToString(idDigest[:16])
+	candidatePath := filepath.Join(filepath.Dir(formalAbs), ".stable-candidates", candidateID)
+
+	// Each input manifest consumes a bounded number of context checks. Cancel
+	// at the first merged-manifest copy check, after the candidate directory
+	// has been created but before it is populated or registered in the store.
+	failingCtx := &failAfterErrCallsContext{Context: ctx, remaining: 19, path: candidatePath}
+	if _, err := exporter.ExportWorkspace(failingCtx, scope, record, paths); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first export error=%v, want injected cancellation", err)
+	}
+	if !failingCtx.sawPath {
+		t.Fatal("injected cancellation occurred before the deterministic candidate root existed")
+	}
+	if failingCtx.pathBytes == "workspace" {
+		t.Fatal("injected cancellation occurred after the candidate had already been fully merged")
+	}
+	if _, err := os.Lstat(candidatePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed export left partial candidate at %s: %v", candidatePath, err)
+	}
+	if _, err := db.GetCandidate(ctx, candidateID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("failed export registered a candidate: %v", err)
+	}
+	retried, err := exporter.ExportWorkspace(ctx, scope, record, paths)
+	if err != nil || retried.CandidateID != candidateID || retried.State != workspace.StateExported {
+		t.Fatalf("retry export=%+v err=%v, want same deterministic candidate %q", retried, err, candidateID)
+	}
+}
+
+func TestWorkspaceExportCleanupPreservesReplacedPartialCandidate(t *testing.T) {
+	parent := t.TempDir()
+	path := filepath.Join(parent, "candidate")
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "partial.txt"), []byte("operation-owned"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := candidate.CaptureRootIdentity(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := path + ".original"
+	if err := os.Rename(path, original); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(path, "keep.txt")
+	if err := os.WriteFile(sentinel, []byte("replacement-owned"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeOwnedPartialCandidate(path, identity); !errors.Is(err, workspace.ErrOwnership) {
+		t.Fatalf("cleanup error=%v, want identity mismatch", err)
+	}
+	if content, err := os.ReadFile(sentinel); err != nil || string(content) != "replacement-owned" {
+		t.Fatalf("replacement candidate was changed: content=%q err=%v", content, err)
+	}
 }
 
 func TestInstallMergedManifestKeepsIndependentFormalAndWorkspaceChanges(t *testing.T) {

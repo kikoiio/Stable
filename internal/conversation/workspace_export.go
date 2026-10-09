@@ -119,37 +119,56 @@ func (e workspaceCandidateExporter) ExportWorkspace(ctx context.Context, scope w
 	if err != nil {
 		return workspace.Snapshot{}, err
 	}
+	createdIdentity, identityErr := candidate.CaptureRootIdentity(created.CandidateRoot)
+	if identityErr != nil {
+		// The path exists, but without an identity captured by the operation we
+		// cannot prove that it is safe to remove. Leave it for reconciliation.
+		return workspace.Snapshot{}, identityErr
+	}
+	cleanupPartial := func(cause error) error {
+		// SaveCandidate may have committed despite returning an error. Preserve
+		// the directory whenever a record exists or the store cannot prove that
+		// no record exists; otherwise a ready candidate could lose its root.
+		_, lookupErr := e.service.deps.Store.GetCandidate(context.Background(), candidateID)
+		if lookupErr == nil || !errors.Is(lookupErr, sql.ErrNoRows) {
+			return cause
+		}
+		if cleanupErr := removeOwnedPartialCandidate(created.CandidateRoot, createdIdentity); cleanupErr != nil {
+			return errors.Join(cause, cleanupErr)
+		}
+		return cause
+	}
 	if err := installMergedManifest(ctx, created.CandidateRoot, formalRoot, paths.Checkout, formal, working, preview.Manifest); err != nil {
-		return workspace.Snapshot{}, err
+		return workspace.Snapshot{}, cleanupPartial(err)
 	}
 	formalAfter, err := workspace.BuildManifest(ctx, formalRoot, workspace.DefaultLimits())
 	if err != nil {
-		return workspace.Snapshot{}, err
+		return workspace.Snapshot{}, cleanupPartial(err)
 	}
 	workingAfter, err := workspace.BuildManifest(ctx, paths.Checkout, workspace.DefaultLimits())
 	if err != nil {
-		return workspace.Snapshot{}, err
+		return workspace.Snapshot{}, cleanupPartial(err)
 	}
 	baselineAfter, err := workspace.BuildManifest(ctx, paths.Baseline, workspace.DefaultLimits())
 	if err != nil {
-		return workspace.Snapshot{}, err
+		return workspace.Snapshot{}, cleanupPartial(err)
 	}
 	if formalAfter.Digest != preview.FormalDigest || workingAfter.Digest != preview.WorkspaceDigest || baselineAfter.Digest != preview.BaselineDigest {
-		return workspace.Snapshot{}, workspace.ErrSourceChanged
+		return workspace.Snapshot{}, cleanupPartial(workspace.ErrSourceChanged)
 	}
 	entries, candidateDigest, err := candidate.BuildManifestForPolicy(created.CandidateRoot, candidate.ManifestPolicyProject)
 	if err != nil {
-		return workspace.Snapshot{}, err
+		return workspace.Snapshot{}, cleanupPartial(err)
 	}
 	if candidateDigest != preview.Manifest.Digest || len(entries) != len(preview.Manifest.Entries) {
-		return workspace.Snapshot{}, workspace.ErrSourceChanged
+		return workspace.Snapshot{}, cleanupPartial(workspace.ErrSourceChanged)
 	}
 	frozen, err := candidate.FreezeCandidate(created, nil, ctx)
 	if err != nil {
-		return workspace.Snapshot{}, err
+		return workspace.Snapshot{}, cleanupPartial(err)
 	}
 	if frozen.CandidateDigest != candidateDigest {
-		return workspace.Snapshot{}, workspace.ErrSourceChanged
+		return workspace.Snapshot{}, cleanupPartial(workspace.ErrSourceChanged)
 	}
 	// Persist the existing candidate lifecycle's reviewable state after the
 	// freezer has sealed and verified the merged manifest.
@@ -158,9 +177,26 @@ func (e workspaceCandidateExporter) ExportWorkspace(ctx context.Context, scope w
 	if err := e.service.deps.Store.SaveCandidate(ctx, store.CandidateRecord{
 		Candidate: frozen, ActionID: actionID, GoalID: goalID, CreatedAt: time.Now().UTC(),
 	}); err != nil {
-		return workspace.Snapshot{}, err
+		return workspace.Snapshot{}, cleanupPartial(err)
 	}
 	return workspace.Snapshot{ID: record.Snapshot.ID, CandidateID: candidateID, State: workspace.StateExported, BaselineDigest: baseline.Digest, FormalDigest: formal.Digest, WorkspaceDigest: working.Digest, ChangedFiles: record.Snapshot.ChangedFiles}, nil
+}
+
+// removeOwnedPartialCandidate only removes a candidate root when its current
+// filesystem identity still matches the identity captured immediately after
+// this export created it. Unknown or replaced paths are retained.
+func removeOwnedPartialCandidate(path, expectedIdentity string) error {
+	if expectedIdentity == "" {
+		return workspace.ErrOwnership
+	}
+	actualIdentity, err := candidate.CaptureRootIdentity(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || actualIdentity != expectedIdentity {
+		return workspace.ErrOwnership
+	}
+	return os.RemoveAll(path)
 }
 
 func installMergedManifest(ctx context.Context, target, formalRoot, workspaceRoot string, formal, working, merged workspace.Manifest) error {
