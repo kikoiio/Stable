@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +24,207 @@ type tuiWorkspacePassingChecker struct{}
 
 func (tuiWorkspacePassingChecker) Check(context.Context, candidate.Candidate) (candidate.Finding, error) {
 	return candidate.Finding{ID: "workspace-check", Checker: "workspace-test", Result: candidate.FindingPass}, nil
+}
+
+type tuiHeldRun struct {
+	events   chan agent.ExecutionEvent
+	done     chan agent.RunOutcome
+	finished chan struct{}
+	once     sync.Once
+}
+
+type tuiHoldingRunner struct {
+	mu   sync.Mutex
+	runs map[string]*tuiHeldRun
+}
+
+func (r *tuiHoldingRunner) Start(_ context.Context, request agent.ExecutionRequest) (*agent.RunHandle, error) {
+	r.mu.Lock()
+	if r.runs == nil {
+		r.runs = map[string]*tuiHeldRun{}
+	}
+	run := &tuiHeldRun{events: make(chan agent.ExecutionEvent), done: make(chan agent.RunOutcome, 1), finished: make(chan struct{})}
+	r.runs[request.RunID] = run
+	r.mu.Unlock()
+	return &agent.RunHandle{Events: run.events, Done: run.done}, nil
+}
+
+func (r *tuiHoldingRunner) Cancel(runID string) error {
+	r.mu.Lock()
+	run := r.runs[runID]
+	r.mu.Unlock()
+	if run == nil {
+		return nil
+	}
+	run.once.Do(func() {
+		close(run.events)
+		run.done <- agent.RunOutcome{RunID: runID, Status: agent.RunCancelled}
+		close(run.done)
+		close(run.finished)
+	})
+	return nil
+}
+
+func TestWorktreeTUICreateSurvivesConversationServiceRestart(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	formal := filepath.Join(root, "project")
+	if err := os.Mkdir(formal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formal, "kept.txt"), []byte("formal baseline"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	workspaceState := filepath.Join(root, "workspace-state")
+	socketDir, err := os.MkdirTemp("", "m09-tui-restart-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socket := filepath.Join(socketDir, "c.sock")
+	runner := &tuiHoldingRunner{}
+	serviceCtx, stopService := context.WithCancel(ctx)
+	service, err := conversation.Serve(serviceCtx, conversation.Deps{
+		Store: db, ProjectRoot: formal, WorkspaceStateRoot: workspaceState,
+		SocketPath: socket, PollEvery: time.Hour, Runner: runner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceClosed := false
+	cleanupService := func() {
+		if !serviceClosed {
+			if err := service.Close(); err != nil {
+				t.Errorf("close conversation service: %v", err)
+			}
+			serviceClosed = true
+		}
+		stopService()
+	}
+	t.Cleanup(cleanupService)
+
+	sessions, err := conversation.Request(ctx, socket, conversation.ClientMsg{Op: "session_create", ProjectRoot: formal})
+	if err != nil || len(sessions) != 1 || sessions[0].Session == nil {
+		t.Fatalf("create session: messages=%+v err=%v", sessions, err)
+	}
+	sessionID := sessions[0].Session.ID
+	runID, err := sessionlog.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := conversation.OpenRun(ctx, socket, agent.ExecutionRequest{
+		RunID: runID, Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: sessionID},
+		Intent: "hold the lead run while creating a workspace", Model: "fixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = runner.Cancel(runID)
+		_ = stream.Close()
+	})
+	started, err := stream.Receive()
+	if err != nil || started.Type != "run_started" || started.RunID != runID {
+		t.Fatalf("start lead run: message=%+v err=%v", started, err)
+	}
+	runEnded := false
+	t.Cleanup(func() {
+		if !runEnded {
+			_ = stream.Cancel(sessionID, runID)
+			for {
+				message, receiveErr := stream.Receive()
+				if receiveErr != nil || message.Type == "run_outcome" {
+					break
+				}
+			}
+		}
+		_ = stream.Close()
+	})
+
+	m := New(socket, formal)
+	m.ActiveSession, m.ActiveRunID = sessionID, runID
+	m.Pending = true
+	m.Composer.SetValue("/worktrees create restart-check")
+	updated, command := m.submitComposer()
+	got := updated.(Model)
+	if command == nil || got.ActiveRunID != runID || !got.Pending {
+		t.Fatalf("TUI create did not preserve active lead run: run=%q pending=%v", got.ActiveRunID, got.Pending)
+	}
+	result, ok := command().(resultMsg)
+	if !ok || result.err != nil {
+		t.Fatalf("TUI worktree create result=%+v err=%v", result, result.err)
+	}
+	updated, _ = got.handleResult(result)
+	got = updated.(Model)
+	if len(got.Worktrees) != 1 || got.Worktrees[0].Label != "restart-check" {
+		t.Fatalf("TUI did not create the service-owned workspace: %+v", got.Worktrees)
+	}
+	workspaceID := got.Worktrees[0].ID
+
+	if err := stream.Cancel(sessionID, runID); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		message, receiveErr := stream.Receive()
+		if receiveErr != nil {
+			t.Fatalf("receive lead run cancellation: %v", receiveErr)
+		}
+		if message.Type == "run_outcome" {
+			if message.Outcome == nil || message.Outcome.Status != agent.RunCancelled {
+				t.Fatalf("lead run outcome=%+v, want cancelled", message.Outcome)
+			}
+			runEnded = true
+			break
+		}
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatal(err)
+	}
+	serviceClosed = true
+	stopService()
+
+	serviceCtx, stopService = context.WithCancel(ctx)
+	service, err = conversation.Serve(serviceCtx, conversation.Deps{
+		Store: db, ProjectRoot: formal, WorkspaceStateRoot: workspaceState,
+		SocketPath: socket, PollEvery: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceClosed = false
+
+	restored := New(socket, formal)
+	restored.ActiveSession = sessionID
+	restored.Composer.SetValue("/worktrees")
+	updated, command = restored.submitComposer()
+	restored = updated.(Model)
+	if command == nil {
+		t.Fatal("TUI did not issue the post-restart workspace list")
+	}
+	result = command().(resultMsg)
+	if result.err != nil {
+		t.Fatalf("list restored workspace: %v", result.err)
+	}
+	updated, _ = restored.handleResult(result)
+	restored = updated.(Model)
+	if len(restored.Worktrees) != 1 || restored.Worktrees[0].ID != workspaceID || restored.Worktrees[0].Label != "restart-check" {
+		t.Fatalf("TUI did not restore the same workspace after restart: %+v", restored.Worktrees)
+	}
+	if got, err := os.ReadFile(filepath.Join(formal, "kept.txt")); err != nil || string(got) != "formal baseline" {
+		t.Fatalf("formal project changed during workspace lifecycle: content=%q err=%v", got, err)
+	}
 }
 
 func TestWorktreeTUIResolutionExportAndAcceptanceUsesConversationService(t *testing.T) {
