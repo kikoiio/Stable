@@ -22,7 +22,7 @@
 
 源文件位于本机 `/home/neo/Projects/mewcode-golang`。核对使用源码读取，未执行源项目、真实 provider 或重型构建。该目录没有 Git 元数据，源版本无法固定；E/F checklist 的源行为签证项因此仍保持开放。
 
-2026-10-09 增补局部证据：E 新增真实共享池首 spawn 满载拒绝、两成员容量等待/FIFO 恢复、任务依赖 service/replay、父/兄弟历史隔离及消息 handoff 集成测试；F 新增 Unix socket 冲突逐路径解决到候选导出、导出不自动接受，以及 dirty/untracked 工作树被 clean-remove 保留的测试。SHA `6121f54`、`f61e2fb`、`35b130b` 与 `ac817fa` 的 Go build/unit、package、E2E 全部 jobs 和 Workspace Linux 云端验证均通过。先前 SHA `33b37ef` 的 E2E 因新提交触发同分支并发策略而取消，`6121f54` 已完整复验替代。覆盖范围和限制见 [E checklist](../M09-E/checklist.md) 与 [F checklist](../M09-F/checklist.md)；E/F AC1–9 仍未整体验收。
+2026-10-09 增补局部证据：E 新增真实共享池首 spawn 满载拒绝、两成员容量等待/FIFO 恢复、任务依赖 service/replay、父/兄弟历史隔离、消息中断后重启且显式重试及消息 handoff 集成测试；消息中断重试新测试已本地重复通过，待当前提交云端复验。F 新增 Unix socket 冲突逐路径解决到候选导出、导出不自动接受，以及 dirty/untracked 工作树被 clean-remove 保留的测试。SHA `6121f54`、`f61e2fb`、`35b130b` 与 `ac817fa` 的 Go build/unit、package、E2E 全部 jobs 和 Workspace Linux 云端验证均通过。先前 SHA `33b37ef` 的 E2E 因新提交触发同分支并发策略而取消，`6121f54` 已完整复验替代。覆盖范围和限制见 [E checklist](../M09-E/checklist.md) 与 [F checklist](../M09-F/checklist.md)；E/F AC1–9 仍未整体验收。
 
 ## 全部完成的条件
 
