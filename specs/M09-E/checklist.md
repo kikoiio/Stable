@@ -1,6 +1,6 @@
 # M09-E 团队、消息与只读协调器 Checklist
 
-> 状态：规格已批准，实施代码已提交；AC1–9 与完整场景仍按实际证据逐项验收。最新代码 SHA `29eee81afdbc8e6b4a0bda906c99b26bd8ffc601` 的 Go build/unit、package、全部 E2E jobs 与 Workspace Linux 全部通过；E AC1–9 仍有逐项验收缺口（2026-10-09）。
+> 状态：规格已批准，实施代码已提交；AC1–9 与完整场景仍按实际证据逐项验收。最新组合代码 SHA `1ca6e0e0afb8400a61e4245eec7b88baeb6d3cb8` 的 Go build/unit、package、全部 E2E jobs 与 Workspace Linux 全部通过；E AC1–9 仍有逐项验收缺口（2026-10-09）。
 
 ## 功能验收
 
