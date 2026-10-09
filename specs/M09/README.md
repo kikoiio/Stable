@@ -34,7 +34,7 @@
 
 随后补入 E coordinator 对伪造 direct MCP tool name 的 hard-deny 测试与真实 TUI create→spawn→send→messages→get service 闭环；F 修复 rewind 和 acceptance 在 finalized→cleanup 崩溃窗口留下 spent staging 的问题，并验证 staging identity 被替换时拒绝删除、receipt/formal root 状态一致后才清理。SHA `c74202a` 包含 acceptance cleanup 实现，`eccc28d` 增加 finalize 前后替换 spent root 的负向恢复测试；SHA `b21ece0` 补上 handoff event append 失败的持久补偿与显式重试。SHA `121ccec` 增加 stop failure/deadline 下保留 blocked writer lease，`4ed4544` 增加真实 TUI/service 两轮摘要与待处理消息续接；`4463358` 扩展 coordinator direct-tool 拒绝矩阵，`c0d2262` 覆盖有界消息批次，`f2d6ac4` 覆盖 mode-only 三方合并/冲突，`748cead` 验证 broadcast recipient snapshot。SHA `15371d8` 的云端 Go 因两个测试夹具缺陷失败、Workspace Linux 成功，E2E 因夹具缺陷及 dependency-change runtime 启动失败；夹具已在 `8500c24` 修正。`9d18862` 的云端复验仍在运行。审阅还确认普通 session run 尚未从 workspace binding 派生 writer authority，不能在缺少 lease/quota/accept 闭环时只改根路径。后续提交等待云端验证，M09-E/F 仍未整体验收。
 
-`6e79cf4ed5e02ebce6259ad8cd3009cebea14c56` 的 Go build/unit、package、E2E 六个 jobs 与 Workspace Linux 全部成功。随后并行补入 E 的 Goal/WorkItem 消息列表 scope 拒绝及同一 member 的串行 turn/显式续跑证据；F 的 dirty/untracked/ignored private baseline、rewind 遇未知受保护 metadata 时 blocked 并保留数据、leased file tool 拒绝 checkout symlink 逃逸证据。上述新定向测试及四包合并定向验证均通过，但尚未云端复验。M09-E/F AC1–9 与源端差异、真实 sandbox/恢复组合仍有开放项，整体 M09 保持未完成。
+`6e79cf4ed5e02ebce6259ad8cd3009cebea14c56` 的 Go build/unit、package、E2E 六个 jobs 与 Workspace Linux 全部成功。随后并行补入 E 的 Goal/WorkItem 消息列表 scope 拒绝及同一 member 的串行 turn/显式续跑证据；F 的 dirty/untracked/ignored private baseline、rewind 遇未知受保护 metadata 时 blocked 并保留数据、leased file tool 拒绝 checkout symlink 逃逸证据。上述新定向测试及四包合并定向验证均通过，随后 F AC7 又补入生产 16 MiB 单文件 quota 精确边界测试，定向测试通过；这些新改动尚未云端复验。M09-E/F AC1–9 与源端差异、真实 sandbox/恢复组合仍有开放项，整体 M09 保持未完成。
 
 ## 全部完成的条件
 
