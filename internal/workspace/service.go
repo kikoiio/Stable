@@ -308,6 +308,32 @@ func (s *LifecycleService) recoverInterruptedOperations(ctx context.Context, rec
 		if err != nil {
 			return err
 		}
+		if record.Snapshot.State == StateCreating && record.Operation.Kind == "create" && record.Operation.Phase == "intent" && record.RootIdentity.Inode != 0 {
+			// Materialize atomically writes a private receipt only after the full
+			// baseline, repository and checkout have been validated. If the service
+			// stopped before publishing StateReady, use that receipt to finish the
+			// same create instead of stranding a complete workspace as interrupted.
+			if gitState, validateErr := s.git.Validate(ctx, record.Scope, record.Snapshot.ID); validateErr == nil {
+				manifest, manifestErr := BuildManifest(ctx, paths.Checkout, s.limits)
+				baseline, baselineErr := BuildManifest(ctx, paths.Baseline, s.limits)
+				if manifestErr == nil && baselineErr == nil && baseline.Digest == gitState.BaselineDigest {
+					ready := record
+					ready.Snapshot.State = StateReady
+					ready.Snapshot.BaselineDigest = gitState.BaselineDigest
+					ready.Snapshot.WorkspaceDigest = manifest.Digest
+					ready.Snapshot.ChangedFiles = changedManifestEntries(baseline.Entries, manifest.Entries)
+					ready.Snapshot.Error = ""
+					ready.Snapshot.Cursor++
+					ready.UsedBytes = gitState.UsedBytes
+					ready.Operation.Phase = "complete"
+					ready.Operation.UpdatedAt = time.Now().UTC()
+					if err := s.store.Save(ctx, record.Scope, ready, record.Snapshot.Generation); err != nil {
+						return err
+					}
+					continue
+				}
+			}
+		}
 		if record.Snapshot.State == StateWriting || record.Snapshot.State == StateStopping || record.Snapshot.State == StateBlocked && record.Operation.Process != nil {
 			if record.Operation.Process == nil {
 				if err := s.persistInterruptedWriter(ctx, record, "writer process identity is missing; workspace retained"); err != nil {

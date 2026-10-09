@@ -419,11 +419,17 @@ func (s *Service) getTeamForSession(ctx context.Context, root, sessionID, teamID
 }
 
 func (s *Service) CloseTeam(ctx context.Context, request agent.ExecutionRequest, teamID string) (teams.Team, error) {
-	root, _, err := s.scopeForWork(ctx, currentProjectRoot(s.deps.ProjectRoot), request.Work)
-	if err != nil {
-		return teams.Team{}, err
+	// TeamUser is an internal marker created by teamUserRequest for local UI
+	// actions. A caller of this service API cannot establish that identity by
+	// setting the bool, so CloseTeam only accepts a persisted active lead run.
+	if request.TeamUser {
+		return teams.Team{}, teams.ErrPermission
 	}
-	team, err := s.closeTeamForSession(ctx, root, request.Work.SessionID, teamID, &request.Work)
+	root, _, actor, err := s.teamOperationScope(ctx, request)
+	if err != nil || !actor.Lead {
+		return teams.Team{}, teams.ErrPermission
+	}
+	team, err := s.closeTeamForSession(ctx, root, request, teamID)
 	if err == nil && s.teamScheduler != nil {
 		for _, cancel := range s.teamScheduler.invalidateTeam(teamID) {
 			cancel()
@@ -432,7 +438,31 @@ func (s *Service) CloseTeam(ctx context.Context, request agent.ExecutionRequest,
 	return team, err
 }
 
-func (s *Service) closeTeamForSession(ctx context.Context, root, sessionID, teamID string, work *agent.WorkRef) (teams.Team, error) {
+// closeTeamAsUser is only called by the local socket handler. It rebuilds the
+// WorkRef from persisted team facts and verifies the current project scope
+// before applying the same close transition as an active lead.
+func (s *Service) closeTeamAsUser(ctx context.Context, sessionID, teamID string) (teams.Team, error) {
+	request, err := s.teamUserRequest(ctx, sessionID, teamID)
+	if err != nil {
+		return teams.Team{}, err
+	}
+	root, _, actor, err := s.teamOperationScope(ctx, request)
+	if err != nil || !actor.Lead {
+		return teams.Team{}, teams.ErrPermission
+	}
+	if _, err = s.getTeamForSession(ctx, root, sessionID, teamID, &request.Work); err != nil {
+		return teams.Team{}, err
+	}
+	closed, err := s.closeTeamForSession(ctx, root, request, teamID)
+	if err == nil && s.teamScheduler != nil {
+		for _, cancel := range s.teamScheduler.invalidateTeam(teamID) {
+			cancel()
+		}
+	}
+	return closed, err
+}
+
+func (s *Service) closeTeamForSession(ctx context.Context, root string, request agent.ExecutionRequest, teamID string) (teams.Team, error) {
 	if err := ctx.Err(); err != nil {
 		return teams.Team{}, err
 	}
@@ -441,7 +471,11 @@ func (s *Service) closeTeamForSession(ctx context.Context, root, sessionID, team
 	if err := ctx.Err(); err != nil {
 		return teams.Team{}, err
 	}
-	team, err := s.getTeamForSession(ctx, root, sessionID, teamID, work)
+	currentRoot, _, actor, err := s.teamOperationScope(ctx, request)
+	if err != nil || !actor.Lead || currentRoot != root {
+		return teams.Team{}, teams.ErrPermission
+	}
+	team, err := s.getTeamForSession(ctx, root, request.Work.SessionID, teamID, &request.Work)
 	if err != nil {
 		return teams.Team{}, err
 	}
@@ -458,10 +492,10 @@ func (s *Service) closeTeamForSession(ctx context.Context, root, sessionID, team
 	if err != nil {
 		return teams.Team{}, err
 	}
-	if _, err = sessionlog.Append(root, sessionID, sessionlog.EventTeam, sessionlog.TeamEvent{ID: id, TeamID: teamID, SessionID: sessionID, Kind: sessionlog.TeamClosing, Revision: next.Revision, ActorID: "service", Team: &next}); err != nil {
+	if _, err = sessionlog.Append(root, request.Work.SessionID, sessionlog.EventTeam, sessionlog.TeamEvent{ID: id, TeamID: teamID, SessionID: request.Work.SessionID, Kind: sessionlog.TeamClosing, Revision: next.Revision, ActorID: "service", Team: &next}); err != nil {
 		return teams.Team{}, err
 	}
-	return s.closeTeamIfIdleLocked(root, sessionID, teamID)
+	return s.closeTeamIfIdleLocked(root, request.Work.SessionID, teamID)
 }
 
 // closeTeamIfIdleLocked stops members that have no accepted turn and writes
@@ -569,12 +603,7 @@ func (s *Service) handleTeamRequest(ctx context.Context, msg ClientMsg) (ServerM
 		team, getErr := s.getTeamForSession(ctx, root, msg.SessionID, msg.TeamID, nil)
 		return ServerMsg{Type: msg.Op, Team: &team}, getErr
 	case "team_close":
-		team, closeErr := s.closeTeamForSession(ctx, root, msg.SessionID, msg.TeamID, nil)
-		if closeErr == nil && s.teamScheduler != nil {
-			for _, cancel := range s.teamScheduler.invalidateTeam(msg.TeamID) {
-				cancel()
-			}
-		}
+		team, closeErr := s.closeTeamAsUser(ctx, msg.SessionID, msg.TeamID)
 		return ServerMsg{Type: msg.Op, Team: &team}, closeErr
 	case "team_member_spawn", "team_member_resume":
 		request, err = s.activeRunRequest(msg.SessionID, msg.RunID)
