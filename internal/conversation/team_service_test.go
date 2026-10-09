@@ -106,6 +106,14 @@ func TestSameTeamNameIsIsolatedAcrossValidSessions(t *testing.T) {
 			t.Fatalf("session %s queried another session's team %s", fixture.request.Work.SessionID, fixture.other.ID)
 		}
 	}
+	addTeamMessageMember(t, firstService, firstRequest, firstTeam.ID, "first-member", "reader")
+	addTeamMessageMember(t, secondService, secondRequest, secondTeam.ID, "second-member", "reader")
+	if _, err := secondService.SendTeamMessage(context.Background(), secondRequest, TeamSendRequest{TeamID: firstTeam.ID, Recipient: "first-member", Body: "cross-session delivery", Token: "cross-session-message"}); err == nil {
+		t.Fatal("valid lead run from another session sent a message to the first session's team")
+	}
+	if got := len(teamMessageFacts(t, firstService, firstRequest, firstTeam.ID)); got != 0 {
+		t.Fatalf("cross-session message persisted in target team: %d messages", got)
+	}
 }
 
 func TestGoalTeamIsIsolatedByGoalAndWorkItem(t *testing.T) {
@@ -310,6 +318,53 @@ func TestTeamTaskServicePersistsDependencyGateAndRevision(t *testing.T) {
 	}
 	if _, err = service.UpdateTeamTask(context.Background(), request, team.ID, second.ID, second.Revision-1, teams.TaskPatch{Title: stringPtr("stale")}); !errors.Is(err, teams.ErrRevisionConflict) {
 		t.Fatalf("stale update = %v, want revision conflict", err)
+	}
+}
+
+func TestTeamTaskBoardDoesNotMutateSessionTodo(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	service, request := teamServiceFixture(t, root, "run-todo-isolation")
+	team, err := service.CreateTeam(context.Background(), request, "todo-isolation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	todo := sessionlog.TodoUpdate{Revision: 1, Tasks: []sessionlog.TaskSnapshot{{ID: "session-todo", Subject: "session task", Status: "pending"}}}
+	if _, err := sessionlog.Append(root, request.Work.SessionID, sessionlog.EventTodo, todo); err != nil {
+		t.Fatal(err)
+	}
+	task, err := service.CreateTeamTask(context.Background(), request, team.ID, teams.Task{Title: "team task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := teams.TaskCompleted
+	if _, err := service.UpdateTeamTask(context.Background(), request, team.ID, task.ID, task.Revision, teams.TaskPatch{Status: &completed}); err != nil {
+		t.Fatal(err)
+	}
+
+	transcript, err := sessionlog.Replay(root, request.Work.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var todoFacts []sessionlog.TodoUpdate
+	for _, event := range transcript.Events {
+		if event.Type != sessionlog.EventTodo {
+			continue
+		}
+		var update sessionlog.TodoUpdate
+		if err := decodeSessionData(event.Data, &update); err != nil {
+			t.Fatal(err)
+		}
+		todoFacts = append(todoFacts, update)
+	}
+	if len(todoFacts) != 1 || todoFacts[0].Revision != todo.Revision || len(todoFacts[0].Tasks) != 1 || todoFacts[0].Tasks[0].ID != "session-todo" {
+		t.Fatalf("team task operations changed session todo snapshots: %+v", todoFacts)
+	}
+	teamTasks, err := service.ListTeamTasks(context.Background(), request, team.ID)
+	if err != nil || len(teamTasks) != 1 || teamTasks[0].ID != task.ID || teamTasks[0].Status != teams.TaskCompleted {
+		t.Fatalf("team task facts were not independent and durable: tasks=%+v err=%v", teamTasks, err)
 	}
 }
 
