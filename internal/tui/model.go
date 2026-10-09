@@ -1703,7 +1703,7 @@ func (m Model) acceptReview(mode candidate.AcceptanceMode, confirmed ...string) 
 	if err != nil {
 		return func() tea.Msg { return resultMsg{op: "review_accept", err: err} }
 	}
-	return requestCmd(m.Socket, conversation.ClientMsg{Op: "review_accept", CandidateID: m.Review.CandidateID, DecisionID: decisionID, PreviewDigest: m.Review.Digest, CandidateDigest: m.Review.CandidateDigest, FormalDigest: m.Review.FormalDigest, AcceptanceMode: string(mode), Confirmed: confirmed})
+	return requestCmd(m.Socket, conversation.ClientMsg{Op: "review_accept", SessionID: m.ActiveSession, CandidateID: m.Review.CandidateID, DecisionID: decisionID, PreviewDigest: m.Review.Digest, CandidateDigest: m.Review.CandidateDigest, FormalDigest: m.Review.FormalDigest, AcceptanceMode: string(mode), Confirmed: confirmed})
 }
 
 func (m *Model) applyRunMessage(message conversation.ServerMsg) {
