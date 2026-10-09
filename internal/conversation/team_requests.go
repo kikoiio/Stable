@@ -266,10 +266,19 @@ func (s *Service) RespondTeamRequest(ctx context.Context, request agent.Executio
 		return teams.Request{}, err
 	}
 	prior, ok := projection.Requests[requestID]
-	if !ok || prior.TeamID != teamID || prior.Revision != expectedRevision {
+	if !ok || prior.TeamID != teamID {
 		return prior, teams.ErrRevisionConflict
 	}
-	if actor.Lead && prior.Type != teams.RequestPlan || !actor.Lead && (prior.Type != teams.RequestShutdown || prior.MemberID != actor.MemberID) {
+	if prior.Revision != expectedRevision {
+		// A retry of the exact response uses its original expected revision.
+		// Only the persisted responder may receive the already-applied response
+		// result, and it must match both the decision and sanitized feedback.
+		if prior.Revision > expectedRevision && prior.Revision-expectedRevision == 1 && teamRequestResponder(actor, prior) && teamRequestAppliedDecision(prior.Status, decision) && prior.Feedback == feedback && (prior.Status != teams.RequestDeferred || time.Now().Before(prior.ExpiresAt)) {
+			return prior, nil
+		}
+		return prior, teams.ErrRevisionConflict
+	}
+	if !teamRequestResponder(actor, prior) {
 		return teams.Request{}, teams.ErrPermission
 	}
 	if (prior.Status == teams.RequestPending || prior.Status == teams.RequestDeferred) && !time.Now().Before(prior.ExpiresAt) {
@@ -341,6 +350,29 @@ func (s *Service) RespondTeamRequest(ctx context.Context, request agent.Executio
 		}
 	}
 	return prior, nil
+}
+
+func teamRequestResponder(actor teams.Actor, request teams.Request) bool {
+	if actorID(actor) != request.ResponderID {
+		return false
+	}
+	if actor.Lead {
+		return request.Type == teams.RequestPlan
+	}
+	return request.Type == teams.RequestShutdown && request.MemberID == actor.MemberID
+}
+
+func teamRequestAppliedDecision(status teams.RequestStatus, decision string) bool {
+	switch status {
+	case teams.RequestApproved:
+		return decision == string(teams.RequestApproved)
+	case teams.RequestRejected:
+		return decision == string(teams.RequestRejected)
+	case teams.RequestDeferred:
+		return decision == string(teams.RequestDeferred)
+	default:
+		return false
+	}
 }
 
 func (s *Service) createTeamRequest(root string, team teams.Team, runID, requester, memberID string, kind teams.RequestType, body string) (teams.Request, error) {
