@@ -105,6 +105,36 @@ func TestTeamStrictUnionAndRevision(t *testing.T) {
 	f.reject(TeamMessageSent, func(e *TeamEvent) { e.ActorID = f.member.ID; e.ActorRunID = "parent"; e.Message = &teams.Message{} })
 }
 
+func TestTeamMessageAppendRejectsRecipientStoppingAtCommit(t *testing.T) {
+	f := newTeamFixture(t)
+	f.accept()
+	projection, err := ReplayTeams(f.root, f.session, f.team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := projection.Members[f.member.ID]
+	member.Status = teams.MemberStopping
+	member.Revision++
+	f.write(TeamMemberState, func(e *TeamEvent) { e.Member = &member })
+
+	before, err := Replay(f.root, f.session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := teams.Message{ID: "message-stopping-recipient", TeamID: f.team.ID, SenderID: teams.Lead, Recipients: []string{f.member.ID}, Body: "hello", CreatedAt: time.Now().UTC()}
+	_, err = Append(f.root, f.session, EventTeam, f.event(TeamMessageSent, func(e *TeamEvent) { e.Message = &message }))
+	if err == nil {
+		t.Fatal("message to a stopping recipient was accepted")
+	}
+	after, replayErr := Replay(f.root, f.session)
+	if replayErr != nil {
+		t.Fatal(replayErr)
+	}
+	if len(after.Events) != len(before.Events) {
+		t.Fatalf("rejected message appended an event: before=%d after=%d", len(before.Events), len(after.Events))
+	}
+}
+
 func TestTeamRunSourceRequiresAcceptedTurn(t *testing.T) {
 	f := newTeamFixture(t)
 	start := f.start()

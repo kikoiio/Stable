@@ -330,7 +330,7 @@ func (st *teamScan) checkEvent(sessionID string, e TeamEvent, at time.Time) erro
 				continue
 			}
 			member, ok := st.Members[recipient]
-			if !ok || member.TeamID != e.TeamID || member.Status.IsTerminal() {
+			if !ok || member.TeamID != e.TeamID || member.Status.IsTerminal() || member.Status == teams.MemberStopping {
 				return errors.New("message recipient is unknown or closed")
 			}
 		}
