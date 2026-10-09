@@ -105,6 +105,81 @@ func TestTeamRecoveryDoesNotRunCapacityWaitersAutomatically(t *testing.T) {
 	}
 }
 
+func TestTeamRecoveryPreservesMembersWithoutActiveTurns(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	service, request := teamServiceFixture(t, root, "parent-run")
+	team, err := service.CreateTeam(t.Context(), request, "preserve-idle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := teams.Member{ID: "member-created", TeamID: team.ID, Name: "created", AgentName: "explore", RoleHash: "role-hash", Model: "fixture", Tools: []string{"read_file"}, Status: teams.MemberCreated, Revision: 1}
+	idle := teams.Member{ID: "member-idle", TeamID: team.ID, Name: "idle", AgentName: "explore", RoleHash: "role-hash", Model: "fixture", Tools: []string{"read_file"}, Status: teams.MemberCreated, Revision: 1}
+	for _, member := range []teams.Member{created, idle} {
+		if err := appendTeamFactLocked(root, request.Work.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberAdded, ActorID: teams.Lead, ActorRunID: request.RunID, Member: &member}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	identity := &agent.TeamTurnIdentity{TeamID: team.ID, MemberID: idle.ID, TurnID: "turn-idle", MemberName: idle.Name}
+	turn := sessionlog.TurnFact{ID: identity.TurnID, MemberID: idle.ID, TaskID: identity.TurnID, RunID: "child-idle", OriginRunID: request.RunID, OriginCallID: "spawn-idle", Status: "intent"}
+	if err := appendTeamFactLocked(root, request.Work.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamTurnIntent, ActorID: "service", ActorRunID: request.RunID, Turn: &turn}); err != nil {
+		t.Fatal(err)
+	}
+	accepted := turn
+	accepted.Status = "queued"
+	if err := appendTeamFactLocked(root, request.Work.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamTurnAccepted, ActorID: "service", ActorRunID: request.RunID, Turn: &accepted}); err != nil {
+		t.Fatal(err)
+	}
+	child := agent.ChildRunInput{TeamTurn: identity, ParentRunID: request.RunID, BatchID: "batch-idle", ChildRunID: turn.RunID, Task: agent.DelegationTask{ID: turn.TaskID, Name: idle.Name, Instruction: "inspect"}, Work: request.Work}
+	scope := teams.Scope{SessionID: request.Work.SessionID, WorkKind: string(request.Work.Kind), ProjectRoot: root}
+	runSeq := uint64(0)
+	if err := service.persistTeamChildQueuedLocked(root, scope, request.RunID, "spawn-idle", child, &runSeq); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.persistTeamChildFinish(root, request.Work.SessionID, team.ID, idle.ID, turn.ID, child, agent.ChildRunResult{Status: agent.DelegationSucceeded, Summary: "done"}, &runSeq); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishedTurn := projection.Turns[turn.ID]
+	finishedTurn.Status = string(agent.DelegationSucceeded)
+	if err := appendTeamFactLocked(root, request.Work.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamTurnTerminal, ActorID: "service", ActorRunID: request.RunID, Turn: &finishedTurn}); err != nil {
+		t.Fatal(err)
+	}
+	idleState := projection.Members[idle.ID]
+	idleState.Status = teams.MemberIdle
+	idleState.Revision++
+	if err := appendTeamFactLocked(root, request.Work.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: request.RunID, Member: &idleState}); err != nil {
+		t.Fatal(err)
+	}
+	projection, err = sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := projection.Members[idle.ID].Status; got != teams.MemberIdle {
+		t.Fatalf("fixture idle member status=%s", got)
+	}
+	for range 2 {
+		if err := recoverTeamRuns(root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	projection, err = sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := projection.Members[created.ID].Status; got != teams.MemberCreated {
+		t.Fatalf("created member status after recovery=%s, want created", got)
+	}
+	if got := projection.Members[idle.ID].Status; got != teams.MemberIdle {
+		t.Fatalf("idle member status after recovery=%s, want idle", got)
+	}
+}
+
 func TestUnpublishedTeamAdmissionIsDurablyCompensated(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "project")
 	if err := os.MkdirAll(root, 0700); err != nil {
