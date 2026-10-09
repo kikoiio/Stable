@@ -58,7 +58,7 @@ func TestWorktreeLateResponseFromPreviousSessionIsIgnored(t *testing.T) {
 	m.WorktreeDialog = &worktreeDecisionDialog{Mode: "resolve", Snapshot: workspace.Snapshot{
 		ID: "4123456789abcdef0123456789abcdef", SessionID: oldSession, Conflicts: []string{"old/private/path"},
 	}}
-	m.worktreeNextPage = &worktreePageRequest{sessionID: oldSession, workspaceID: "4123456789abcdef0123456789abcdef", after: "old/private/path"}
+	m.worktreeNextPage = &worktreePageRequest{sessionID: oldSession, workKind: "session", workspaceID: "4123456789abcdef0123456789abcdef", after: "old/private/path"}
 
 	updated, command := m.handleResult(resultMsg{
 		op: "worktree_resolve", sessionID: oldSession,
@@ -78,6 +78,27 @@ func TestWorktreeLateResponseFromPreviousSessionIsIgnored(t *testing.T) {
 	}
 	if got.worktreeNextPage == nil || got.worktreeNextPage.sessionID != oldSession {
 		t.Fatalf("stale pagination state was lost or rebound: %+v", got.worktreeNextPage)
+	}
+}
+
+func TestWorktreeLateResponseFromPreviousGoalItemIsIgnored(t *testing.T) {
+	const sessionID = "0123456789abcdef0123456789abcdef"
+	m := New("", t.TempDir())
+	m.ActiveSession = sessionID
+	m.WorktreeScopeSessionID, m.WorktreeGoalID, m.WorktreeWorkItemID = sessionID, "goal-current", "item-current"
+	m.Worktrees = []workspace.Snapshot{{ID: "3123456789abcdef0123456789abcdef", SessionID: sessionID, Label: "current"}}
+	updated, command := m.handleResult(resultMsg{
+		op: "worktree_get", sessionID: sessionID, workKind: "goal", goalID: "goal-old", workItemID: "item-old",
+		msgs: []conversation.ServerMsg{{Type: "worktree", Worktree: &workspace.Snapshot{
+			ID: "4123456789abcdef0123456789abcdef", SessionID: sessionID, Label: "old-goal", Conflicts: []string{"private/path"},
+		}}},
+	})
+	got := updated.(Model)
+	if command != nil {
+		t.Fatal("stale Goal reply started a follow-up request")
+	}
+	if len(got.Worktrees) != 1 || got.Worktrees[0].Label != "current" {
+		t.Fatalf("previous Goal/WorkItem reply changed active worktree list: %+v", got.Worktrees)
 	}
 }
 
@@ -129,6 +150,85 @@ func TestWorktreeCommandsDispatchSessionScopedLifecycleRequests(t *testing.T) {
 	}
 }
 
+func TestWorktreeScopeSelectionRequiresGoalAndWorkItemAndCanClear(t *testing.T) {
+	const sessionID = "0123456789abcdef0123456789abcdef"
+	m := New("", t.TempDir())
+	m.ActiveSession = sessionID
+
+	updated, command := submitWorktreeLine(t, m, "/worktrees scope goal goal-one")
+	if command != nil || updated.WorktreeGoalID != "" || updated.WorktreeWorkItemID != "" {
+		t.Fatalf("incomplete Goal scope changed selection: model=%+v command=%v", updated, command != nil)
+	}
+	updated, command = submitWorktreeLine(t, updated, "/worktrees scope goal goal-one item-one")
+	if command != nil || updated.WorktreeScopeSessionID != sessionID || updated.WorktreeGoalID != "goal-one" || updated.WorktreeWorkItemID != "item-one" {
+		t.Fatalf("paired Goal scope not selected: model=%+v command=%v", updated, command != nil)
+	}
+	if !strings.Contains(updated.Status, "goal-one") || !strings.Contains(updated.Status, "item-one") {
+		t.Fatalf("selected scope not shown to user: %q", updated.Status)
+	}
+	updated, command = submitWorktreeLine(t, updated, "/worktrees scope session")
+	if command != nil || updated.WorktreeScopeSessionID != "" || updated.WorktreeGoalID != "" || updated.WorktreeWorkItemID != "" {
+		t.Fatalf("Session scope did not clear Goal selection: model=%+v command=%v", updated, command != nil)
+	}
+}
+
+func TestWorktreeCommandsDispatchSelectedGoalWorkItemScope(t *testing.T) {
+	const sessionID = "0123456789abcdef0123456789abcdef"
+	const workspaceID = "1123456789abcdef0123456789abcdef"
+	tests := []struct {
+		line  string
+		op    string
+		id    string
+		runID string
+		text  string
+	}{
+		{line: "/worktrees", op: "worktree_list"},
+		{line: "/worktrees get " + workspaceID, op: "worktree_get", id: workspaceID},
+		{line: "/worktrees enter " + workspaceID, op: "worktree_enter", id: workspaceID},
+		{line: "/worktrees exit", op: "worktree_exit"},
+		{line: "/worktrees keep " + workspaceID, op: "worktree_keep", id: workspaceID},
+		{line: "/worktrees export " + workspaceID, op: "worktree_export", id: workspaceID},
+		{line: "/worktrees resolve " + workspaceID, op: "worktree_preview", id: workspaceID},
+		{line: "/worktrees remove " + workspaceID, op: "worktree_remove", id: workspaceID},
+		{line: "/worktrees discard " + workspaceID, op: "worktree_discard_preview", id: workspaceID},
+		{line: "/worktrees create review space", op: "worktree_create", runID: "goal-run", text: "review space"},
+	}
+	for _, test := range tests {
+		t.Run(test.op, func(t *testing.T) {
+			m := New("", t.TempDir())
+			m.ActiveSession, m.ActiveRunID = sessionID, "goal-run"
+			updated, command := submitWorktreeLine(t, m, "/worktrees scope goal goal-one item-one")
+			if command != nil {
+				t.Fatal("scope selection unexpectedly made a socket request")
+			}
+			socket, requests := agentSocketFixture(t, conversation.ServerMsg{Type: "worktree"})
+			updated.Socket = socket
+			updated, command = submitWorktreeLine(t, updated, test.line)
+			if command == nil {
+				t.Fatal("workspace command did not dispatch")
+			}
+			if result := command().(resultMsg); result.err != nil {
+				t.Fatal(result.err)
+			}
+			request := agentFixtureRequest(t, requests)
+			if request.Op != test.op || request.SessionID != sessionID || request.WorkKind != "goal" || request.GoalID != "goal-one" || request.WorkItemID != "item-one" || request.ID != test.id || request.RunID != test.runID || request.Text != test.text {
+				t.Fatalf("request=%+v want Goal scope operation %s", request, test.op)
+			}
+		})
+	}
+}
+
+func submitWorktreeLine(t *testing.T, model Model, line string) (Model, tea.Cmd) {
+	t.Helper()
+	model.Composer.SetValue(line)
+	updated, command := model.submitComposer()
+	got, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("submit %q returned %T", line, updated)
+	}
+	return got, command
+}
+
 func TestWorktreePreviewRendersConflictPathsAndInputDigests(t *testing.T) {
 	text := formatWorktreeMessages([]conversation.ServerMsg{{
 		Type: "worktree",
@@ -158,7 +258,7 @@ func TestWorktreeResolutionDialogSendsCompleteUserChoices(t *testing.T) {
 	m.Pending, m.ActiveRunID, m.LastCursor = true, "parent-run", 17
 	parentStream := &conversation.StreamClient{}
 	m.stream = parentStream
-	updated, _ := m.handleResult(resultMsg{op: "worktree_preview", msgs: []conversation.ServerMsg{{Type: "worktree", Worktree: &preview}}})
+	updated, _ := m.handleResult(resultMsg{op: "worktree_preview", sessionID: sessionID, workKind: "session", msgs: []conversation.ServerMsg{{Type: "worktree", Worktree: &preview}}})
 	got := updated.(Model)
 	if got.WorktreeDialog == nil || got.pendingDialog() != DialogWorkspace {
 		t.Fatal("conflict preview did not open the workspace decision dialog")
@@ -210,7 +310,7 @@ func TestWorktreeDiscardDialogRequiresArmedUserConfirmation(t *testing.T) {
 	m.Pending, m.ActiveRunID, m.LastCursor = true, "parent-run", 17
 	parentStream := &conversation.StreamClient{}
 	m.stream = parentStream
-	updated, _ := m.handleResult(resultMsg{op: "worktree_discard_preview", msgs: []conversation.ServerMsg{{Type: "worktree", Worktree: &preview}}})
+	updated, _ := m.handleResult(resultMsg{op: "worktree_discard_preview", sessionID: sessionID, workKind: "session", msgs: []conversation.ServerMsg{{Type: "worktree", Worktree: &preview}}})
 	got := updated.(Model)
 	if got.WorktreeDialog == nil || got.WorktreeDialog.Mode != "discard" {
 		t.Fatal("discard preview did not open its user decision dialog")

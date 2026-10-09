@@ -12,7 +12,7 @@ import (
 )
 
 func registerWorkspaceCommands(host *commandHost, registry *commands.Registry) {
-	registry.Register(&commands.Command{Name: "worktrees", Description: "列出或管理当前会话的隔离工作树", ArgPrompt: "list | create 标签 | get ID | preview ID | resolve ID | keep ID | remove ID | discard ID", Kind: commands.KindLocal, Local: func(args string) {
+	registry.Register(&commands.Command{Name: "worktrees", Description: "列出或管理当前会话或显式 Goal 工作项的隔离工作树", ArgPrompt: "scope [session | goal <GoalID> <WorkItemID>] | list | create 标签 | get ID | preview ID | resolve ID | keep ID | remove ID | discard ID", Kind: commands.KindLocal, Local: func(args string) {
 		m := host.model
 		if sessionlog.ValidateID(m.ActiveSession) != nil {
 			m.Status = "先选择一个会话。"
@@ -22,7 +22,28 @@ func registerWorkspaceCommands(host *commandHost, registry *commands.Registry) {
 		if len(fields) == 0 {
 			fields = []string{"list"}
 		}
-		request := conversation.ClientMsg{SessionID: m.ActiveSession, WorkKind: "session"}
+		if fields[0] == "scope" {
+			switch {
+			case len(fields) == 1:
+				m.Status = workspaceScopeStatus(m)
+			case len(fields) == 2 && fields[1] == "session":
+				m.WorktreeScopeSessionID = ""
+				m.WorktreeGoalID = ""
+				m.WorktreeWorkItemID = ""
+				clearWorktreeScopeView(m)
+				m.Status = "工作树范围已切换为 Session。"
+			case len(fields) == 4 && fields[1] == "goal" && fields[2] != "" && fields[3] != "":
+				m.WorktreeScopeSessionID = m.ActiveSession
+				m.WorktreeGoalID = fields[2]
+				m.WorktreeWorkItemID = fields[3]
+				clearWorktreeScopeView(m)
+				m.Status = workspaceScopeStatus(m)
+			default:
+				m.Status = workspaceUsage()
+			}
+			return
+		}
+		request := workspaceScopeRequest(m)
 		switch fields[0] {
 		case "list":
 			if len(fields) != 1 {
@@ -87,7 +108,31 @@ func registerWorkspaceCommands(host *commandHost, registry *commands.Registry) {
 }
 
 func workspaceUsage() string {
-	return "用法：/worktrees list | create <标签> | get <ID> | preview <ID> [after <路径>] | resolve <ID> | enter <ID> | exit | keep <ID> | export <ID> | remove <ID> | discard <ID>（discard 会先显示保留、导出与丢弃确认）"
+	return "用法：/worktrees scope [session | goal <GoalID> <WorkItemID>] | list | create <标签> | get <ID> | preview <ID> [after <路径>] | resolve <ID> | enter <ID> | exit | keep <ID> | export <ID> | remove <ID> | discard <ID>（discard 会先显示保留、导出与丢弃确认）"
+}
+
+func workspaceScopeRequest(m *Model) conversation.ClientMsg {
+	request := conversation.ClientMsg{SessionID: m.ActiveSession, WorkKind: "session"}
+	if m.WorktreeScopeSessionID == m.ActiveSession && m.WorktreeGoalID != "" && m.WorktreeWorkItemID != "" {
+		request.WorkKind = "goal"
+		request.GoalID = m.WorktreeGoalID
+		request.WorkItemID = m.WorktreeWorkItemID
+	}
+	return request
+}
+
+func workspaceScopeStatus(m *Model) string {
+	request := workspaceScopeRequest(m)
+	if request.WorkKind == "goal" {
+		return fmt.Sprintf("工作树范围：Goal %s / WorkItem %s。用 /worktrees scope session 清除。", request.GoalID, request.WorkItemID)
+	}
+	return "工作树范围：当前 Session。用 /worktrees scope goal <GoalID> <WorkItemID> 显式选择 Goal 工作项。"
+}
+
+func clearWorktreeScopeView(m *Model) {
+	m.Worktrees = nil
+	m.WorktreeDialog = nil
+	m.worktreeNextPage = nil
 }
 
 func formatWorktreeMessages(messages []conversation.ServerMsg) string {
@@ -136,10 +181,18 @@ func applyWorktreeMessages(m *Model, op string, messages []conversation.ServerMs
 		}
 		if msg.Type == "worktree" && msg.Worktree != nil {
 			if op == "worktree_preview" && msg.Worktree.ConflictCount > 0 && len(msg.Worktree.Conflicts) > 0 {
-				m.WorktreeDialog = &worktreeDecisionDialog{Mode: "resolve", Snapshot: *msg.Worktree, Choices: map[string]string{}}
+				scope := workspaceScopeRequest(m)
+				m.WorktreeDialog = &worktreeDecisionDialog{
+					Mode: "resolve", Snapshot: *msg.Worktree, Choices: map[string]string{},
+					WorkKind: scope.WorkKind, GoalID: scope.GoalID, WorkItemID: scope.WorkItemID,
+				}
 			}
 			if op == "worktree_discard_preview" {
-				m.WorktreeDialog = &worktreeDecisionDialog{Mode: "discard", Snapshot: *msg.Worktree}
+				scope := workspaceScopeRequest(m)
+				m.WorktreeDialog = &worktreeDecisionDialog{
+					Mode: "discard", Snapshot: *msg.Worktree,
+					WorkKind: scope.WorkKind, GoalID: scope.GoalID, WorkItemID: scope.WorkItemID,
+				}
 			}
 			found := false
 			for i := range m.Worktrees {
@@ -184,11 +237,25 @@ func applyWorktreeMessages(m *Model, op string, messages []conversation.ServerMs
 }
 
 type worktreeDecisionDialog struct {
-	Mode     string
-	Snapshot workspace.Snapshot
-	Cursor   int
-	Choices  map[string]string
-	Armed    bool
+	Mode       string
+	Snapshot   workspace.Snapshot
+	WorkKind   string
+	GoalID     string
+	WorkItemID string
+	Cursor     int
+	Choices    map[string]string
+	Armed      bool
+}
+
+func worktreeDialogScopeMatches(dialog *worktreeDecisionDialog, scope conversation.ClientMsg) bool {
+	if dialog == nil {
+		return false
+	}
+	kind := dialog.WorkKind
+	if kind == "" {
+		kind = "session"
+	}
+	return kind == scope.WorkKind && dialog.GoalID == scope.GoalID && dialog.WorkItemID == scope.WorkItemID
 }
 
 func (m Model) handleWorktreeDecisionKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -196,12 +263,19 @@ func (m Model) handleWorktreeDecisionKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if dialog == nil {
 		return m, nil
 	}
-	if dialog.Snapshot.SessionID != m.ActiveSession {
+	scope := workspaceScopeRequest(&m)
+	if dialog.Snapshot.SessionID != m.ActiveSession || !worktreeDialogScopeMatches(dialog, scope) {
 		m.WorktreeDialog = nil
-		m.Status = "工作树确认所属会话已变化，请重新预览。"
+		m.Status = "工作树确认所属范围已变化，请重新预览。"
 		return m, nil
 	}
-	request := conversation.ClientMsg{SessionID: m.ActiveSession, ID: dialog.Snapshot.ID, WorkKind: "session"}
+	request := conversation.ClientMsg{
+		SessionID: m.ActiveSession, ID: dialog.Snapshot.ID,
+		WorkKind: dialog.WorkKind, GoalID: dialog.GoalID, WorkItemID: dialog.WorkItemID,
+	}
+	if request.WorkKind == "" {
+		request.WorkKind = "session"
+	}
 	if key.String() == "esc" {
 		m.WorktreeDialog = nil
 		m.Status = "已取消工作树决策。"
@@ -249,7 +323,8 @@ func (m Model) handleWorktreeDecisionKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		request.Op, request.WorktreePreviewID, request.WorktreeGeneration, request.ConflictChoices = "worktree_resolve", dialog.Snapshot.PreviewID, dialog.Snapshot.Generation, dialog.Choices
 		m.worktreeNextPage = &worktreePageRequest{
-			sessionID: dialog.Snapshot.SessionID, workspaceID: dialog.Snapshot.ID, after: dialog.Snapshot.ConflictNext,
+			sessionID: dialog.Snapshot.SessionID, workKind: request.WorkKind, goalID: request.GoalID,
+			workItemID: request.WorkItemID, workspaceID: dialog.Snapshot.ID, after: dialog.Snapshot.ConflictNext,
 		}
 		m.WorktreeDialog = nil
 		return m, requestCmd(m.Socket, request)

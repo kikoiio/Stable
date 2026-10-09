@@ -98,6 +98,11 @@ type Model struct {
 	Worktrees         []workspace.Snapshot
 	WorktreeDialog    *worktreeDecisionDialog
 	worktreeNextPage  *worktreePageRequest
+	// Worktree Goal scope is selected explicitly by /worktrees scope and is
+	// pinned to the session that selected it. An empty GoalID means Session.
+	WorktreeScopeSessionID string
+	WorktreeGoalID         string
+	WorktreeWorkItemID     string
 	agentTaskState
 	teamUIState
 	history    *inputhistory.Store
@@ -133,15 +138,21 @@ type commandHost struct {
 func (h *commandHost) send(cmd tea.Cmd) { h.cmds = append(h.cmds, cmd) }
 
 type resultMsg struct {
-	taskID    string
-	sessionID string
-	op        string
-	msgs      []conversation.ServerMsg
-	err       error
+	taskID     string
+	sessionID  string
+	workKind   string
+	goalID     string
+	workItemID string
+	op         string
+	msgs       []conversation.ServerMsg
+	err        error
 }
 
 type worktreePageRequest struct {
 	sessionID   string
+	workKind    string
+	goalID      string
+	workItemID  string
 	workspaceID string
 	after       string
 }
@@ -544,7 +555,11 @@ func requestCmd(socket string, req conversation.ClientMsg) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 		msgs, err := conversation.Request(ctx, socket, req)
-		return resultMsg{op: req.Op, sessionID: req.SessionID, taskID: req.TaskID, msgs: msgs, err: err}
+		return resultMsg{
+			op: req.Op, sessionID: req.SessionID, taskID: req.TaskID,
+			workKind: req.WorkKind, goalID: req.GoalID, workItemID: req.WorkItemID,
+			msgs: msgs, err: err,
+		}
 	}
 }
 
@@ -729,10 +744,18 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 		return m.handleTeamResult(r)
 	}
 	if strings.HasPrefix(r.op, "worktree_") {
-		// Async workspace replies are scoped to the session that issued them.
+		// Async workspace replies are scoped to the exact Session or Goal item
+		// that issued them.
 		// Do not surface an old session's paths in the currently selected session.
-		if r.sessionID != "" && r.sessionID != m.ActiveSession {
-			if m.WorktreeDialog != nil && m.WorktreeDialog.Snapshot.SessionID == r.sessionID {
+		responseScope := conversation.ClientMsg{
+			SessionID: r.sessionID, WorkKind: r.workKind, GoalID: r.goalID, WorkItemID: r.workItemID,
+		}
+		if responseScope.WorkKind == "" {
+			responseScope.WorkKind = "session"
+		}
+		activeScope := workspaceScopeRequest(&m)
+		if responseScope.SessionID != activeScope.SessionID || responseScope.WorkKind != activeScope.WorkKind || responseScope.GoalID != activeScope.GoalID || responseScope.WorkItemID != activeScope.WorkItemID {
+			if m.WorktreeDialog != nil && m.WorktreeDialog.Snapshot.SessionID == r.sessionID && worktreeDialogScopeMatches(m.WorktreeDialog, responseScope) {
 				m.WorktreeDialog = nil
 			}
 			return m, nil
@@ -744,12 +767,16 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 		}
 		m.Err = nil
 		applyWorktreeMessages(&m, r.op, r.msgs)
-		if r.op == "worktree_resolve" && m.worktreeNextPage != nil && m.worktreeNextPage.sessionID == r.sessionID {
+		if r.op == "worktree_resolve" && m.worktreeNextPage != nil && m.worktreeNextPage.sessionID == r.sessionID && m.worktreeNextPage.workKind == responseScope.WorkKind && m.worktreeNextPage.goalID == responseScope.GoalID && m.worktreeNextPage.workItemID == responseScope.WorkItemID {
 			nextPage := m.worktreeNextPage
 			m.worktreeNextPage = nil
 			for _, msg := range r.msgs {
 				if msg.Worktree != nil && msg.Worktree.ID == nextPage.workspaceID && msg.Worktree.ResolvedCount < msg.Worktree.ConflictCount {
-					return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "worktree_preview", SessionID: nextPage.sessionID, ID: nextPage.workspaceID, ConflictAfter: nextPage.after})
+					return m, requestCmd(m.Socket, conversation.ClientMsg{
+						Op: "worktree_preview", SessionID: nextPage.sessionID, WorkKind: nextPage.workKind,
+						GoalID: nextPage.goalID, WorkItemID: nextPage.workItemID,
+						ID: nextPage.workspaceID, ConflictAfter: nextPage.after,
+					})
 				}
 			}
 		}

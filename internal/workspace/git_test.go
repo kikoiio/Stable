@@ -292,6 +292,65 @@ func TestPrivateGitSyntheticBaselineAndLinkedCheckout(t *testing.T) {
 	}
 }
 
+func TestPrivateGitSiblingsDoNotShareRefsOrObjects(t *testing.T) {
+	g, layout, store, scope, firstID := privateGitFixture(t)
+	formal := layout.FormalRoot()
+	fixtureFile(t, formal, "base.txt", "shared source baseline\n", 0600)
+	secondID := "workspace-sibling"
+	if _, err := store.Create(context.Background(), scope, secondID, "sibling", "create-sibling"); err != nil {
+		t.Fatal(err)
+	}
+
+	firstState, err := g.Materialize(context.Background(), scope, firstID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondState, err := g.Materialize(context.Background(), scope, secondID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPaths, err := layout.Paths(firstID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPaths, err := layout.Paths(secondID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstPaths.Repository == secondPaths.Repository || firstState.BaselineDigest != secondState.BaselineDigest {
+		t.Fatalf("sibling private repositories or baseline digests are unexpected: first=%+v second=%+v", firstState, secondState)
+	}
+
+	commonDir := func(paths Paths) string {
+		t.Helper()
+		common := strings.TrimSpace(gitQuery(t, g, paths, paths.Repository, "", "rev-parse", "--git-common-dir"))
+		if !filepath.IsAbs(common) {
+			common = filepath.Join(paths.Root, common)
+		}
+		return filepath.Clean(common)
+	}
+	firstCommon, secondCommon := commonDir(firstPaths), commonDir(secondPaths)
+	if firstCommon != filepath.Clean(firstPaths.Repository) || secondCommon != filepath.Clean(secondPaths.Repository) || firstCommon == secondCommon {
+		t.Fatalf("sibling common dirs are not independently owned: first=%q second=%q", firstCommon, secondCommon)
+	}
+
+	fixtureFile(t, firstPaths.Checkout, "private-only.txt", "object unique to first workspace\n", 0600)
+	objectID := strings.TrimSpace(gitQuery(t, g, firstPaths, firstPaths.Repository, firstPaths.Checkout, "hash-object", "-w", filepath.Join(firstPaths.Checkout, "private-only.txt")))
+	if !validGitOID(objectID) {
+		t.Fatalf("private-only object has invalid ID %q", objectID)
+	}
+	gitQuery(t, g, firstPaths, firstPaths.Repository, "", "update-ref", "refs/m09/private-only", objectID)
+	if got := strings.TrimSpace(gitQuery(t, g, firstPaths, firstPaths.Repository, "", "rev-parse", "--verify", "refs/m09/private-only")); got != objectID {
+		t.Fatalf("first private ref=%q, want %q", got, objectID)
+	}
+	if _, err := gitQueryResult(t, g, secondPaths, secondPaths.Repository, "", "rev-parse", "--verify", "refs/m09/private-only"); err == nil {
+		t.Fatal("first workspace private ref appeared in sibling repository")
+	}
+	if _, err := gitQueryResult(t, g, secondPaths, secondPaths.Repository, "", "cat-file", "-e", objectID); err == nil {
+		t.Fatal("first workspace private object appeared in sibling repository")
+	}
+}
+
 func TestPrivateGitSourceChangeAndPartialRollback(t *testing.T) {
 	for _, failure := range []string{"source-change", "cancel", "read-tree-failure"} {
 		t.Run(failure, func(t *testing.T) {
