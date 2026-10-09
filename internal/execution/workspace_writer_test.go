@@ -84,6 +84,33 @@ func TestWorkspaceWriterUsesTrustedLeaseAndCurrentCheckout(t *testing.T) {
 	}
 }
 
+func TestWorkspaceWriterCommandUsesBoundedLeaseProfile(t *testing.T) {
+	manager, lease, executor, fake := writerExecutorFixture(t)
+	defer func() {
+		if _, err := manager.ReleaseCompletedWriter(context.Background(), lease); err != nil {
+			t.Errorf("release workspace writer: %v", err)
+		}
+	}()
+
+	_, err := executor.(*toolRunExecutor).executeCommand(context.Background(), map[string]any{"command": "printf controlled"})
+	if err != nil || len(fake.argv) == 0 {
+		t.Fatalf("workspace command err=%v argv=%v", err, fake.argv)
+	}
+	profile := fake.profile
+	if !profile.WorkspaceIsolation || profile.ProjectRoot != lease.Paths.Baseline || profile.CandidateRoot != lease.Paths.Checkout || profile.RunRoot != lease.Paths.Run || profile.WorkspaceVolumeRoot != lease.Paths.Root {
+		t.Fatalf("workspace command escaped trusted lease roots: profile=%+v lease=%+v", profile, lease)
+	}
+	if len(profile.NetworkGrants) != 0 {
+		t.Fatalf("workspace command received network grants: %+v", profile.NetworkGrants)
+	}
+	if profile.WorkspaceProcess == nil || profile.WorkspaceProcess.WorkspaceID != lease.WorkspaceID || profile.WorkspaceProcess.RunID != lease.RunID || profile.WorkspaceProcess.Generation != lease.Generation || len(profile.WorkspaceProcess.Token) != 64 || profile.WorkspaceProcess.PID != 0 || profile.WorkspaceProcess.ProcessGroup != 0 || profile.WorkspaceProcess.StartTimeTicks != 0 {
+		t.Fatalf("workspace command lacks a fresh tracked process identity: %+v", profile.WorkspaceProcess)
+	}
+	if profile.OnProcessStart == nil || profile.OnProcessExit == nil {
+		t.Fatal("workspace command lacks durable process start/exit callbacks")
+	}
+}
+
 func TestWorkspaceWriterPermissionDenyPrecedesSandbox(t *testing.T) {
 	manager, lease, _, fake := writerExecutorFixture(t)
 
