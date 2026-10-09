@@ -152,7 +152,14 @@ func (s *Service) StopTeamMember(ctx context.Context, sessionID, teamID, memberI
 	return member, nil
 }
 
-func (s *Service) ListTeamRequests(ctx context.Context, request agent.ExecutionRequest, teamID string) ([]teams.Request, error) {
+func (s *Service) ListTeamRequests(ctx context.Context, request agent.ExecutionRequest, teamID string, requestedLimit ...int) ([]teams.Request, error) {
+	if len(requestedLimit) > 1 {
+		return nil, errors.New("team request query accepts at most one limit")
+	}
+	limit := 0
+	if len(requestedLimit) == 1 {
+		limit = requestedLimit[0]
+	}
 	root, scope, actor, err := s.teamOperationScope(ctx, request)
 	if err != nil {
 		return nil, err
@@ -202,9 +209,9 @@ func (s *Service) ListTeamRequests(ctx context.Context, request agent.ExecutionR
 		}
 		return out[i].ExpiresAt.Before(out[j].ExpiresAt)
 	})
-	limit := teams.PageSize(0)
-	if len(out) > limit {
-		out = out[:limit]
+	pageSize := teams.PageSize(limit)
+	if len(out) > pageSize {
+		out = out[:pageSize]
 	}
 	return out, nil
 }

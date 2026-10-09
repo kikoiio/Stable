@@ -122,7 +122,7 @@ func (s *Service) ExecuteTeamTool(ctx context.Context, request agent.ExecutionRe
 	case "team_plan_submit":
 		result, err = s.SubmitTeamPlan(ctx, request, args.TeamID, args.Body)
 	case "team_request_list":
-		result, err = s.ListTeamRequests(ctx, request, args.TeamID)
+		result, err = s.ListTeamRequests(ctx, request, args.TeamID, args.Limit)
 	case "team_request_respond":
 		result, err = s.RespondTeamRequest(ctx, request, args.TeamID, args.RequestID, args.ExpectedRevision, args.Decision, args.Feedback)
 	case "team_shutdown_request":

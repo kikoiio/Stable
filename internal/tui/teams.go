@@ -67,7 +67,7 @@ func registerTeamCommands(host *commandHost, registry *commands.Registry) {
 		sendTeamRequest(host, req, "正在读取团队…")
 	}})
 
-	registry.Register(&commands.Command{Name: "team", Description: "查看团队、任务、消息和请求", ArgPrompt: "ID get|members|tasks list [limit]|messages|requests|send|respond|shutdown", Kind: commands.KindLocal, Local: func(args string) {
+	registry.Register(&commands.Command{Name: "team", Description: "查看团队、任务、消息和请求", ArgPrompt: "ID get|members|tasks list [limit]|messages|requests [list [limit]]|send|respond|shutdown", Kind: commands.KindLocal, Local: func(args string) {
 		m := host.model
 		fields := strings.Fields(args)
 		if m.ActiveSession == "" {
@@ -110,11 +110,21 @@ func registerTeamCommands(host *commandHost, registry *commands.Registry) {
 				return
 			}
 		case "requests":
-			if rest != "" && rest != "list" {
-				m.Status = "用法：/team <ID> requests [list]"
+			fields := strings.Fields(rest)
+			if len(fields) > 2 || len(fields) == 2 && fields[0] != "list" {
+				m.Status = "用法：/team <ID> requests [list [条数，1-100]]"
 				return
 			}
 			base.Op = "team_request_list"
+			if len(fields) == 1 && fields[0] != "list" || len(fields) == 2 {
+				limitText := fields[len(fields)-1]
+				limit, err := strconv.Atoi(limitText)
+				if err != nil || limit < 1 || limit > teams.MaxPageSize {
+					m.Status = "用法：/team <ID> requests [list [条数，1-100]]"
+					return
+				}
+				base.Limit = limit
+			}
 			req = base
 		case "send":
 			req, m.Status = teamSendRequest(base, rest)

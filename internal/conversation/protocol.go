@@ -528,12 +528,16 @@ func validateClient(m ClientMsg) error {
 			return fmt.Errorf("op %s requires session and team scope", m.Op)
 		}
 		switch m.Op {
+		case "team_request_list":
+			if m.Limit < 0 || m.Limit > teams.MaxPageSize {
+				return fmt.Errorf("team_request_list page size exceeds the maximum")
+			}
 		case "team_request_respond":
-			if teams.ValidateID(m.TeamRequestID) != nil || m.ExpectedRevision == 0 || (m.TeamDecision != string(teams.RequestApproved) && m.TeamDecision != string(teams.RequestRejected) && m.TeamDecision != string(teams.RequestDeferred)) || teams.ValidateText(m.TeamFeedback, teams.MaxFeedbackBytes, false) != nil {
+			if m.Limit != 0 || teams.ValidateID(m.TeamRequestID) != nil || m.ExpectedRevision == 0 || (m.TeamDecision != string(teams.RequestApproved) && m.TeamDecision != string(teams.RequestRejected) && m.TeamDecision != string(teams.RequestDeferred)) || teams.ValidateText(m.TeamFeedback, teams.MaxFeedbackBytes, false) != nil {
 				return fmt.Errorf("team_request_respond requires a current request revision and bounded response")
 			}
 		case "team_shutdown_request":
-			if teams.ValidateID(m.TeamMemberID) != nil {
+			if m.Limit != 0 || teams.ValidateID(m.TeamMemberID) != nil {
 				return fmt.Errorf("team_shutdown_request requires member_id")
 			}
 		}
