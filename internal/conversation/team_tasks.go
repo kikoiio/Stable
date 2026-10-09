@@ -29,6 +29,8 @@ func (s *Service) CreateTeamTask(ctx context.Context, request agent.ExecutionReq
 	if err != nil {
 		return teams.Task{}, err
 	}
+	input.Title = redactRunCredential(input.Title, s.deps.ProviderCredential)
+	input.Description = redactRunCredential(input.Description, s.deps.ProviderCredential)
 	if input.Assignee != "" {
 		member, ok := projection.Members[input.Assignee]
 		if !ok || member.TeamID != teamID {
@@ -145,6 +147,14 @@ func (s *Service) UpdateTeamTask(ctx context.Context, request agent.ExecutionReq
 	team, projection, err := s.teamForOperation(root, scope, teamID, actor)
 	if err != nil {
 		return teams.Task{}, err
+	}
+	if patch.Title != nil {
+		redacted := redactRunCredential(*patch.Title, s.deps.ProviderCredential)
+		patch.Title = &redacted
+	}
+	if patch.Description != nil {
+		redacted := redactRunCredential(*patch.Description, s.deps.ProviderCredential)
+		patch.Description = &redacted
 	}
 	if patch.Assignee != nil && *patch.Assignee != "" {
 		member, ok := projection.Members[*patch.Assignee]
