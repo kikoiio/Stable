@@ -231,15 +231,9 @@ func (s *LifecycleService) recoverInterruptedOperations(ctx context.Context, rec
 		}
 		_, statErr := os.Lstat(paths.Root)
 		if record.Snapshot.State == StateRemoving && errors.Is(statErr, os.ErrNotExist) {
-			removed := record
-			removed.Snapshot.State = StateRemoved
-			removed.Snapshot.WriterRunID = ""
-			removed.Snapshot.Cursor++
-			removed.Operation.Phase = "complete"
-			removed.Operation.UpdatedAt = time.Now().UTC()
-			if err := s.store.Save(ctx, record.Scope, removed, record.Snapshot.Generation); err != nil {
-				return err
-			}
+			// Resolve the session binding before finalizing the removal. If the
+			// binding cannot be read or removed, leave the journal in removing so
+			// a later startup can retry this identity-checked cleanup.
 			boundID, err := s.readBinding(record.Scope)
 			if err != nil {
 				return err
@@ -248,6 +242,15 @@ func (s *LifecycleService) recoverInterruptedOperations(ctx context.Context, rec
 				if err := s.writeBinding(record.Scope, ""); err != nil {
 					return err
 				}
+			}
+			removed := record
+			removed.Snapshot.State = StateRemoved
+			removed.Snapshot.WriterRunID = ""
+			removed.Snapshot.Cursor++
+			removed.Operation.Phase = "complete"
+			removed.Operation.UpdatedAt = time.Now().UTC()
+			if err := s.store.Save(ctx, record.Scope, removed, record.Snapshot.Generation); err != nil {
+				return err
 			}
 			continue
 		}

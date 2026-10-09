@@ -61,6 +61,19 @@ func TestStopTeamMemberRemainsStoppingUntilChildExits(t *testing.T) {
 	if input.TeamTurn == nil || input.TeamTurn.MemberID != member.ID {
 		t.Fatalf("unexpected child turn: %+v", input.TeamTurn)
 	}
+	workTask, err := service.CreateTeamTask(t.Context(), request, team.ID, teams.Task{Title: "inspect assigned area", Assignee: member.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inProgress := teams.TaskInProgress
+	workTask, err = service.UpdateTeamTask(t.Context(), request, team.ID, workTask.ID, workTask.Revision, teams.TaskPatch{Status: &inProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependentTask, err := service.CreateTeamTask(t.Context(), request, team.ID, teams.Task{Title: "review findings", BlockedBy: []string{workTask.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	stopping, err := service.StopTeamMember(t.Context(), request.Work.SessionID, team.ID, member.ID)
 	if err != nil {
@@ -70,13 +83,49 @@ func TestStopTeamMemberRemainsStoppingUntilChildExits(t *testing.T) {
 		t.Fatalf("stop returned member %+v; want stopping turn %s", stopping, input.TeamTurn.TurnID)
 	}
 	assertTeamStopFacts(t, root, request.Work.SessionID, team.ID, member.ID, input.TeamTurn.TurnID, false)
+	assertStoppedMemberTaskGraph(t, service, request, team.ID, workTask, dependentTask)
 
 	_, _ = service.StopTeamMember(t.Context(), request.Work.SessionID, team.ID, member.ID)
 	assertTeamStopFacts(t, root, request.Work.SessionID, team.ID, member.ID, input.TeamTurn.TurnID, false)
+	assertStoppedMemberTaskGraph(t, service, request, team.ID, workTask, dependentTask)
 
 	runner.release <- struct{}{}
 	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberStopped)
 	assertTeamStopFacts(t, root, request.Work.SessionID, team.ID, member.ID, input.TeamTurn.TurnID, true)
+	assertStoppedMemberTaskGraph(t, service, request, team.ID, workTask, dependentTask)
+}
+
+func assertStoppedMemberTaskGraph(t *testing.T, service *Service, request agent.ExecutionRequest, teamID string, workTask, dependentTask teams.Task) {
+	t.Helper()
+	projectedWork, err := service.GetTeamTask(t.Context(), request, teamID, workTask.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectedDependent, err := service.GetTeamTask(t.Context(), request, teamID, dependentTask.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projectedWork.Assignee == "" || projectedWork.Assignee != workTask.Assignee || projectedWork.Status != teams.TaskInProgress {
+		t.Fatalf("stopping the assigned member changed its task: %+v", projectedWork)
+	}
+	if projectedDependent.Status != teams.TaskBlocked || len(projectedDependent.BlockedBy) != 1 || projectedDependent.BlockedBy[0] != workTask.ID {
+		t.Fatalf("stopping the assigned member released its dependent task: %+v", projectedDependent)
+	}
+	projection, err := sessionlog.ReplayTeams(service.deps.ProjectRoot, request.Work.SessionID, teamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if durable := projection.Tasks[workTask.ID]; durable.Assignee != workTask.Assignee || durable.Status != teams.TaskInProgress || durable.Revision != projectedWork.Revision {
+		t.Fatalf("replayed assigned task differs after member stop: %+v", durable)
+	}
+	graph, err := teamTaskGraph(projection, teamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durableDependent, ok := graph.Get(dependentTask.ID)
+	if !ok || durableDependent.Status != teams.TaskBlocked || len(durableDependent.BlockedBy) != 1 || durableDependent.BlockedBy[0] != workTask.ID {
+		t.Fatalf("replay falsely released dependent task: %+v (found=%v)", durableDependent, ok)
+	}
 }
 
 func TestIdleTeamMemberShutdownIsApprovedWithoutStartingAnotherTurn(t *testing.T) {
