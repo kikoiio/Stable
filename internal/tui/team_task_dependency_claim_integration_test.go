@@ -186,6 +186,30 @@ func TestTeamTaskDependencyFlowsFromTUIThroughMemberClaimsAndReplay(t *testing.T
 	if staleResponse.err == nil || !strings.Contains(staleUpdated.(Model).Status, staleResponse.err.Error()) {
 		t.Fatalf("stale revision feedback missing: status=%q err=%v", staleUpdated.(Model).Status, staleResponse.err)
 	}
+	staleModel = staleUpdated.(Model)
+	refreshedTask := findTeamTask(staleModel.TeamTasks, claimedB.ID)
+	projectionAfterConflict, err := sessionlog.ReplayTeams(project, sessionID, teamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durableTask := projectionAfterConflict.Tasks[claimedB.ID]
+	if refreshedTask.ID == "" || refreshedTask.Revision != durableTask.Revision || durableTask.Revision != claimedB.Revision {
+		t.Fatalf("stale conflict did not refresh the current task revision: TUI=%+v ReplayTeams=%+v claimed=%+v", refreshedTask, durableTask, claimedB)
+	}
+	visibleCurrentRevision := false
+	for _, event := range staleModel.Events {
+		if event.Type != sessionlog.EventMessage {
+			continue
+		}
+		message, ok := event.Data.(sessionlog.Message)
+		if ok && strings.Contains(message.Text, claimedB.ID) && strings.Contains(message.Text, "revision "+strconv.FormatUint(durableTask.Revision, 10)) {
+			visibleCurrentRevision = true
+			break
+		}
+	}
+	if !visibleCurrentRevision {
+		t.Fatalf("stale conflict did not show current revision %d in TUI events: %+v", durableTask.Revision, staleModel.Events)
+	}
 	completedB, err := svc.UpdateTeamTask(ctx, requests[1], teamID, readyB.ID, claimedB.Revision, teams.TaskPatch{Status: &statusCompleted})
 	if err != nil || completedB.Status != teams.TaskCompleted {
 		t.Fatalf("member B complete=%+v err=%v", completedB, err)
