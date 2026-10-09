@@ -116,6 +116,7 @@ func chatserve(args []string) error {
 		if c.Model.APIKey != "" {
 			credentials = []string{c.Model.APIKey}
 		}
+		workspaceLifecycleHost := execution.NewWorkspaceLifecycleToolHost()
 		snapshotStore, err = candidate.NewSnapshotStore(*projectRoot, c.Snapshots.ProjectBytes(), c.Snapshots.ManifestsPerCandidate(), credentials)
 		if err != nil {
 			return fmt.Errorf("candidate snapshot store: %w", err)
@@ -132,7 +133,7 @@ func chatserve(args []string) error {
 			QuestionSink:       askSink,
 			TodoProvider:       todoProvider,
 			Provider:           streamingProvider,
-		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate), execution.WithMCPCaller(mcpManager), execution.WithDelegator(delegator, streamingProvider))
+		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate), execution.WithMCPCaller(mcpManager), execution.WithDelegator(delegator, streamingProvider), execution.WithWorkspaceLifecycleToolHost(workspaceLifecycleHost))
 		forkExecutorFactory = execution.ReadOnlyExecutorFactory(executorFactory)
 		toolSchemas = chatserveToolSchemasWithDelegation(delegator, mcpManager)
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, model.(decision.ChatProvider))
@@ -145,7 +146,7 @@ func chatserve(args []string) error {
 	}
 	permissionService := &permission.PermissionService{Repository: s, NewID: func() string { id, _ := sessionlog.NewID(); return id }}
 	svc, err := conversation.Serve(ctx, conversation.Deps{
-		Store: s, Provider: provider, ChatProvider: model.(decision.ChatProvider), Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket, WorkspaceStateRoot: filepath.Join(p.State, "workspaces"),
+		Store: s, Provider: provider, ChatProvider: model.(decision.ChatProvider), Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket, WorkspaceStateRoot: filepath.Join(p.State, "workspaces"), WorkspaceLifecycleHost: workspaceLifecycleHost,
 		Delegator: delegator, ForkProvider: forkProvider, ForkExecutorFactory: forkExecutorFactory, ForkToolSchemas: execution.ReadOnlyToolSchemas(),
 		Refresher:           refresher,
 		CandidateCheckers:   chatCandidateCheckers(*runRoot, sbx),
@@ -191,23 +192,29 @@ func chatserveToolSchemas(callers ...execution.MCPCaller) []llm.ToolSchema {
 
 func chatserveToolSchemasWithDelegation(delegator agent.Delegator, callers ...execution.MCPCaller) []llm.ToolSchema {
 	nameMap := map[string]string{
-		"read_file":      "read_file",
-		"write_file":     "write_file",
-		"edit_file":      "edit_file",
-		"glob":           "glob",
-		"grep":           "grep",
-		"ask_user":       "ask_user",
-		"exit_plan_mode": "exit_plan_mode",
-		"task_create":    "task_create",
-		"task_get":       "task_get",
-		"task_list":      "task_list",
-		"task_update":    "task_update",
-		"load_skill":     "load_skill",
+		"read_file":       "read_file",
+		"write_file":      "write_file",
+		"edit_file":       "edit_file",
+		"glob":            "glob",
+		"grep":            "grep",
+		"ask_user":        "ask_user",
+		"exit_plan_mode":  "exit_plan_mode",
+		"task_create":     "task_create",
+		"task_get":        "task_get",
+		"task_list":       "task_list",
+		"task_update":     "task_update",
+		"load_skill":      "load_skill",
+		"enter_worktree":  "enter_worktree",
+		"exit_worktree":   "exit_worktree",
+		"worktree_export": "worktree_export",
 	}
 	registry := tools.CreateDefaultTools().Registry
 	// M06/M07 tools live outside the default registry; the copy keeps append
 	// from aliasing the registry slice.
 	sources := append(append(append([]map[string]any{}, registry.GetAllSchemas()...), execution.M06ToolSchemas()...), execution.SkillToolSchemas()...)
+	for _, schema := range execution.WorkspaceLifecycleToolSchemas() {
+		sources = append(sources, map[string]any{"name": schema.Name, "description": schema.Description, "input_schema": schema.InputSchema})
+	}
 	schemas := make([]llm.ToolSchema, 0, len(nameMap)+2)
 	for _, schema := range sources {
 		internalName, _ := schema["name"].(string)

@@ -79,6 +79,9 @@ type ToolExecutorDeps struct {
 	AgentTasks agent.AgentTaskService
 	// TeamTools routes trusted team operations through the conversation service.
 	TeamTools *agent.TeamToolHost
+	// WorkspaceLifecycle is bound by conversation.Service and is removed from
+	// every child executor factory.
+	WorkspaceLifecycle *WorkspaceLifecycleToolHost
 	// WorkspaceLease enables the isolated file-tool surface for a single
 	// service-owned workspace generation. Commands additionally require a verified bounded disk volume.
 	WorkspaceLease      *workspace.WriterLease
@@ -210,6 +213,10 @@ func WithTeamToolHost(host *agent.TeamToolHost) ToolExecutorOption {
 	return func(deps *ToolExecutorDeps) { deps.TeamTools = host }
 }
 
+func WithWorkspaceLifecycleToolHost(host *WorkspaceLifecycleToolHost) ToolExecutorOption {
+	return func(deps *ToolExecutorDeps) { deps.WorkspaceLifecycle = host }
+}
+
 func WithReadOnlyTools() ToolExecutorOption {
 	return func(deps *ToolExecutorDeps) {
 		deps.ReadOnly = true
@@ -222,6 +229,7 @@ func WithReadOnlyTools() ToolExecutorOption {
 		deps.SkillProvider = nil
 		deps.AgentTasks = nil
 		deps.TeamTools = nil
+		deps.WorkspaceLifecycle = nil
 		deps.HookRunner = nil
 	}
 }
@@ -250,6 +258,7 @@ func WorkspaceWriterExecutorFactory(factory agent.ExecutorFactory, lease workspa
 	deps.HookRunner = nil
 	deps.AgentTasks = nil
 	deps.TeamTools = nil
+	deps.WorkspaceLifecycle = nil
 	deps.Delegator = nil
 	deps.MCP = nil
 	deps.QuestionSink = nil
@@ -257,6 +266,19 @@ func WorkspaceWriterExecutorFactory(factory agent.ExecutorFactory, lease workspa
 	deps.TodoProvider = nil
 	deps.SkillProvider = nil
 	deps.ReadOnly = false
+	return NewToolExecutorFactory(deps)
+}
+
+// LeadWorkspaceLifecycleExecutorFactory adds lifecycle tools back only to a
+// trusted lead run after the generic workspace writer factory removes child
+// capabilities.
+func LeadWorkspaceLifecycleExecutorFactory(factory agent.ExecutorFactory, host *WorkspaceLifecycleToolHost) agent.ExecutorFactory {
+	base, ok := factory.(ToolExecutorFactory)
+	if !ok || host == nil {
+		return nil
+	}
+	deps := base.deps
+	deps.WorkspaceLifecycle = host
 	return NewToolExecutorFactory(deps)
 }
 

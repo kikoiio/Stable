@@ -69,32 +69,61 @@ type ToolResult struct {
 }
 
 const (
-	EventSessionCreated        = "session_created"
-	EventActivity              = "activity"
-	EventMessage               = "message"
-	EventProposal              = "proposal_reference"
-	EventToolCall              = "tool_call"
-	EventToolResult            = "tool_result"
-	EventBoundary              = "compaction_boundary"
-	EventRunStarted            = "run_started"
-	EventRunEvent              = "run_event"
-	EventSnapshot              = "candidate_snapshot"
-	EventRewind                = "candidate_rewind"
-	EventQuestion              = "pending_question"
-	EventReply                 = "question_reply"
-	EventPlanMode              = "plan_mode"
-	EventPlanApproval          = "plan_approval"
-	EventTodo                  = "todo_update"
-	EventSkillInventory        = "skill_inventory"
-	EventSkillDelta            = "skill_delta"
-	EventSkillInvoked          = "skill_invoked"
-	EventHookFired             = "hook_fired"
-	EventHookReload            = "hook_reload"
-	EventMCPReload             = "mcp_reload"
-	EventMCPServer             = "mcp_server"
-	EventCoordinatorMode       = "coordinator_mode"
-	EventAgentTaskNotification = "agent_task_notification"
+	EventSessionCreated          = "session_created"
+	EventActivity                = "activity"
+	EventMessage                 = "message"
+	EventProposal                = "proposal_reference"
+	EventToolCall                = "tool_call"
+	EventToolResult              = "tool_result"
+	EventBoundary                = "compaction_boundary"
+	EventRunStarted              = "run_started"
+	EventRunEvent                = "run_event"
+	EventSnapshot                = "candidate_snapshot"
+	EventRewind                  = "candidate_rewind"
+	EventQuestion                = "pending_question"
+	EventReply                   = "question_reply"
+	EventPlanMode                = "plan_mode"
+	EventPlanApproval            = "plan_approval"
+	EventTodo                    = "todo_update"
+	EventSkillInventory          = "skill_inventory"
+	EventSkillDelta              = "skill_delta"
+	EventSkillInvoked            = "skill_invoked"
+	EventHookFired               = "hook_fired"
+	EventHookReload              = "hook_reload"
+	EventMCPReload               = "mcp_reload"
+	EventMCPServer               = "mcp_server"
+	EventCoordinatorMode         = "coordinator_mode"
+	EventAgentTaskNotification   = "agent_task_notification"
+	EventWorkspaceToolTransition = "workspace_tool_transition"
 )
+
+const (
+	WorkspaceToolTransitionPending     = "pending"
+	WorkspaceToolTransitionApplied     = "applied"
+	WorkspaceToolTransitionFailed      = "failed"
+	WorkspaceToolTransitionInterrupted = "interrupted"
+)
+
+// WorkspaceToolTransition is a durable request made by a trusted lead tool.
+// It contains only stable IDs and WorkRef data; physical roots and authority
+// are rebuilt by the service when the lead run has terminated.
+type WorkspaceToolTransition struct {
+	ID          string    `json:"id"`
+	SessionID   string    `json:"session_id"`
+	RunID       string    `json:"run_id"`
+	CallID      string    `json:"call_id"`
+	WorkKind    string    `json:"work_kind"`
+	GoalID      string    `json:"goal_id,omitempty"`
+	WorkItemID  string    `json:"work_item_id,omitempty"`
+	Action      string    `json:"action"`
+	WorkspaceID string    `json:"workspace_id,omitempty"`
+	Label       string    `json:"label,omitempty"`
+	CandidateID string    `json:"candidate_id,omitempty"`
+	Status      string    `json:"status"`
+	Error       string    `json:"error,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
 
 type CoordinatorMode struct {
 	Enabled bool   `json:"enabled"`

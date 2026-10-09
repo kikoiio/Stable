@@ -99,11 +99,12 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		outcome.Content = "Error: child run only permits read_file, glob, and grep"
 		return e.finish(outcome, started), nil
 	}
-	if e.deps.WorkspaceLease != nil && call.Name != "read_file" && call.Name != "glob" && call.Name != "grep" && call.Name != "write_file" && call.Name != "edit_file" && call.Name != "command" {
+	workspaceLifecycleAllowed := e.deps.WorkspaceLifecycle != nil && isWorkspaceLifecycleTool(call.Name) && e.request.TeamTurn == nil && !e.request.TeamCoordinator && !e.request.TeamUser
+	if e.deps.WorkspaceLease != nil && call.Name != "read_file" && call.Name != "glob" && call.Name != "grep" && call.Name != "write_file" && call.Name != "edit_file" && call.Name != "command" && !workspaceLifecycleAllowed {
 		outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace child only permits bounded file tools and isolated command"
 		return e.finish(outcome, started), nil
 	}
-	if e.deps.WorkspaceLease != nil {
+	if e.deps.WorkspaceLease != nil && !isWorkspaceLifecycleTool(call.Name) {
 		leaseCheck, leaseErr := e.deps.WorkspaceAccounting.ReserveWriterWrite(ctx, *e.deps.WorkspaceLease, 0)
 		if leaseErr != nil {
 			outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace writer lease is stale or blocked"
@@ -126,6 +127,13 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		outcome.Status, outcome.Content = agent.ToolDenied, "Error: coordinator mode only permits team coordination tools"
 		return e.finish(outcome, started), nil
 	}
+	if isWorkspaceLifecycleTool(call.Name) {
+		var allowed bool
+		outcome, allowed = e.authorizeWorkspaceLifecycleTool(ctx, call, args, outcome)
+		if !allowed {
+			return e.finish(outcome, started), nil
+		}
+	}
 	if e.deps.HookRunner != nil {
 		rejected, hookID, message := e.deps.HookRunner.PreToolUseRun(ctx, e.hookParentRun(), e.request.Work.SessionID, call.Name, args)
 		if rejected {
@@ -134,6 +142,9 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 			return e.finish(outcome, started), nil
 		}
 		postHook = true
+	}
+	if isWorkspaceLifecycleTool(call.Name) {
+		return e.finish(e.executeWorkspaceLifecycleTool(ctx, call, outcome), started), nil
 	}
 	// M06 host-side branches run before the sandbox mapping: the interactive
 	// and task tools never touch the filesystem, and a write to the session's
@@ -869,6 +880,67 @@ func (e *toolRunExecutor) executeHostTool(ctx context.Context, call llm.ToolUse,
 		}
 	}
 	return outcome, false
+}
+
+func (e *toolRunExecutor) authorizeWorkspaceLifecycleTool(ctx context.Context, call llm.ToolUse, args map[string]any, outcome agent.ToolOutcome) (agent.ToolOutcome, bool) {
+	if e.deps.WorkspaceLifecycle == nil || e.request.TeamTurn != nil || e.request.TeamCoordinator || e.request.TeamUser {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace lifecycle tools are available only to a lead run"
+		return outcome, false
+	}
+	if e.deps.Gate == nil {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: permission gate unavailable"
+		return outcome, false
+	}
+	parameters, err := json.Marshal(args)
+	if err != nil {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace lifecycle arguments are invalid"
+		return outcome, false
+	}
+	operation := permission.Operation{ID: call.ID, Kind: permission.OpWorkspaceLifecycle, Name: call.Name, Parameters: parameters}
+	decision, authErr := e.deps.Gate.Authorize(ctx, e.authority, operation)
+	if authErr != nil {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: permission authorization failed"
+		return outcome, false
+	}
+	if decision.Kind == permission.DecisionAsk {
+		if e.approvalObserver != nil {
+			e.approvalObserver()
+		}
+		decision, authErr = e.waitForApproval(ctx, operation)
+		if authErr != nil {
+			if errors.Is(authErr, context.Canceled) || errors.Is(authErr, context.DeadlineExceeded) {
+				outcome.Content = "Error: run cancelled while awaiting workspace permission approval"
+				return outcome, false
+			}
+			outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace permission approval unavailable"
+			return outcome, false
+		}
+	}
+	if decision.Kind != permission.DecisionAllow {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: "+safeReason(decision.Reason, "workspace lifecycle operation denied")
+		return outcome, false
+	}
+	return outcome, true
+}
+
+func (e *toolRunExecutor) executeWorkspaceLifecycleTool(ctx context.Context, call llm.ToolUse, outcome agent.ToolOutcome) agent.ToolOutcome {
+	var lease *workspace.WriterLease
+	if e.deps.WorkspaceLease != nil {
+		leaseCopy := *e.deps.WorkspaceLease
+		lease = &leaseCopy
+	}
+	result, err := e.deps.WorkspaceLifecycle.Execute(ctx, e.request, lease, call)
+	if err != nil {
+		outcome.Status, outcome.Content = agent.ToolFailed, "Error: workspace lifecycle operation unavailable"
+		return outcome
+	}
+	if result.CallID == "" {
+		result.CallID = call.ID
+	}
+	if result.ToolName == "" {
+		result.ToolName = call.Name
+	}
+	return result
 }
 
 func (e *toolRunExecutor) executeDelegation(ctx context.Context, args map[string]any, outcome agent.ToolOutcome) agent.ToolOutcome {

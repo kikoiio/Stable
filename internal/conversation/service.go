@@ -13,6 +13,7 @@ import (
 	"stable/internal/candidate"
 	"stable/internal/core"
 	"stable/internal/decision"
+	"stable/internal/execution"
 	"stable/internal/llm"
 	"stable/internal/mcp"
 	"stable/internal/permission"
@@ -47,8 +48,9 @@ type Deps struct {
 	RunRoot             string
 	// WorkspaceStateRoot is a service-owned directory outside the project.
 	// Empty disables worktree lifecycle operations.
-	WorkspaceStateRoot string
-	SocketPath         string
+	WorkspaceStateRoot     string
+	WorkspaceLifecycleHost *execution.WorkspaceLifecycleToolHost
+	SocketPath             string
 	// ContextWindowTokens overrides the model context window used for
 	// compaction; zero resolves to the sessioncontext default.
 	ContextWindowTokens int
@@ -106,16 +108,17 @@ type Service struct {
 	// skills is the M07-A skill gate copied from deps at Serve; nil closes
 	// the skill surface. The gate itself also keeps a service reference (set
 	// by Bind) so its event appends share the service event mutex.
-	skills               *SkillGate
-	hooks                *HookGate
-	mcp                  *mcp.Manager
-	mcpMu                sync.Mutex
-	mcpInstructions      map[string]bool
-	teamScheduler        *teamScheduler
-	workspaceMu          sync.Mutex
-	workspaceAdmissionMu sync.Mutex
-	workspaces           map[string]*workspace.LifecycleService
-	workspaceRuns        map[string]workspaceLeadRun
+	skills                *SkillGate
+	hooks                 *HookGate
+	mcp                   *mcp.Manager
+	mcpMu                 sync.Mutex
+	mcpInstructions       map[string]bool
+	teamScheduler         *teamScheduler
+	workspaceMu           sync.Mutex
+	workspaceAdmissionMu  sync.Mutex
+	workspaceTransitionMu sync.Mutex
+	workspaces            map[string]*workspace.LifecycleService
+	workspaceRuns         map[string]workspaceLeadRun
 }
 
 type workspaceLeadRun struct {
@@ -148,6 +151,14 @@ func Serve(ctx context.Context, deps Deps) (*Service, error) {
 		return nil, err
 	}
 	s := &Service{deps: deps, lifeCtx: ctx, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, activeRequests: map[string]agent.ExecutionRequest{}, runDone: map[string]chan struct{}{}, activeForkRuns: map[string]*forkRunState{}, notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks, mcp: deps.MCP, mcpInstructions: map[string]bool{}, workspaces: map[string]*workspace.LifecycleService{}, workspaceRuns: map[string]workspaceLeadRun{}}
+	if deps.WorkspaceLifecycleHost != nil {
+		deps.WorkspaceLifecycleHost.Bind(s.executeWorkspaceLifecycleTool)
+	}
+	if deps.WorkspaceStateRoot != "" {
+		if err := s.recoverWorkspaceToolTransitions(); err != nil {
+			return nil, fmt.Errorf("recover workspace lifecycle tool transitions: %w", err)
+		}
+	}
 	s.teamScheduler = newTeamScheduler(s)
 	if deps.AgentTasks != nil {
 		deps.AgentTasks.Bind(s)

@@ -53,6 +53,11 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if request.Work.SessionID != msg.SessionID {
 		return errors.New("run session does not match request session")
 	}
+	if s.deps.WorkspaceStateRoot != "" {
+		if err := s.reconcileWorkspaceToolTransitions(ctx, msg.SessionID, false); err != nil {
+			return fmt.Errorf("pending workspace lifecycle transition is not yet settled: %w", err)
+		}
+	}
 	if s.mcp != nil {
 		if err := s.ensureMCPFresh(msg.SessionID); err != nil {
 			return fmt.Errorf("refresh MCP configuration: %w", err)
@@ -166,9 +171,15 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 				return errors.New("workspace-bound runs require a trusted executor factory")
 			}
 			trustedFactory = execution.WorkspaceWriterExecutorFactory(base, lease, leadManager)
+			if s.deps.WorkspaceLifecycleHost != nil {
+				trustedFactory = execution.LeadWorkspaceLifecycleExecutorFactory(trustedFactory, s.deps.WorkspaceLifecycleHost)
+			}
 			writerSchemas := execution.WorkspaceWriterToolSchemas()
 			if trustedFactory == nil || len(writerSchemas) != 6 {
 				return errors.New("workspace writer executor surface is unavailable")
+			}
+			if s.deps.WorkspaceLifecycleHost != nil {
+				writerSchemas = append(writerSchemas, execution.WorkspaceLifecycleToolSchemas()...)
 			}
 			request.ToolSchemas = writerSchemas
 			request.AllowedScope = []string{lease.Authority.AllowedRoot}
@@ -555,6 +566,7 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 		s.broadcastRun(ServerMsg{Type: "error", RunID: request.RunID, Error: "could not finalize candidate: " + err.Error()}, request.Work.SessionID, request.RunID, 0)
 	}
 	s.broadcastRun(ServerMsg{Type: "run_outcome", RunID: request.RunID, Outcome: &outcome}, request.Work.SessionID, request.RunID, 0)
+	s.workspaceTransitionMu.Lock()
 	s.eventMu.Lock()
 	s.mu.Lock()
 	delete(s.activeRuns, request.RunID)
@@ -566,6 +578,10 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 	if s.deps.AgentTasks != nil {
 		s.deps.AgentTasks.ForgetParent(request.Work.SessionID, request.RunID)
 	}
+	if err := s.reconcileWorkspaceToolTransitionsLocked(context.Background(), request.Work.SessionID, false); err != nil {
+		s.broadcastRun(ServerMsg{Type: "error", RunID: request.RunID, Error: "workspace lifecycle transition remains pending: " + boundedWorkspaceToolError(err)}, request.Work.SessionID, request.RunID, 0)
+	}
+	s.workspaceTransitionMu.Unlock()
 }
 
 func (s *Service) finalizeRunCandidate(ctx context.Context, request agent.ExecutionRequest) error {

@@ -344,25 +344,58 @@ func (s *LifecycleService) settleRecoveredWriter(ctx context.Context, record Rec
 }
 
 func (s *LifecycleService) Create(ctx context.Context, scope Scope, label string) (Snapshot, error) {
+	return s.create(ctx, scope, label, "")
+}
+
+// CreateWithID creates a workspace with a caller-supplied service-generated
+// identity. It is used by durable lifecycle intents so replay can safely
+// finish the same create instead of allocating a duplicate workspace.
+func (s *LifecycleService) CreateWithID(ctx context.Context, scope Scope, label, id string) (Snapshot, error) {
+	if !ValidID(id) {
+		return Snapshot{}, ErrOwnership
+	}
+	return s.create(ctx, scope, label, id)
+}
+
+func (s *LifecycleService) create(ctx context.Context, scope Scope, label, requestedID string) (Snapshot, error) {
 	if err := s.validateProjectAuthority(scope); err != nil {
 		return Snapshot{}, err
 	}
 	if err := ValidateLabel(label); err != nil {
 		return Snapshot{}, err
 	}
+	if requestedID != "" {
+		if existing, loadErr := s.store.Load(ctx, scope, requestedID); loadErr == nil {
+			if existing.Scope.SameOwner(scope) && existing.Snapshot.Label == label && existing.Snapshot.State == StateReady {
+				return existing.Snapshot, nil
+			}
+			return Snapshot{}, ErrUnavailable
+		}
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return Snapshot{}, ErrClosed
 	}
-	id, err := NewID()
-	if err != nil {
-		s.mu.Unlock()
-		return Snapshot{}, err
+	id := requestedID
+	if id == "" {
+		var err error
+		id, err = NewID()
+		if err != nil {
+			s.mu.Unlock()
+			return Snapshot{}, err
+		}
 	}
 	reservation, err := s.budget.ReserveCreate(id, 0)
 	s.mu.Unlock()
 	if err != nil {
+		if requestedID != "" {
+			if existing, loadErr := s.store.Load(ctx, scope, id); loadErr == nil {
+				if existing.Scope.SameOwner(scope) && existing.Snapshot.Label == label && existing.Snapshot.State == StateReady {
+					return existing.Snapshot, nil
+				}
+			}
+		}
 		return Snapshot{}, err
 	}
 	// Persist ownership before allocating any resource path. If queue admission
