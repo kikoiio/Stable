@@ -6,7 +6,7 @@
 
 - [x] [spec](spec.md)、[plan](plan.md)、[task](task.md)、本checklist获用户批准；批准日期：2026-10-07；范围：按四份规格实现 M09-E。
 
-- [ ] **AC1 身份：** 两session、两Goal/WorkItem和相同显示名不同team验证受信owner/root/actor；创建/查询/消息/stop全部隔离，保留lead、唯一名称和活动容量生效。（验证：临时service/domain fixtures。）
+- [ ] **AC1 身份：** 两session、两Goal/WorkItem和相同显示名不同team验证受信owner/root/actor；创建/查询/消息/stop全部隔离，保留lead、唯一名称和活动容量生效。（验证：临时service/domain fixtures。增量证据：`TestGoalTeamsWithSameNameRejectCrossSessionStop` 覆盖同名跨session stop 隔离；`TestCreateTeamRejectsSessionCapacityWithoutPersistingFacts`、`TestSpawnTeamMemberRejectsDuplicateNameWithoutPersistingFacts`、`TestSpawnTeamMemberRejectsTeamCapacityWithoutPersistingFacts` 覆盖 service 容量、唯一成员名及拒绝不持久化。四项定向测试本地通过（2026-10-10）；双 Goal/WorkItem owner/root/actor 创建查询消息与完整 stop 矩阵仍开放。）
 - [x] **AC2 多轮：** 同一member连续两个有界turn，输入仅角色/身份/上一摘要/明确批次；没有父历史或兄弟transcript；idle不占worker，一member不并行；首spawn队满拒绝，后续消息waiting_capacity公平重试。（定向多轮/容量矩阵覆盖；SHA `5997ef511486af5911406bc04cfacbc428d48c2f` Go `build-and-test`通过。）
 - [x] **AC3 消息：** p2p/lead/broadcast持久有序、固定接收者、全或无投递；额满和写盘失败不误成功；批次handoff/restart destination gap、并发新消息和重连不丢失/重复；lead消息不自动起模型run。（定向投递/容量/恢复矩阵和 handoff 竞态用例均通过；SHA `42ebd90ace8e1b3bab4755a24d501d62aba237b4` Go `build-and-test` 通过。）
 - [x] **AC4 任务板：** CRUD、revision、owner、canonical依赖和blocks视图一致；未知/环/自依赖/跨队拒绝，未解除依赖禁止进行/完成；两成员抢claim只有一个成功，取消不会伪完成，M06 todo与Goal工作项独立。（本地定向矩阵通过；SHA `fb4353aaa1eae4003641d9232a913d69e1886029` Go `build-and-test` 与 `test-package` 通过。）

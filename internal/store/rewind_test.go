@@ -164,6 +164,51 @@ func TestReconcileLegacyRewindRetainsReplacedStaging(t *testing.T) {
 	}
 }
 
+func TestReconcileLegacyRewindRetainsUnknownPreparedStaging(t *testing.T) {
+	s, _ := newGoalStore(t)
+	ctx := context.Background()
+	root, oldDigest := rewindCandidate(t, s, ctx, map[string]string{"board": "original"})
+	staging := filepath.Join(t.TempDir(), "staging")
+	if err := os.Mkdir(staging, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "board"), []byte("snapshot"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, targetDigest, err := candidate.BuildManifest(staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := RewindJournal{ID: "rw-unknown-prepared-staging", CandidateID: "cand", SnapshotID: "snap-1", ExpectedDigest: oldDigest, TargetDigest: targetDigest, StagingDir: staging}
+	if err := s.BeginRewind(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "partial.bin"), []byte("unrecognized partial data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stagingInfo, err := os.Stat(staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileRewinds(ctx); err == nil || !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("unrecognized prepared staging was not blocked: %v", err)
+	}
+	for path, want := range map[string]string{filepath.Join(root, "board"): "original", filepath.Join(staging, "board"): "snapshot", filepath.Join(staging, "partial.bin"): "unrecognized partial data"} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("recovery changed %s: got=%q want=%q err=%v", path, got, want, err)
+		}
+	}
+	currentInfo, err := os.Stat(staging)
+	if err != nil || !os.SameFile(stagingInfo, currentInfo) {
+		t.Fatalf("recovery changed staging root identity: before=%v after=%v err=%v", stagingInfo, currentInfo, err)
+	}
+	rec, err := s.GetCandidate(ctx, "cand")
+	if err != nil || rec.Candidate.CandidateDigest != oldDigest || rec.Candidate.Status != "ready" {
+		t.Fatalf("candidate changed during blocked recovery: %+v err=%v", rec, err)
+	}
+}
+
 func TestReconcileLegacyRewindWithoutRecordedIdentityRetainsStaging(t *testing.T) {
 	s, _ := newGoalStore(t)
 	ctx := context.Background()

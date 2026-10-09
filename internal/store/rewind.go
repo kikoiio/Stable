@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"stable/internal/candidate"
@@ -213,7 +214,7 @@ func (s *Store) ReconcileRewinds(ctx context.Context) error {
 	}
 	// FinalizeRewind commits the database before Cleanup removes the spent
 	// staging root. If the process stops between those operations, the journal
-	// is no longer unfinished, so recover cleanup from finalized project
+	// is no longer unfinished, so recover cleanup from finalized
 	// journals whose candidate digest proves that the rewind committed.
 	rows, err := s.db.QueryContext(ctx, `SELECT id,candidate_id,snapshot_id,phase,expected_digest,target_digest,staging_dir,reason,created_at,updated_at,transaction_mode,rollback_path,manifest_policy,expected_root_identity,target_root_identity FROM rewind_journal WHERE phase='finalized' AND expected_root_identity<>'' AND target_root_identity<>'' ORDER BY updated_at,id`)
 	if err != nil {
@@ -282,6 +283,15 @@ func (s *Store) reconcileRewind(ctx context.Context, j RewindJournal) error {
 	if j.ExpectedRootIdentity == "" || j.TargetRootIdentity == "" {
 		return s.blockRewind(ctx, j, errors.New("rewind root identities are missing; retain paths for explicit reconciliation"))
 	}
+	if j.Phase == RewindPrepared {
+		discarded, err := s.discardEmptyPreparedRewind(ctx, j, rec.Candidate)
+		if err != nil {
+			return s.blockRewind(ctx, j, err)
+		}
+		if discarded {
+			return nil
+		}
+	}
 	tx := candidate.DirectoryTransaction{ID: j.ID, Kind: candidate.TransactionRewind, ManifestPolicy: j.ManifestPolicy, ExpectedRootIdentity: j.ExpectedRootIdentity, TargetRootIdentity: j.TargetRootIdentity, CurrentRoot: rec.Candidate.CandidateRoot, IncomingRoot: j.StagingDir, RollbackRoot: j.RollbackPath, ExpectedDigest: j.ExpectedDigest, TargetDigest: j.TargetDigest, Mode: j.TransactionMode}
 	coordinator := candidate.NewTransactionCoordinator()
 	state, err := coordinator.Inspect(ctx, tx, candidate.TransactionPhase(j.Phase))
@@ -303,6 +313,47 @@ func (s *Store) reconcileRewind(ctx context.Context, j RewindJournal) error {
 		return s.blockRewind(ctx, j, err)
 	}
 	return coordinator.Cleanup(ctx, tx)
+}
+
+// discardEmptyPreparedRewind handles the crash cut where the journal and an
+// empty staging directory were persisted before any snapshot bytes were
+// materialized. Empty owned staging is safe to discard, but incomplete or
+// unknown contents are retained for explicit reconciliation.
+func (s *Store) discardEmptyPreparedRewind(ctx context.Context, j RewindJournal, c candidate.Candidate) (bool, error) {
+	if c.Status != "ready" {
+		return false, nil
+	}
+	currentIdentity, err := candidate.CaptureRootIdentity(c.CandidateRoot)
+	if err != nil || currentIdentity != j.ExpectedRootIdentity {
+		return false, nil
+	}
+	_, currentDigest, err := candidate.BuildManifestForPolicy(c.CandidateRoot, j.ManifestPolicy)
+	if err != nil || currentDigest != j.ExpectedDigest {
+		return false, nil
+	}
+	if _, err := os.Lstat(j.RollbackPath); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	targetIdentity, err := candidate.CaptureRootIdentity(j.StagingDir)
+	if os.IsNotExist(err) {
+		return true, s.SetRewindPhase(ctx, j.ID, RewindPrepared, RewindFinalized, "interrupted before snapshot materialization; staging already absent")
+	}
+	if err != nil || targetIdentity != j.TargetRootIdentity {
+		return false, nil
+	}
+	entries, err := os.ReadDir(j.StagingDir)
+	if err != nil {
+		return false, err
+	}
+	if len(entries) != 0 {
+		return false, nil
+	}
+	if err := os.Remove(j.StagingDir); err != nil {
+		return false, err
+	}
+	return true, s.SetRewindPhase(ctx, j.ID, RewindPrepared, RewindFinalized, "interrupted before snapshot materialization; empty staging removed")
 }
 
 type rewindJournalAdapter struct{ store *Store }

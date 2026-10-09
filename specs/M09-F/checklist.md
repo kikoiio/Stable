@@ -25,7 +25,7 @@
 
 - [ ] `run_agent`同步、后台、definition isolation三入口分别验证真实workspace/lease；缺省D、explore/plan和A/B/C仍只读，角色工具规则与父权限交集生效。
 - [ ] file tools只写本checkout；正式/兄弟/state/privateGit/受保护路径与generation伪造被拒绝，snapshot与tool call/result配对。
-- [ ] command的真实Linux隔离覆盖子进程、根替换/软链接/硬链接/`.git/.stable`mask攻击，无formal/state/bare挂载，无凭据/网络/递归分派。增量证据：`TestWorkspaceWriterCommandUsesBoundedLeaseProfile` 验证 executeCommand 生成 profile 时 root 绑定 lease 的 baseline/checkout/run/workspace volume、启用 isolation、禁用 network grants，并提供进程身份字段及 durable callbacks；此 fixture 不满足真实受限volume前提，真实隔离仍由 cloud `STABLE_M09_VOLUME` workflow 验证。
+- [ ] command的真实Linux隔离覆盖子进程、根替换/软链接/硬链接/`.git/.stable`mask攻击，无formal/state/bare挂载，无凭据/网络/递归分派。增量证据：`TestWorkspaceWriterCommandUsesBoundedLeaseProfile` 验证 executeCommand 生成 profile 时 root 绑定 lease 的 baseline/checkout/run/workspace volume、启用 isolation、禁用 network grants，并提供进程身份字段及 durable callbacks；fixture 不满足真实受限volume前提。SHA `1ca0506b07d817dcf620883629b11dda485cd1a1` 的 [M09 Workspace Linux run 37978878762](https://github.com/kikoiio/Stable/actions/runs/37978878762) `writer-sandbox-volume` job 通过，执行真实 writer isolation、磁盘耗尽及 bounded-contract/stop-settlement 检查；command完整攻击矩阵与AC3其余入口仍未整体验收。
 - [ ] 无sandbox失败关闭；hard磁盘quota无能力时command unavailable而不是裸执行/仅监控假上限；未擅改本机quota/mount/tmpfs。
 - [ ] plan模式和权限deny仍先于写执行；definition permissionMode/remote/工具参数扩权拒绝。
 
@@ -47,7 +47,7 @@
 
 ## AC6 中断、归属与清理
 
-- [ ] creating/queued/running/stopping/exporting/removing各中断点恢复两次无模型/command重跑、重复export或重复终态。
+- [ ] creating/queued/running/stopping/exporting/removing各中断点恢复两次无模型/command重跑、重复export或重复终态。增量证据：prepared rewind 的 snapshot 尚未写入时，仅当 candidate 身份/digest匹配、staging身份匹配且 staging 为空才安全清理并finalize；same-root 内出现未知partial data会blocked并保留。`TestReconcileLegacyRewindRetainsUnknownPreparedStaging`、`TestM05SnapshotRewindAndRestartRecovery` 及 `TestRewindSnapshotRefusals` 定向通过（2026-10-10）；其他生命周期 crash cuts 仍开放。
 - [ ] 清理核对service ownership、root身份、sandbox PID启动身份与generation；不能误杀/删除用户或其它任务资源。增量证据：rewind journal现记录候选和staging根身份，legacy/project恢复和清理统一经事务coordinator校验身份及digest；替换staging与缺失身份的legacy journal被blocked并保留候选、原staging及替换数据。finalize后清理恢复测试现同时覆盖legacy-v1/project-v2，未知替换目录的bytes+inode、spent root及candidate均保留（`TestReconcileFinalizedRewindCleansPostFinalizeStaging`、`TestReconcileFinalizedRewindRetainsReplacedStaging`；2026-10-10定向测试通过）。其余ownership/PID/generation矩阵仍开放。
 - [ ] dirty/untracked/ignored文件、新private提交、kept状态和未知Git/manifest结果全部保留；自动stale清理默认关闭。
 - [ ] clean remove只有完整基线相等、无binding/writer才执行；dirty discard要求真实用户ID+generation+digest确认，模型bool/过期确认/跨session不可触发。
