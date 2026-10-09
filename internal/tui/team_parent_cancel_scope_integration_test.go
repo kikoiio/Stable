@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,7 +60,7 @@ func TestTeamTUIParentCancelOnlyInterruptsItsOwnMemberTurn(t *testing.T) {
 		}
 		pool.Close()
 	})
-	parentRunner := &acceptanceTeamParentRunner{started: make(chan *acceptanceTeamParentRun, 2)}
+	parentRunner := &parentCancelScopeParentRunner{started: make(chan *acceptanceTeamParentRun, 2), runs: make(map[string]*acceptanceTeamParentRun)}
 	socket := filepath.Join(root, "s")
 	svc, err := conversation.Serve(ctx, conversation.Deps{
 		Store: db, ProjectRoot: project, SocketPath: socket, PollEvery: time.Hour,
@@ -148,6 +149,18 @@ func TestTeamTUIParentCancelOnlyInterruptsItsOwnMemberTurn(t *testing.T) {
 	if !ok || cancelResult.err != nil || cancelResult.message.Type != "cancel_sent" {
 		t.Fatalf("TUI parent cancel result=%T %+v", cancelResult, cancelResult)
 	}
+	for {
+		message, err := streamA.Receive()
+		if err != nil {
+			t.Fatalf("receive canceled parent A outcome: %v", err)
+		}
+		if message.Type == "run_outcome" {
+			if message.Outcome == nil || message.Outcome.Status != agent.RunCancelled {
+				t.Fatalf("parent A outcome=%+v, want canceled", message.Outcome)
+			}
+			break
+		}
+	}
 	select {
 	case <-childA.ctx.Done():
 	case <-reqctx.Done():
@@ -184,6 +197,32 @@ func TestTeamTUIParentCancelOnlyInterruptsItsOwnMemberTurn(t *testing.T) {
 type parentCancelScopeChildStart struct {
 	input agent.ChildRunInput
 	ctx   context.Context
+}
+
+type parentCancelScopeParentRunner struct {
+	started chan *acceptanceTeamParentRun
+	mu      sync.Mutex
+	runs    map[string]*acceptanceTeamParentRun
+}
+
+func (r *parentCancelScopeParentRunner) Start(_ context.Context, request agent.ExecutionRequest) (*agent.RunHandle, error) {
+	run := &acceptanceTeamParentRun{request: request, events: make(chan agent.ExecutionEvent), done: make(chan agent.RunOutcome, 1)}
+	r.mu.Lock()
+	r.runs[request.RunID] = run
+	r.mu.Unlock()
+	r.started <- run
+	return &agent.RunHandle{Events: run.events, Done: run.done}, nil
+}
+
+func (r *parentCancelScopeParentRunner) Cancel(runID string) error {
+	r.mu.Lock()
+	run := r.runs[runID]
+	r.mu.Unlock()
+	if run == nil {
+		return nil
+	}
+	run.finish(agent.RunCancelled)
+	return nil
 }
 
 type parentCancelScopeChildRunner struct {
