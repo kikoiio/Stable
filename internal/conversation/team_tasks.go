@@ -27,6 +27,12 @@ func (s *Service) CreateTeamTask(ctx context.Context, request agent.ExecutionReq
 	if err != nil {
 		return teams.Task{}, err
 	}
+	if input.Assignee != "" {
+		member, ok := projection.Members[input.Assignee]
+		if !ok || member.TeamID != teamID {
+			return teams.Task{}, teams.ErrPermission
+		}
+	}
 	graph, err := teamTaskGraph(projection, teamID)
 	if err != nil {
 		return teams.Task{}, err
@@ -113,6 +119,12 @@ func (s *Service) UpdateTeamTask(ctx context.Context, request agent.ExecutionReq
 	team, projection, err := s.teamForOperation(root, scope, teamID, actor)
 	if err != nil {
 		return teams.Task{}, err
+	}
+	if patch.Assignee != nil && *patch.Assignee != "" {
+		member, ok := projection.Members[*patch.Assignee]
+		if !ok || member.TeamID != teamID {
+			return teams.Task{}, teams.ErrPermission
+		}
 	}
 	graph, err := teamTaskGraph(projection, teamID)
 	if err != nil {
