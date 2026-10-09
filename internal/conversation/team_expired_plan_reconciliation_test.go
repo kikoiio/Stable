@@ -137,10 +137,18 @@ func TestTeamRequestExpiryTimerPersistsWithoutRequestTraffic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	team, err = service.GetTeam(t.Context(), request, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shutdown, err := service.createTeamRequestUntil(root, team, request.RunID, teams.Lead, member.ID, teams.RequestShutdown, "", expiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		projection, replayErr := sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
-		if replayErr == nil && projection.Requests[pending.ID].Status == teams.RequestExpired {
+		if replayErr == nil && projection.Requests[pending.ID].Status == teams.RequestExpired && projection.Requests[shutdown.ID].Status == teams.RequestExpired {
 			if got := projection.Members[member.ID]; got.Status != teams.MemberRunning {
 				t.Fatalf("expiry timer changed active member to %s", got.Status)
 			}
@@ -154,6 +162,9 @@ func TestTeamRequestExpiryTimerPersistsWithoutRequestTraffic(t *testing.T) {
 	}
 	if got := projection.Requests[pending.ID]; got.Status != teams.RequestExpired {
 		t.Fatalf("request remained %s without list/respond traffic, want expired", got.Status)
+	}
+	if got := projection.Requests[shutdown.ID]; got.Status != teams.RequestExpired {
+		t.Fatalf("shutdown remained %s without list/respond traffic, want expired", got.Status)
 	}
 	if runner.childCount() != 1 {
 		t.Fatalf("expiry timer started %d child turns, want only the active turn", runner.childCount())

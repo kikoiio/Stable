@@ -399,6 +399,15 @@ func (s *teamScheduler) rememberParent(request agent.ExecutionRequest, scope tea
 	if s.closed {
 		return 0
 	}
+	if prior, ok := s.grants[memberID]; ok && prior.Request.RunID == request.RunID && prior.TeamID == teamID && prior.Scope.Matches(scope) {
+		// A second call from the same lead run can race an automatic wake (for
+		// example plan approval followed immediately by explicit resume). Refresh
+		// its request metadata without invalidating the already accepted child.
+		prior.Request = cleanTeamParentRequest(request)
+		prior.OriginCallID = callID
+		s.grants[memberID] = prior
+		return prior.Generation
+	}
 	s.grantGeneration[memberID]++
 	grant := teamParentGrant{Request: cleanTeamParentRequest(request), Scope: scope, TeamID: teamID, MemberID: memberID, OriginCallID: callID, Generation: s.grantGeneration[memberID]}
 	s.grants[memberID] = grant
@@ -761,6 +770,14 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 	if grantGeneration == 0 && member.WorkspaceID != "" && (!request.TeamCoordinator || request.TeamCoordinatorTeamID != team.ID) {
 		return teams.Member{}, teams.ErrPermission
 	}
+	if turn, active := acceptedTeamTurnForMember(projection, member.ID); active && !member.Status.IsTerminal() && member.Status != teams.MemberStopping {
+		member.Status = teams.MemberQueued
+		if turn.Status == "running" {
+			member.Status = teams.MemberRunning
+		}
+		member.RunID, member.TurnID = turn.RunID, turn.ID
+		return member, nil
+	}
 	// A message or approved plan may already have queued the member by the time
 	// an explicit resume reaches the service. Treat that request as satisfied.
 	if (member.Status == teams.MemberQueued || member.Status == teams.MemberRunning) && hasAcceptedCurrentTeamTurn(projection, member) {
@@ -930,9 +947,14 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 				}
 			}
 			_, retryErr := s.submitTeamMember(s.lifeCtx, root, scope, team, member, queuedRequest, parent, task, &startedAt, &runSeq, &durableTerminal, &durableResult, true, handoffs, true, grantGeneration, memberWorkspace, writerLease)
-			if errors.Is(retryErr, agent.ErrDelegationQueueFull) && writerLease != nil {
-				_, _ = memberWorkspace.ReleaseCompletedWriter(context.Background(), *writerLease)
-				writerLease = nil
+			if errors.Is(retryErr, agent.ErrDelegationQueueFull) {
+				// Keep the durable capacity-waiting state while this FIFO head
+				// remains queued. A later pool-capacity event retries it; changing
+				// it to interrupted here exposes a false terminal-looking state.
+				if writerLease != nil {
+					_, _ = memberWorkspace.ReleaseCompletedWriter(context.Background(), *writerLease)
+					writerLease = nil
+				}
 				return retryErr
 			}
 			if retryErr != nil {
@@ -1159,10 +1181,15 @@ func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams
 		}
 		currentMember, found := currentProjection.Members[member.ID]
 		if memberExists {
-			if found && currentMember.TeamID == team.ID && (currentMember.Status == teams.MemberQueued || currentMember.Status == teams.MemberRunning) && hasAcceptedCurrentTeamTurn(currentProjection, currentMember) {
+			if turn, active := acceptedTeamTurnForMember(currentProjection, member.ID); found && active && currentMember.TeamID == team.ID && !currentMember.Status.IsTerminal() && currentMember.Status != teams.MemberStopping {
 				// Automatic scheduling and an explicit resume can race. Once the
 				// member already owns an accepted turn, the later resume is satisfied.
 				member = currentMember
+				member.Status = teams.MemberQueued
+				if turn.Status == "running" {
+					member.Status = teams.MemberRunning
+				}
+				member.RunID, member.TurnID = turn.RunID, turn.ID
 				return errTeamMemberAlreadyActive
 			}
 			if found && waitingRetry && currentMember.TeamID == team.ID && currentMember.Status == teams.MemberInterrupted && member.Status == teams.MemberWaitingCapacity && currentMember.RunID == member.RunID && currentMember.TurnID == member.TurnID {
@@ -1284,11 +1311,17 @@ func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams
 }
 
 func hasAcceptedCurrentTeamTurn(projection sessionlog.TeamProjection, member teams.Member) bool {
-	if member.TurnID == "" {
-		return false
-	}
 	turn, ok := projection.Turns[member.TurnID]
-	return ok && turn.MemberID == member.ID && (turn.Status == "queued" || turn.Status == "running")
+	return member.TurnID != "" && ok && turn.MemberID == member.ID && (turn.Status == "queued" || turn.Status == "running")
+}
+
+func acceptedTeamTurnForMember(projection sessionlog.TeamProjection, memberID string) (sessionlog.TurnFact, bool) {
+	for _, turn := range projection.Turns {
+		if turn.MemberID == memberID && (turn.Status == "queued" || turn.Status == "running") {
+			return turn, true
+		}
+	}
+	return sessionlog.TurnFact{}, false
 }
 
 // prepareTeamMemberWorkspace materializes or reuses the member's service-owned

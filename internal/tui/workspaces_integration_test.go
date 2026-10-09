@@ -439,6 +439,236 @@ func TestWorktreeTUIResolutionExportAndAcceptanceUsesConversationService(t *test
 	}
 }
 
+func TestWorktreeTUIResolvesTwoConflictsToMixedVersionsBeforeAcceptance(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	formal := filepath.Join(root, "project")
+	if err := os.Mkdir(formal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{"from-formal.txt": "baseline formal", "from-workspace.txt": "baseline workspace"} {
+		if err := os.WriteFile(filepath.Join(formal, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := store.Open(filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	socketDir, err := os.MkdirTemp("", "m09-tui-mixed-resolution-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socket := filepath.Join(socketDir, "c.sock")
+	workspaceState := filepath.Join(root, "workspace-state")
+	startService := func(runner agent.Runner, checker bool) (*conversation.Service, context.CancelFunc) {
+		t.Helper()
+		serviceCtx, cancel := context.WithCancel(ctx)
+		deps := conversation.Deps{
+			Store: db, ProjectRoot: formal, WorkspaceStateRoot: workspaceState,
+			SocketPath: socket, PollEvery: time.Hour, Runner: runner,
+		}
+		if checker {
+			deps.CandidateCheckers = []candidate.Checker{tuiWorkspacePassingChecker{}}
+		}
+		service, serveErr := conversation.Serve(serviceCtx, deps)
+		if serveErr != nil {
+			cancel()
+			t.Fatal(serveErr)
+		}
+		return service, cancel
+	}
+
+	service, stopService := startService(&tuiHoldingRunner{}, false)
+	serviceClosed := false
+	t.Cleanup(func() {
+		if !serviceClosed {
+			if err := service.Close(); err != nil {
+				t.Errorf("close conversation service: %v", err)
+			}
+		}
+		stopService()
+	})
+	sessions, err := conversation.Request(ctx, socket, conversation.ClientMsg{Op: "session_create", ProjectRoot: formal})
+	if err != nil || len(sessions) != 1 || sessions[0].Session == nil {
+		t.Fatalf("create session: messages=%+v err=%v", sessions, err)
+	}
+	sessionID := sessions[0].Session.ID
+	runID, err := sessionlog.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := conversation.OpenRun(ctx, socket, agent.ExecutionRequest{
+		RunID: runID, Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: sessionID},
+		Intent: "create a workspace for mixed conflict resolution", Model: "fixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := stream.Receive()
+	if err != nil || started.Type != "run_started" || started.RunID != runID {
+		t.Fatalf("start lead run: message=%+v err=%v", started, err)
+	}
+	m := New(socket, formal)
+	m.ActiveSession, m.ActiveRunID, m.Pending = sessionID, runID, true
+	m.Composer.SetValue("/worktrees create mixed-resolution")
+	updated, command := m.submitComposer()
+	m = updated.(Model)
+	if command == nil {
+		t.Fatal("TUI did not dispatch workspace creation")
+	}
+	updated, _ = m.handleResult(command().(resultMsg))
+	m = updated.(Model)
+	if len(m.Worktrees) != 1 || m.Worktrees[0].Label != "mixed-resolution" {
+		t.Fatalf("TUI did not create workspace through conversation service: %+v", m.Worktrees)
+	}
+	workspaceID := m.Worktrees[0].ID
+	if err := stream.Cancel(sessionID, runID); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		message, receiveErr := stream.Receive()
+		if receiveErr != nil {
+			t.Fatalf("receive lead run cancellation: %v", receiveErr)
+		}
+		if message.Type == "run_outcome" {
+			if message.Outcome == nil || message.Outcome.Status != agent.RunCancelled {
+				t.Fatalf("lead run outcome=%+v, want cancelled", message.Outcome)
+			}
+			break
+		}
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatal(err)
+	}
+	serviceClosed = true
+	stopService()
+	service, stopService = startService(nil, true)
+	serviceClosed = false
+
+	formalRoot, err := filepath.Abs(formal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectHash := sha256.Sum256([]byte(filepath.Clean(formalRoot)))
+	projectID := "p" + hex.EncodeToString(projectHash[:16])
+	layout, err := workspace.NewLayout(workspaceState, formalRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := layout.Paths(workspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{"from-formal.txt": "workspace version", "from-workspace.txt": "workspace version"} {
+		if err := os.WriteFile(filepath.Join(paths.Checkout, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, content := range map[string]string{"from-formal.txt": "formal version", "from-workspace.txt": "formal version"} {
+		if err := os.WriteFile(filepath.Join(formal, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m = New(socket, formal)
+	m.ActiveSession = sessionID
+	m.Composer.SetValue("/worktrees resolve " + workspaceID)
+	updated, command = m.submitComposer()
+	m = updated.(Model)
+	if command == nil {
+		t.Fatal("TUI did not request a mixed conflict preview")
+	}
+	updated, _ = m.handleResult(command().(resultMsg))
+	m = updated.(Model)
+	wantConflicts := []string{"from-formal.txt", "from-workspace.txt"}
+	if m.WorktreeDialog == nil || m.WorktreeDialog.Mode != "resolve" || len(m.WorktreeDialog.Snapshot.Conflicts) != len(wantConflicts) {
+		t.Fatalf("TUI did not receive both conflicts: %+v", m.WorktreeDialog)
+	}
+	for i, path := range wantConflicts {
+		if m.WorktreeDialog.Snapshot.Conflicts[i] != path {
+			t.Fatalf("conflicts=%v, want %v", m.WorktreeDialog.Snapshot.Conflicts, wantConflicts)
+		}
+	}
+	// Choose the formal version of the first conflict, then the workspace
+	// version of the second. The export should materialize both choices.
+	updated, _ = m.handleWorktreeDecisionKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	m = updated.(Model)
+	updated, _ = m.handleWorktreeDecisionKey(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	updated, _ = m.handleWorktreeDecisionKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("w")})
+	m = updated.(Model)
+	updated, command = m.handleWorktreeDecisionKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if command == nil {
+		t.Fatal("TUI did not submit both explicit path choices")
+	}
+	updated, _ = m.handleResult(command().(resultMsg))
+	m = updated.(Model)
+
+	m.Composer.SetValue("/worktrees export " + workspaceID)
+	updated, command = m.submitComposer()
+	m = updated.(Model)
+	if command == nil {
+		t.Fatal("TUI did not request candidate export")
+	}
+	updated, _ = m.handleResult(command().(resultMsg))
+	m = updated.(Model)
+	if len(m.Worktrees) != 1 || m.Worktrees[0].CandidateID == "" {
+		t.Fatalf("TUI did not expose the exported candidate: %+v", m.Worktrees)
+	}
+	candidateID := m.Worktrees[0].CandidateID
+	assertFileContent(t, filepath.Join(formal, "from-formal.txt"), "formal version")
+	assertFileContent(t, filepath.Join(formal, "from-workspace.txt"), "formal version")
+	candidateRecord, err := db.GetCandidate(ctx, candidateID)
+	if err != nil || candidateRecord.Candidate.Status == "accepted" {
+		t.Fatalf("candidate was accepted during export: record=%+v err=%v", candidateRecord, err)
+	}
+
+	m.Composer.SetValue("/review " + candidateID)
+	updated, command = m.submitComposer()
+	m = updated.(Model)
+	if command == nil {
+		t.Fatal("TUI did not request candidate review")
+	}
+	updated, followup := m.handleResult(command().(resultMsg))
+	m = updated.(Model)
+	if followup == nil || m.Review == nil || m.Review.CandidateID != candidateID || len(m.Review.Findings) != 1 || m.Review.Findings[0].Result != candidate.FindingPass {
+		t.Fatalf("TUI review response=%+v follow-up=%v", m.Review, followup != nil)
+	}
+	updated, _ = m.handleResult(followup().(resultMsg))
+	m = updated.(Model)
+	updated, command = m.handleReviewKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m = updated.(Model)
+	if command == nil {
+		t.Fatal("TUI did not submit explicit candidate acceptance")
+	}
+	acceptResult := command().(resultMsg)
+	if acceptResult.err != nil || len(acceptResult.msgs) != 1 || acceptResult.msgs[0].Type != "acceptance" {
+		t.Fatalf("service acceptance result=%+v err=%v", acceptResult, acceptResult.err)
+	}
+	updated, _ = m.handleResult(acceptResult)
+	m = updated.(Model)
+	if m.Review != nil || m.Status != "候选已接收，目标仍需独立复核。" {
+		t.Fatalf("TUI did not close the accepted review: review=%+v status=%q", m.Review, m.Status)
+	}
+	assertFileContent(t, filepath.Join(formal, "from-formal.txt"), "formal version")
+	assertFileContent(t, filepath.Join(formal, "from-workspace.txt"), "workspace version")
+	candidateRecord, err = db.GetCandidate(ctx, candidateID)
+	if err != nil || candidateRecord.Candidate.Status != "accepted" {
+		t.Fatalf("candidate status=%q err=%v; want accepted", candidateRecord.Candidate.Status, err)
+	}
+}
+
 func assertFileContent(t *testing.T, path, want string) {
 	t.Helper()
 	got, err := os.ReadFile(path)
