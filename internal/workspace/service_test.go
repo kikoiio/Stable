@@ -595,6 +595,47 @@ func TestLifecycleServiceRecoversInterruptedJournalOperationsConservatively(t *t
 	if err := store.Save(context.Background(), scope, writing, writing.Snapshot.Generation-1); err != nil {
 		t.Fatal(err)
 	}
+	stoppingID, err := NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	createStoppingID, err := NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopping, err := store.Create(context.Background(), scope, stoppingID, "stopping", createStoppingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopping.Snapshot.State = StateReady
+	stopping.Snapshot.Cursor++
+	stopping.Operation = Operation{ID: createStoppingID, Kind: "create", Phase: "complete", Generation: stopping.Snapshot.Generation, UpdatedAt: time.Now().UTC()}
+	if err := store.Save(context.Background(), scope, stopping, stopping.Snapshot.Generation); err != nil {
+		t.Fatal(err)
+	}
+	stopping.Snapshot.State = StateWriting
+	stopping.Snapshot.WriterRunID = "stopping-run"
+	stopping.Snapshot.Generation++
+	stopping.Snapshot.Cursor++
+	writerOperationID, err := NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopping.Operation = Operation{ID: writerOperationID, Kind: "writer", Phase: "complete", Generation: stopping.Snapshot.Generation, UpdatedAt: time.Now().UTC()}
+	if err := store.Save(context.Background(), scope, stopping, stopping.Snapshot.Generation-1); err != nil {
+		t.Fatal(err)
+	}
+	stopping.Snapshot.State = StateStopping
+	stopping.Snapshot.Generation++
+	stopping.Snapshot.Cursor++
+	stopOperationID, err := NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopping.Operation = Operation{ID: stopOperationID, Kind: "stop", Phase: "intent", Generation: stopping.Snapshot.Generation, UpdatedAt: time.Now().UTC()}
+	if err := store.Save(context.Background(), scope, stopping, stopping.Snapshot.Generation-1); err != nil {
+		t.Fatal(err)
+	}
 	exportingID, err := NewID()
 	if err != nil {
 		t.Fatal(err)
@@ -661,6 +702,13 @@ func TestLifecycleServiceRecoversInterruptedJournalOperationsConservatively(t *t
 	if _, err := service.StopWriter(context.Background(), scope, writingID); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("recovery claimed to stop an untracked writer: %v", err)
 	}
+	gotStopping, err := service.Get(context.Background(), scope, stoppingID)
+	if err != nil || gotStopping.State != StateInterrupted || gotStopping.WriterRunID != "stopping-run" {
+		t.Fatalf("stopping recovery state=%s writer=%q err=%v", gotStopping.State, gotStopping.WriterRunID, err)
+	}
+	if _, err := service.StopWriter(context.Background(), scope, stoppingID); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("recovery claimed that stopping writer exited: %v", err)
+	}
 	gotExporting, err := service.Get(context.Background(), scope, exportingID)
 	if err != nil || gotExporting.State != StateInterrupted || gotExporting.CandidateID != candidateID || !strings.Contains(gotExporting.Error, "during export") {
 		t.Fatalf("export recovery state=%s candidate=%q error=%q err=%v", gotExporting.State, gotExporting.CandidateID, gotExporting.Error, err)
@@ -684,6 +732,10 @@ func TestLifecycleServiceRecoversInterruptedJournalOperationsConservatively(t *t
 	gotWriting, err = service.Get(context.Background(), scope, writingID)
 	if err != nil || gotWriting.State != StateInterrupted || gotWriting.WriterRunID != "writer-run" {
 		t.Fatalf("repeated writer recovery state=%s writer=%q err=%v", gotWriting.State, gotWriting.WriterRunID, err)
+	}
+	gotStopping, err = service.Get(context.Background(), scope, stoppingID)
+	if err != nil || gotStopping.State != StateInterrupted || gotStopping.WriterRunID != "stopping-run" {
+		t.Fatalf("repeated stopping recovery state=%s writer=%q err=%v", gotStopping.State, gotStopping.WriterRunID, err)
 	}
 	gotExporting, err = service.Get(context.Background(), scope, exportingID)
 	if err != nil || gotExporting.State != StateInterrupted || gotExporting.CandidateID != candidateID || !strings.Contains(gotExporting.Error, "during export") {
