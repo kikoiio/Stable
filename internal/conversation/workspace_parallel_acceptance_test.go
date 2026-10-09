@@ -120,6 +120,14 @@ func TestSequentialWorkspaceCandidateAcceptsPreserveIndependentChanges(t *testin
 			t.Fatalf("candidate %s acceptance receipt=%+v err=%v", candidateID, receipt, err)
 		}
 	}
+	// Acceptance consumes the staged candidate tree. Check that this first
+	// candidate did not accidentally include the still-unaccepted second
+	// workspace before the acceptance cleanup removes the spent tree.
+	if got, err := os.ReadFile(filepath.Join(firstCandidate.Candidate.CandidateRoot, "second.txt")); err == nil && string(got) != "second baseline" {
+		t.Fatalf("first candidate unexpectedly contains second workspace change: %q", got)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("inspect first candidate's second.txt: %v", err)
+	}
 	accept(firstExport.CandidateID)
 
 	secondPreview, err := manager.Preview(ctx, scope, second.ID)
@@ -145,9 +153,6 @@ func TestSequentialWorkspaceCandidateAcceptsPreserveIndependentChanges(t *testin
 		if err != nil || string(got) != want {
 			t.Fatalf("second candidate %s=%q err=%v; want %q", name, got, err, want)
 		}
-	}
-	if got, err := os.ReadFile(filepath.Join(firstCandidate.Candidate.CandidateRoot, "second.txt")); err != nil || string(got) != "second baseline" {
-		t.Fatalf("first candidate unexpectedly contains second workspace change: %q err=%v", got, err)
 	}
 	accept(secondExport.CandidateID)
 

@@ -22,7 +22,11 @@ import (
 // while the first turn is active, then explicitly resumed into the next turn.
 func TestTeamTUITwoRoundResumeCarriesSummaryAndPendingMessage(t *testing.T) {
 	ctx := context.Background()
-	root, err := os.MkdirTemp(filepath.Join("..", "..", ".tmp"), "t-")
+	tempParent := filepath.Join("..", "..", ".tmp")
+	if err := os.MkdirAll(tempParent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(tempParent, "t-")
 	if err != nil {
 		t.Fatal(err)
 	}
