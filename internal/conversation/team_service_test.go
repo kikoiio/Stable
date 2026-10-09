@@ -114,6 +114,10 @@ func TestSameTeamNameIsIsolatedAcrossValidSessions(t *testing.T) {
 	if got := len(teamMessageFacts(t, firstService, firstRequest, firstTeam.ID)); got != 0 {
 		t.Fatalf("cross-session message persisted in target team: %d messages", got)
 	}
+	firstService.teamScheduler = newTeamScheduler(firstService)
+	if _, err := firstService.StopTeamMember(context.Background(), secondRequest.Work.SessionID, firstTeam.ID, "first-member"); err == nil {
+		t.Fatal("session B stopped a member from session A's team")
+	}
 }
 
 func TestGoalTeamIsIsolatedByGoalAndWorkItem(t *testing.T) {
