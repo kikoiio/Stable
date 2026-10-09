@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"stable/internal/permission"
+	"stable/internal/platform/proc"
 )
 
 var (
@@ -33,6 +35,9 @@ type SandboxProfile struct {
 	ReadOnlyFiles       []ReadOnlyFileMount
 	WorkspaceIsolation  bool
 	WorkspaceVolumeRoot string
+	WorkspaceProcess    *proc.TrackedProcess
+	OnProcessStart      func(proc.TrackedProcess) error
+	OnProcessExit       func(proc.TrackedProcess) error
 	Timeout             time.Duration
 	OutputLimit         int
 	Environment         []string
@@ -107,6 +112,16 @@ func networkGrantMessage(format string, args ...any) error {
 }
 
 func ValidateProfile(p SandboxProfile) error {
+	if p.WorkspaceProcess != nil {
+		if !p.WorkspaceIsolation || p.WorkspaceVolumeRoot == "" || p.WorkspaceProcess.PID != 0 || p.WorkspaceProcess.ProcessGroup != 0 || p.WorkspaceProcess.StartTimeTicks != 0 || p.WorkspaceProcess.WorkspaceID == "" || p.WorkspaceProcess.RunID == "" || p.WorkspaceProcess.Generation == 0 || len(p.WorkspaceProcess.Token) != 64 {
+			return profileMessage("invalid workspace process identity")
+		}
+		if _, err := hex.DecodeString(p.WorkspaceProcess.Token); err != nil || p.OnProcessStart == nil || p.OnProcessExit == nil {
+			return profileMessage("workspace process identity tracking is unavailable")
+		}
+	} else if p.OnProcessStart != nil || p.OnProcessExit != nil {
+		return profileMessage("workspace process hooks require an identity")
+	}
 	for _, path := range []string{p.ProjectRoot, p.CandidateRoot, p.RunRoot} {
 		if path == "" {
 			return profileMessage("project, candidate and private run roots are required")

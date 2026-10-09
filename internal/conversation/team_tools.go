@@ -49,6 +49,29 @@ func (s *Service) ExecuteTeamTool(ctx context.Context, request agent.ExecutionRe
 		out.Content = "Error: invalid team tool arguments"
 		return out, nil
 	}
+	if request.TeamCoordinator {
+		if teams.ValidateID(request.TeamCoordinatorTeamID) != nil {
+			out.Status, out.Content = agent.ToolDenied, "Error: coordinator run has no authorized team binding"
+			return out, nil
+		}
+		bound, boundErr := s.getTeamForSession(ctx, root, request.Work.SessionID, request.TeamCoordinatorTeamID, &request.Work)
+		if boundErr != nil || bound.Status != teams.TeamOpen {
+			out.Status, out.Content = agent.ToolDenied, "Error: coordinator team is no longer authorized"
+			return out, nil
+		}
+		if call.Name == "team_list" {
+			encoded, encodeErr := json.Marshal([]teams.Team{bound})
+			if encodeErr != nil {
+				return out, encodeErr
+			}
+			out.Status, out.IsError, out.Content = agent.ToolSucceeded, false, string(encoded)
+			return out, nil
+		}
+		if args.TeamID != request.TeamCoordinatorTeamID {
+			out.Status, out.Content = agent.ToolDenied, "Error: coordinator is bound to a different team"
+			return out, nil
+		}
+	}
 	memberTool := map[string]bool{"team_get": true, "team_member_get": true, "team_member_list": true, "team_send": true, "team_messages": true, "team_plan_submit": true, "team_request_list": true, "team_request_respond": true, "team_task_create": true, "team_task_get": true, "team_task_list": true, "team_task_update": true}
 	if !actor.Lead && !memberTool[call.Name] {
 		out.Status, out.Content = agent.ToolDenied, "Error: this team operation is lead-only"

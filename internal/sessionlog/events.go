@@ -97,7 +97,8 @@ const (
 )
 
 type CoordinatorMode struct {
-	Enabled bool `json:"enabled"`
+	Enabled bool   `json:"enabled"`
+	TeamID  string `json:"team_id,omitempty"`
 }
 
 // SnapshotRef records a candidate file snapshot owned by this session.

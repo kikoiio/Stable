@@ -531,16 +531,27 @@ func (s *Service) handleTeamRequest(ctx context.Context, msg ClientMsg) (ServerM
 		if _, err := sessionlog.SessionPath(root, msg.SessionID); err != nil {
 			return ServerMsg{}, err
 		}
+		if !msg.CoordinatorOn && msg.CoordinatorTeamID != "" {
+			return ServerMsg{}, teams.ErrPermission
+		}
 		if err := ctx.Err(); err != nil {
 			return ServerMsg{}, err
 		}
+		mode := sessionlog.CoordinatorMode{Enabled: msg.CoordinatorOn}
+		if msg.CoordinatorOn {
+			team, teamErr := s.getTeamForSession(ctx, root, msg.SessionID, msg.CoordinatorTeamID, &agent.WorkRef{Kind: agent.WorkSession, SessionID: msg.SessionID})
+			if teamErr != nil || team.Status != teams.TeamOpen {
+				return ServerMsg{}, teams.ErrPermission
+			}
+			mode.TeamID = team.ID
+		}
 		s.eventMu.Lock()
-		_, err = sessionlog.Append(root, msg.SessionID, sessionlog.EventCoordinatorMode, sessionlog.CoordinatorMode{Enabled: msg.CoordinatorOn})
+		_, err = sessionlog.Append(root, msg.SessionID, sessionlog.EventCoordinatorMode, mode)
 		s.eventMu.Unlock()
 		if err != nil {
 			return ServerMsg{}, err
 		}
-		return ServerMsg{Type: msg.Op, CoordinatorOn: msg.CoordinatorOn}, nil
+		return ServerMsg{Type: msg.Op, CoordinatorOn: msg.CoordinatorOn, CoordinatorTeamID: mode.TeamID}, nil
 	case "team_create":
 		request.Work, err = persistedRunWork(root, msg.SessionID, msg.RunID)
 		if err != nil {
@@ -674,20 +685,25 @@ func (s *Service) handleTeamRequest(ctx context.Context, msg ClientMsg) (ServerM
 }
 
 func teamCoordinatorModeEnabled(root, sessionID string) (bool, error) {
+	mode, err := teamCoordinatorModeForSession(root, sessionID)
+	return mode.Enabled, err
+}
+
+func teamCoordinatorModeForSession(root, sessionID string) (sessionlog.CoordinatorMode, error) {
 	transcript, err := sessionlog.Replay(root, sessionID)
 	if err != nil {
-		return false, err
+		return sessionlog.CoordinatorMode{}, err
 	}
-	enabled := false
+	mode := sessionlog.CoordinatorMode{}
 	for _, event := range transcript.Events {
 		if event.Type != sessionlog.EventCoordinatorMode {
 			continue
 		}
-		var mode sessionlog.CoordinatorMode
-		if decodeSessionData(event.Data, &mode) != nil {
-			return false, errors.New("coordinator mode history is invalid")
+		var eventMode sessionlog.CoordinatorMode
+		if decodeSessionData(event.Data, &eventMode) != nil {
+			return sessionlog.CoordinatorMode{}, errors.New("coordinator mode history is invalid")
 		}
-		enabled = mode.Enabled
+		mode = eventMode
 	}
-	return enabled, nil
+	return mode, nil
 }

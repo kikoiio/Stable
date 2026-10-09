@@ -3,6 +3,8 @@ package execution
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +22,7 @@ import (
 	"stable/internal/candidate"
 	"stable/internal/llm"
 	"stable/internal/permission"
+	"stable/internal/platform/proc"
 	"stable/internal/platform/sandbox"
 	"stable/internal/redact"
 	"stable/internal/sessionlog"
@@ -646,8 +649,28 @@ func (e *toolRunExecutor) executeCommand(ctx context.Context, args map[string]an
 		return "", err
 	}
 	if e.deps.WorkspaceLease != nil {
+		accounting, ok := e.deps.WorkspaceAccounting.(workspace.WriterProcessAccounting)
+		if !ok {
+			return "", errors.New("workspace command requires durable sandbox process identity tracking")
+		}
+		var tokenBytes [32]byte
+		if _, err := rand.Read(tokenBytes[:]); err != nil {
+			return "", fmt.Errorf("create workspace process token: %w", err)
+		}
+		identity := proc.TrackedProcess{
+			Token: hex.EncodeToString(tokenBytes[:]), WorkspaceID: e.deps.WorkspaceLease.WorkspaceID,
+			RunID: e.deps.WorkspaceLease.RunID, Generation: e.deps.WorkspaceLease.Generation,
+		}
 		profile.WorkspaceIsolation = true
 		profile.WorkspaceVolumeRoot = e.deps.WorkspaceLease.Paths.Root
+		profile.WorkspaceProcess = &identity
+		lease := *e.deps.WorkspaceLease
+		profile.OnProcessStart = func(process proc.TrackedProcess) error {
+			return accounting.RegisterWriterProcess(context.Background(), lease, process)
+		}
+		profile.OnProcessExit = func(process proc.TrackedProcess) error {
+			return accounting.ClearWriterProcess(context.Background(), lease, process)
+		}
 	}
 	result, err := e.deps.Sandbox.RunIsolated(ctx, profile, []string{"bash", "-c", command}, nil)
 	if err != nil {

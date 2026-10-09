@@ -59,6 +59,9 @@ func configureChild(*exec.Cmd) error { return nil }
 func cmdline(int) (string, error) {
 	return "", errors.New("proc: command line query is unsupported on Windows")
 }
+func processStartTime(int) (uint64, error)                   { return 0, ErrTrackedProcessUnavailable }
+func processGroupActive(int) (bool, error)                   { return false, ErrTrackedProcessUnavailable }
+func stopTrackedProcess(TrackedProcess, time.Duration) error { return ErrTrackedProcessUnavailable }
 func terminate(p *os.Process) error {
 	if p == nil {
 		return errors.New("proc: process is nil")

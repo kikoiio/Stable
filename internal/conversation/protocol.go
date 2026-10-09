@@ -74,6 +74,7 @@ type ClientMsg struct {
 	GoalID               string                  `json:"goal_id,omitempty"`
 	WorkItemID           string                  `json:"work_item_id,omitempty"`
 	CoordinatorOn        bool                    `json:"coordinator_on,omitempty"`
+	CoordinatorTeamID    string                  `json:"coordinator_team_id,omitempty"`
 	Background           bool                    `json:"background,omitempty"`
 	WaitMS               int                     `json:"wait_ms,omitempty"`
 	TimeoutMS            int                     `json:"timeout_ms,omitempty"`
@@ -126,24 +127,25 @@ type ServerMsg struct {
 	SkillReport *SkillReport `json:"skill_report,omitempty"`
 	// Skills and SkillActivated carry the skill_list response: the current
 	// catalog infos and the session's activated skill names.
-	Skills         []sessionlog.SkillInfo `json:"skills,omitempty"`
-	SkillActivated []string               `json:"skill_activated,omitempty"`
-	Teams          []teams.Team           `json:"teams,omitempty"`
-	Team           *teams.Team            `json:"team,omitempty"`
-	TeamTasks      []teams.Task           `json:"team_tasks,omitempty"`
-	TeamTask       *teams.Task            `json:"team_task,omitempty"`
-	TeamMessages   []teams.Message        `json:"team_messages,omitempty"`
-	TeamMessage    *teams.Message         `json:"team_message,omitempty"`
-	TeamRequests   []teams.Request        `json:"team_requests,omitempty"`
-	TeamRequest    *teams.Request         `json:"team_request,omitempty"`
-	Worktrees      []workspace.Snapshot   `json:"worktrees,omitempty"`
-	Worktree       *workspace.Snapshot    `json:"worktree,omitempty"`
-	TeamMember     *teams.Member          `json:"team_member,omitempty"`
-	CoordinatorOn  bool                   `json:"coordinator_on,omitempty"`
-	HookList       *HookListMsg           `json:"hook_list,omitempty"`
-	HookReport     *HookReportMsg         `json:"hook_report,omitempty"`
-	MCPList        *MCPListMsg            `json:"mcp_list,omitempty"`
-	MCPReport      *MCPReportMsg          `json:"mcp_report,omitempty"`
+	Skills            []sessionlog.SkillInfo `json:"skills,omitempty"`
+	SkillActivated    []string               `json:"skill_activated,omitempty"`
+	Teams             []teams.Team           `json:"teams,omitempty"`
+	Team              *teams.Team            `json:"team,omitempty"`
+	TeamTasks         []teams.Task           `json:"team_tasks,omitempty"`
+	TeamTask          *teams.Task            `json:"team_task,omitempty"`
+	TeamMessages      []teams.Message        `json:"team_messages,omitempty"`
+	TeamMessage       *teams.Message         `json:"team_message,omitempty"`
+	TeamRequests      []teams.Request        `json:"team_requests,omitempty"`
+	TeamRequest       *teams.Request         `json:"team_request,omitempty"`
+	Worktrees         []workspace.Snapshot   `json:"worktrees,omitempty"`
+	Worktree          *workspace.Snapshot    `json:"worktree,omitempty"`
+	TeamMember        *teams.Member          `json:"team_member,omitempty"`
+	CoordinatorOn     bool                   `json:"coordinator_on,omitempty"`
+	CoordinatorTeamID string                 `json:"coordinator_team_id,omitempty"`
+	HookList          *HookListMsg           `json:"hook_list,omitempty"`
+	HookReport        *HookReportMsg         `json:"hook_report,omitempty"`
+	MCPList           *MCPListMsg            `json:"mcp_list,omitempty"`
+	MCPReport         *MCPReportMsg          `json:"mcp_report,omitempty"`
 }
 
 // HookSummary is one loaded hook in the merged view.
@@ -224,6 +226,17 @@ func validateClient(m ClientMsg) error {
 		return fmt.Errorf("unknown op %q", m.Op)
 	}
 	switch m.Op {
+	case "team_coordinator":
+		if sessionlog.ValidateID(m.SessionID) != nil || m.RunID != "" || m.ProjectRoot != "" || m.GoalID != "" || m.WorkItemID != "" {
+			return fmt.Errorf("team coordinator mode requires only a session scope")
+		}
+		if m.CoordinatorOn {
+			if sessionlog.ValidateID(m.CoordinatorTeamID) != nil {
+				return fmt.Errorf("enabling team coordinator requires a valid team ID")
+			}
+		} else if m.CoordinatorTeamID != "" {
+			return fmt.Errorf("disabling team coordinator cannot select a team")
+		}
 	case "agent_list", "agent_reload", "agent_task_start", "agent_task_list", "agent_task_get", "agent_task_cancel":
 		if m.Isolation != "" && (m.Op != "agent_task_start" || (m.Isolation != "none" && m.Isolation != "worktree")) {
 			return fmt.Errorf("isolation is only supported for agent_task_start with none or worktree")
@@ -303,10 +316,6 @@ func validateClient(m ClientMsg) error {
 	case "run_cancel":
 		if m.SessionID == "" || m.RunID == "" {
 			return fmt.Errorf("op run_cancel requires session_id and run_id")
-		}
-	case "team_coordinator":
-		if sessionlog.ValidateID(m.SessionID) != nil || m.Run != nil || m.RunID != "" || m.ProjectRoot != "" {
-			return fmt.Errorf("team_coordinator requires only a valid session scope")
 		}
 	case "worktree_create", "worktree_list", "worktree_get", "worktree_enter", "worktree_exit", "worktree_keep", "worktree_export", "worktree_remove", "worktree_preview", "worktree_resolve", "worktree_discard_preview", "worktree_discard":
 		if sessionlog.ValidateID(m.SessionID) != nil || m.Run != nil || m.ProjectRoot != "" || m.RunID != "" && sessionlog.ValidateID(m.RunID) != nil {

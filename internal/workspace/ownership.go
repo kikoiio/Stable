@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"stable/internal/platform/proc"
 	"stable/internal/platform/secfile"
 )
 
@@ -26,11 +27,12 @@ type RootIdentity struct {
 }
 
 type Operation struct {
-	ID         string    `json:"id"`
-	Kind       string    `json:"kind"`
-	Phase      string    `json:"phase"` // intent, complete, blocked
-	Generation uint64    `json:"generation"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         string               `json:"id"`
+	Kind       string               `json:"kind"`
+	Phase      string               `json:"phase"` // intent, complete, blocked
+	Generation uint64               `json:"generation"`
+	UpdatedAt  time.Time            `json:"updated_at"`
+	Process    *proc.TrackedProcess `json:"process,omitempty"`
 }
 
 type Record struct {
@@ -268,6 +270,11 @@ func validateRecord(record Record) error {
 	}
 	if !ValidID(record.Operation.ID) || !ValidID(record.Operation.Kind) || record.Operation.Generation != record.Snapshot.Generation {
 		return ErrOwnership
+	}
+	if process := record.Operation.Process; process != nil {
+		if process.PID <= 0 || process.ProcessGroup != process.PID || process.StartTimeTicks == 0 || len(process.Token) != 64 || !ValidID(process.WorkspaceID) || process.WorkspaceID != record.Snapshot.ID || !ValidID(process.RunID) || process.RunID != record.Snapshot.WriterRunID || process.Generation != record.Snapshot.Generation || (record.Snapshot.State != StateWriting && record.Snapshot.State != StateStopping && record.Snapshot.State != StateBlocked && record.Snapshot.State != StateInterrupted) {
+			return ErrOwnership
+		}
 	}
 	switch record.Operation.Phase {
 	case "intent", "complete", "blocked":

@@ -21,6 +21,7 @@ import (
 	"stable/internal/redact"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
+	"stable/internal/teams"
 	"stable/internal/workspace"
 )
 
@@ -95,12 +96,25 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		return workspace.ErrUnavailable
 	}
 	var teamCoordinatorMode bool
+	var teamCoordinatorTeamID string
 	if request.Work.Kind == agent.WorkSession {
-		teamCoordinatorMode, err = teamCoordinatorModeEnabled(s.deps.ProjectRoot, msg.SessionID)
+		coordinator, modeErr := teamCoordinatorModeForSession(s.deps.ProjectRoot, msg.SessionID)
+		err = modeErr
 		if err != nil {
 			return err
 		}
-		request.TeamCoordinator = teamCoordinatorMode
+		teamCoordinatorMode, teamCoordinatorTeamID = coordinator.Enabled, coordinator.TeamID
+		if coordinator.Enabled {
+			if coordinator.TeamID == "" {
+				return errors.New("team coordinator mode has no bound team")
+			}
+			team, teamErr := s.getTeamForSession(ctx, currentProjectRoot(s.deps.ProjectRoot), msg.SessionID, coordinator.TeamID, &request.Work)
+			if teamErr != nil || team.Status != teams.TeamOpen {
+				return errors.New("team coordinator binding is no longer authorized")
+			}
+		}
+		request.TeamCoordinator = coordinator.Enabled
+		request.TeamCoordinatorTeamID = coordinator.TeamID
 	}
 	var leadLease *workspace.WriterLease
 	var leadManager *workspace.LifecycleService
@@ -204,17 +218,18 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	}
 	s.eventMu.Lock()
 	if request.Work.Kind == agent.WorkSession {
-		coordinatorMode, modeErr := teamCoordinatorModeEnabled(s.deps.ProjectRoot, msg.SessionID)
+		coordinatorMode, modeErr := teamCoordinatorModeForSession(s.deps.ProjectRoot, msg.SessionID)
 		if modeErr != nil {
 			s.eventMu.Unlock()
 			return modeErr
 		}
-		if coordinatorMode != teamCoordinatorMode {
+		if coordinatorMode.Enabled != teamCoordinatorMode || coordinatorMode.TeamID != teamCoordinatorTeamID {
 			s.eventMu.Unlock()
 			return errors.New("session run mode changed during admission")
 		}
-		if coordinatorMode {
+		if coordinatorMode.Enabled {
 			request.TeamCoordinator = true
+			request.TeamCoordinatorTeamID = coordinatorMode.TeamID
 			request.ToolSchemas = execution.TeamCoordinatorToolSchemas(s.deps.ToolSchemas)
 			if len(request.ToolSchemas) == 0 {
 				s.eventMu.Unlock()
@@ -243,7 +258,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 			systemPrompt = "你是 Stable 的受控工作区 agent。读、搜、列只能访问本次绑定工作区的只读基线；写、编辑和命令只能影响本次绑定工作区。正式工程保持不变，变更需稍后单独导出为候选并经用户审核。工具路径使用工作区相对路径。"
 		}
 		if request.TeamCoordinator {
-			systemPrompt += " 当前运行处于团队协调器模式：仅使用团队消息、请求和任务板工具协调成员；不得调用项目文件、命令、MCP、网络、委派、后台任务或 session todo 工具。"
+			systemPrompt += " 当前运行处于团队协调器模式，仅协调已绑定团队 " + request.TeamCoordinatorTeamID + "：仅使用团队消息、请求和任务板工具；不得操作其它团队，不得调用项目文件、命令、MCP、网络、委派、后台任务或 session todo 工具。"
 		}
 		prefix := []llm.Message{{Role: "system", Content: systemPrompt}}
 		// The skill inventory text is per-run context like the plan reminder:

@@ -26,7 +26,7 @@ type teamUIState struct {
 }
 
 func registerTeamCommands(host *commandHost, registry *commands.Registry) {
-	registry.Register(&commands.Command{Name: "teams", Description: "列出、创建或关闭会话团队", ArgPrompt: "list [limit [after-team-id]] | create 名称 | close ID | coordinator on|off", Kind: commands.KindLocal, Local: func(args string) {
+	registry.Register(&commands.Command{Name: "teams", Description: "列出、创建或关闭会话团队", ArgPrompt: "list [limit [after-team-id]] | create 名称 | close ID | coordinator <team-id>|off", Kind: commands.KindLocal, Local: func(args string) {
 		m := host.model
 		fields := strings.Fields(args)
 		if m.ActiveSession == "" {
@@ -66,16 +66,18 @@ func registerTeamCommands(host *commandHost, registry *commands.Registry) {
 			req = conversation.ClientMsg{Op: "team_create", SessionID: m.ActiveSession, RunID: m.ActiveRunID, TeamName: name}
 		case len(fields) == 2 && fields[0] == "close" && teams.ValidateID(fields[1]) == nil:
 			req = conversation.ClientMsg{Op: "team_close", SessionID: m.ActiveSession, TeamID: fields[1]}
-		case len(fields) == 2 && fields[0] == "coordinator" && (fields[1] == "on" || fields[1] == "off"):
-			req = conversation.ClientMsg{Op: "team_coordinator", SessionID: m.ActiveSession, CoordinatorOn: fields[1] == "on"}
+		case len(fields) == 2 && fields[0] == "coordinator" && fields[1] == "off":
+			req = conversation.ClientMsg{Op: "team_coordinator", SessionID: m.ActiveSession}
+		case len(fields) == 2 && fields[0] == "coordinator" && sessionlog.ValidateID(fields[1]) == nil:
+			req = conversation.ClientMsg{Op: "team_coordinator", SessionID: m.ActiveSession, CoordinatorOn: true, CoordinatorTeamID: fields[1]}
 		default:
-			m.Status = "用法：/teams list [条数，1-100 [上一页末尾团队ID]] | /teams create <名称> | /teams close <ID> | /teams coordinator on|off"
+			m.Status = "用法：/teams list [条数，1-100 [上一页末尾团队ID]] | /teams create <名称> | /teams close <ID> | /teams coordinator <团队ID>|off"
 			return
 		}
 		sendTeamRequest(host, req, "正在读取团队…")
 	}})
 
-	registry.Register(&commands.Command{Name: "team", Description: "查看团队、任务、消息和请求", ArgPrompt: "ID get|members [limit [after-member-id]]|tasks list [limit [after-task-id]]|messages|requests [list [limit [after-request-id]]]|send|respond|shutdown", Kind: commands.KindLocal, Local: func(args string) {
+	registry.Register(&commands.Command{Name: "team", Description: "查看团队、任务、消息和请求", ArgPrompt: "ID get|members|tasks list|get|create|update|messages|requests|send|respond|shutdown", Kind: commands.KindLocal, Local: func(args string) {
 		m := host.model
 		fields := strings.Fields(args)
 		if m.ActiveSession == "" {
@@ -211,7 +213,7 @@ func registerTeamCommands(host *commandHost, registry *commands.Registry) {
 }
 
 func teamUsage() string {
-	return "用法：/team <ID> get | members | spawn <成员名> <角色> <任务> [--plan] | resume <成员ID> [--accept-role-change] | stop <成员ID> | tasks [list [条数] | get ID | create 标题 | update ID REVISION status 状态] | messages [游标 [条数]] | requests | send <成员ID|all> <消息> | respond <请求ID> <REVISION> approve|reject|defer [反馈] | shutdown <成员ID>"
+	return "用法：/team <ID> get | members | spawn <成员名> <角色> <任务> [--plan] | resume <成员ID> [--accept-role-change] | stop <成员ID> | tasks [list [条数] | get ID | create <标题> [--assignee ID] [--blocked-by ID,...] [--description \"描述\"] | update ID REVISION [status 状态] [assignee ID|none] [blocked_by ID,...|none] [description \"描述\"] [title \"标题\"]] | messages [游标 [条数]] | requests | send <成员ID|all> <消息> | respond <请求ID> <REVISION> approve|reject|defer [反馈] | shutdown <成员ID>"
 }
 
 func teamMemberSpawnRequest(base conversation.ClientMsg, args, activeRunID string) (conversation.ClientMsg, error) {
@@ -245,7 +247,10 @@ func sendTeamRequest(host *commandHost, req conversation.ClientMsg, status strin
 }
 
 func teamTaskRequest(base conversation.ClientMsg, args string) (conversation.ClientMsg, string) {
-	fields := strings.Fields(args)
+	fields, validFields := splitTeamTaskFields(args)
+	if !validFields {
+		return conversation.ClientMsg{}, teamTaskUsage()
+	}
 	base.Op = "team_task_list"
 	if len(fields) == 0 {
 		return base, "正在读取团队任务…"
@@ -273,22 +278,230 @@ func teamTaskRequest(base conversation.ClientMsg, args string) (conversation.Cli
 	case len(fields) == 2 && fields[0] == "get" && teams.ValidateID(fields[1]) == nil:
 		base.Op, base.TaskID = "team_task_get", fields[1]
 	case len(fields) >= 2 && fields[0] == "create":
-		title := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(args), "create"))
-		if err := teams.ValidateText(title, teams.MaxTaskTitleBytes, true); err != nil {
-			return conversation.ClientMsg{}, "用法：/team <ID> tasks create <标题（最多 256 字节）>"
+		request, usage := parseTeamTaskCreate(base, args)
+		if request.Op == "" {
+			return conversation.ClientMsg{}, usage
 		}
-		base.Op, base.TaskTitle = "team_task_create", &title
-	case len(fields) == 5 && fields[0] == "update" && teams.ValidateID(fields[1]) == nil && fields[3] == "status":
-		revision, err := strconv.ParseUint(fields[2], 10, 64)
-		if err != nil || revision == 0 || (fields[4] != string(teams.TaskPending) && fields[4] != string(teams.TaskInProgress) && fields[4] != string(teams.TaskCompleted)) {
-			return conversation.ClientMsg{}, "用法：/team <ID> tasks update <任务ID> <revision> status pending|in_progress|completed"
+		return request, "正在创建团队任务…"
+	case len(fields) >= 4 && fields[0] == "update" && teams.ValidateID(fields[1]) == nil:
+		request, usage := parseTeamTaskUpdate(base, fields)
+		if request.Op == "" {
+			return conversation.ClientMsg{}, usage
 		}
-		status := fields[4]
-		base.Op, base.TaskID, base.ExpectedRevision, base.TaskStatus = "team_task_update", fields[1], revision, &status
+		return request, "正在更新团队任务…"
 	default:
-		return conversation.ClientMsg{}, "用法：/team <ID> tasks [list [条数，1-100 [上一页末尾任务ID]] | get <任务ID> | create <标题> | update <任务ID> <revision> status <状态>]"
+		return conversation.ClientMsg{}, teamTaskUsage()
 	}
 	return base, "正在读取团队任务…"
+}
+
+func teamTaskUsage() string {
+	return "用法：/team <ID> tasks [list [条数，1-100 [上一页末尾任务ID]] | get <任务ID> | create <标题> [--assignee <成员ID|none>] [--blocked-by <任务ID,...|none>] [--description \"描述\"] | update <任务ID> <revision> [status <状态>] [assignee <成员ID|none>] [blocked_by <任务ID,...|none>] [description \"描述\"] [title \"标题\"]"
+}
+
+func splitTeamTaskFields(input string) ([]string, bool) {
+	fields := make([]string, 0)
+	var field strings.Builder
+	quoted, escaped, started := false, false, false
+	flush := func() {
+		if started {
+			fields = append(fields, field.String())
+			field.Reset()
+			started = false
+		}
+	}
+	for _, r := range input {
+		if escaped {
+			field.WriteRune(r)
+			escaped, started = false, true
+			continue
+		}
+		if r == '\\' {
+			escaped, started = true, true
+			continue
+		}
+		if r == '"' {
+			quoted, started = !quoted, true
+			continue
+		}
+		if !quoted && (r == ' ' || r == '\t' || r == '\n' || r == '\r') {
+			flush()
+			continue
+		}
+		field.WriteRune(r)
+		started = true
+	}
+	if quoted || escaped {
+		return nil, false
+	}
+	flush()
+	return fields, true
+}
+
+func parseTeamTaskCreate(base conversation.ClientMsg, args string) (conversation.ClientMsg, string) {
+	usage := teamTaskUsage()
+	fields, ok := splitTeamTaskFields(args)
+	if !ok {
+		return conversation.ClientMsg{}, usage
+	}
+	if len(fields) < 2 || fields[0] != "create" {
+		return conversation.ClientMsg{}, usage
+	}
+	var title []string
+	for i := 1; i < len(fields); i++ {
+		if strings.HasPrefix(fields[i], "--") {
+			break
+		}
+		title = append(title, fields[i])
+	}
+	titleText := strings.Join(title, " ")
+	if err := teams.ValidateText(titleText, teams.MaxTaskTitleBytes, true); err != nil {
+		return conversation.ClientMsg{}, usage
+	}
+	base.Op, base.TaskTitle = "team_task_create", &titleText
+	seen := map[string]bool{}
+	for i := len(title) + 1; i < len(fields); {
+		if i+1 >= len(fields) {
+			return conversation.ClientMsg{}, usage
+		}
+		if seen[fields[i]] {
+			return conversation.ClientMsg{}, usage
+		}
+		seen[fields[i]] = true
+		value := fields[i+1]
+		switch fields[i] {
+		case "--assignee":
+			assignee, ok := parseTeamTaskAssignee(value)
+			if !ok {
+				return conversation.ClientMsg{}, usage
+			}
+			base.TaskAssignee = &assignee
+			i += 2
+		case "--blocked-by":
+			blockedBy, ok := parseTeamTaskDependencies(value)
+			if !ok {
+				return conversation.ClientMsg{}, usage
+			}
+			base.TaskBlockedBy = &blockedBy
+			i += 2
+		case "--description":
+			end := i + 1
+			for end < len(fields) && fields[end] != "--assignee" && fields[end] != "--blocked-by" {
+				end++
+			}
+			if end == i+1 {
+				return conversation.ClientMsg{}, usage
+			}
+			description := strings.Join(fields[i+1:end], " ")
+			if teams.ValidateText(description, teams.MaxTaskDescriptionBytes, false) != nil {
+				return conversation.ClientMsg{}, usage
+			}
+			base.TaskDescription = &description
+			i = end
+		default:
+			return conversation.ClientMsg{}, usage
+		}
+	}
+	return base, ""
+}
+
+func parseTeamTaskUpdate(base conversation.ClientMsg, fields []string) (conversation.ClientMsg, string) {
+	usage := teamTaskUsage()
+	if len(fields) < 5 {
+		return conversation.ClientMsg{}, usage
+	}
+	revision, err := strconv.ParseUint(fields[2], 10, 64)
+	if err != nil || revision == 0 {
+		return conversation.ClientMsg{}, usage
+	}
+	base.Op, base.TaskID, base.ExpectedRevision = "team_task_update", fields[1], revision
+	seen := map[string]bool{}
+	for i := 3; i < len(fields); {
+		key := fields[i]
+		if seen[key] {
+			return conversation.ClientMsg{}, usage
+		}
+		seen[key] = true
+		if key == "description" || key == "title" {
+			end := i + 1
+			for end < len(fields) && fields[end] != "status" && fields[end] != "assignee" && fields[end] != "blocked_by" && fields[end] != "description" && fields[end] != "title" {
+				end++
+			}
+			if end == i+1 {
+				return conversation.ClientMsg{}, usage
+			}
+			value := strings.Join(fields[i+1:end], " ")
+			limit := teams.MaxTaskDescriptionBytes
+			if key == "title" {
+				limit = teams.MaxTaskTitleBytes
+			}
+			if teams.ValidateText(value, limit, key == "title") != nil {
+				return conversation.ClientMsg{}, usage
+			}
+			if key == "title" {
+				base.TaskTitle = &value
+			} else {
+				base.TaskDescription = &value
+			}
+			i = end
+			continue
+		}
+		if i+1 >= len(fields) {
+			return conversation.ClientMsg{}, usage
+		}
+		value := fields[i+1]
+		switch key {
+		case "status":
+			if value != string(teams.TaskPending) && value != string(teams.TaskInProgress) && value != string(teams.TaskCompleted) {
+				return conversation.ClientMsg{}, usage
+			}
+			base.TaskStatus = &value
+		case "assignee":
+			assignee, ok := parseTeamTaskAssignee(value)
+			if !ok {
+				return conversation.ClientMsg{}, usage
+			}
+			base.TaskAssignee = &assignee
+		case "blocked_by":
+			blockedBy, ok := parseTeamTaskDependencies(value)
+			if !ok {
+				return conversation.ClientMsg{}, usage
+			}
+			base.TaskBlockedBy = &blockedBy
+		default:
+			return conversation.ClientMsg{}, usage
+		}
+		i += 2
+	}
+	if base.TaskStatus == nil && base.TaskAssignee == nil && base.TaskBlockedBy == nil && base.TaskDescription == nil && base.TaskTitle == nil {
+		return conversation.ClientMsg{}, usage
+	}
+	return base, ""
+}
+
+func parseTeamTaskAssignee(value string) (string, bool) {
+	if value == "none" || value == "-" {
+		return "", true
+	}
+	return value, teams.ValidateID(value) == nil
+}
+
+func parseTeamTaskDependencies(value string) ([]string, bool) {
+	if value == "none" || value == "-" {
+		return []string{}, true
+	}
+	parts := strings.Split(value, ",")
+	if len(parts) > teams.MaxTaskDependencies {
+		return nil, false
+	}
+	seen := make(map[string]bool, len(parts))
+	for _, id := range parts {
+		if teams.ValidateID(id) != nil || seen[id] {
+			return nil, false
+		}
+		seen[id] = true
+	}
+	return parts, len(parts) > 0
 }
 
 func teamMessagesRequest(base conversation.ClientMsg, args string) (conversation.ClientMsg, error) {
@@ -640,7 +853,7 @@ func teamResultStatus(op string, messages []conversation.ServerMsg) string {
 	switch op {
 	case "team_coordinator":
 		if len(messages) > 0 && messages[len(messages)-1].CoordinatorOn {
-			return "团队协调器模式已设为下一次运行启用。"
+			return fmt.Sprintf("团队协调器已绑定团队 %s，下一次运行启用。", messages[len(messages)-1].CoordinatorTeamID)
 		}
 		return "团队协调器模式已关闭。"
 	case "team_list":

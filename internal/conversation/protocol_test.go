@@ -18,7 +18,7 @@ func TestSessionProtocolRequiresProjectAndSessionIdentity(t *testing.T) {
 }
 
 func TestCoordinatorModeProtocolIsSessionScopedAndOneShot(t *testing.T) {
-	valid := ClientMsg{Op: "team_coordinator", SessionID: "0123456789abcdef0123456789abcdef", CoordinatorOn: true}
+	valid := ClientMsg{Op: "team_coordinator", SessionID: "0123456789abcdef0123456789abcdef", CoordinatorOn: true, CoordinatorTeamID: "1123456789abcdef0123456789abcdef"}
 	if err := validateClient(valid); err != nil {
 		t.Fatalf("valid coordinator mode request rejected: %v", err)
 	}
@@ -26,6 +26,8 @@ func TestCoordinatorModeProtocolIsSessionScopedAndOneShot(t *testing.T) {
 		{Op: "team_coordinator", SessionID: "bad"},
 		{Op: "team_coordinator", SessionID: valid.SessionID, RunID: "run"},
 		{Op: "team_coordinator", SessionID: valid.SessionID, ProjectRoot: "/tmp"},
+		{Op: "team_coordinator", SessionID: valid.SessionID, CoordinatorOn: true},
+		{Op: "team_coordinator", SessionID: valid.SessionID, CoordinatorTeamID: valid.CoordinatorTeamID},
 	} {
 		if err := validateClient(invalid); err == nil {
 			t.Fatalf("invalid coordinator mode request accepted: %+v", invalid)

@@ -14,6 +14,7 @@ import (
 
 	"stable/internal/agent"
 	"stable/internal/permission"
+	"stable/internal/platform/proc"
 )
 
 const ManifestPolicy = "project-v2"
@@ -157,6 +158,13 @@ type WriteReservation interface {
 
 type WriterAccounting interface {
 	ReserveWriterWrite(context.Context, WriterLease, int64) (WriteReservation, error)
+}
+
+// WriterProcessAccounting durably records a sandbox child before it is
+// allowed to continue. Recovery may signal only that exact kernel identity.
+type WriterProcessAccounting interface {
+	RegisterWriterProcess(context.Context, WriterLease, proc.TrackedProcess) error
+	ClearWriterProcess(context.Context, WriterLease, proc.TrackedProcess) error
 }
 
 type Service interface {

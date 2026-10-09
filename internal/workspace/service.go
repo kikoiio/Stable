@@ -16,6 +16,7 @@ import (
 
 	"stable/internal/agent"
 	"stable/internal/permission"
+	"stable/internal/platform/proc"
 )
 
 // IdleGuard is supplied by the conversation/runtime layer. Workspace binding
@@ -230,12 +231,36 @@ func (s *LifecycleService) recoverInterruptedOperations(ctx context.Context, rec
 		}
 		switch record.Snapshot.State {
 		case StateCreating, StateWriting, StateStopping, StateExporting, StateRemoving:
+		case StateBlocked:
+			if record.Operation.Process == nil {
+				continue
+			}
 		default:
 			continue
 		}
 		paths, err := s.layout.Paths(record.Snapshot.ID)
 		if err != nil {
 			return err
+		}
+		if record.Snapshot.State == StateWriting || record.Snapshot.State == StateStopping || record.Snapshot.State == StateBlocked && record.Operation.Process != nil {
+			if record.Operation.Process == nil {
+				if err := s.persistInterruptedWriter(ctx, record, "writer process identity is missing; workspace retained"); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := proc.StopTrackedProcess(*record.Operation.Process, 5*time.Second); err != nil {
+				if persistErr := s.persistInterruptedWriter(ctx, record, "writer process identity could not be safely stopped: "+err.Error()); persistErr != nil {
+					return persistErr
+				}
+				continue
+			}
+			if err := s.settleRecoveredWriter(ctx, record, paths); err != nil {
+				if persistErr := s.persistInterruptedWriter(ctx, record, "writer stopped but workspace settlement failed: "+err.Error()); persistErr != nil {
+					return persistErr
+				}
+			}
+			continue
 		}
 		_, statErr := os.Lstat(paths.Root)
 		if record.Snapshot.State == StateRemoving && errors.Is(statErr, os.ErrNotExist) {
@@ -274,6 +299,46 @@ func (s *LifecycleService) recoverInterruptedOperations(ctx context.Context, rec
 		if err := s.store.Save(ctx, record.Scope, interrupted, record.Snapshot.Generation); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (s *LifecycleService) persistInterruptedWriter(ctx context.Context, record Record, reason string) error {
+	updated := record
+	updated.Snapshot.State = StateInterrupted
+	updated.Snapshot.Error = boundedError(errors.New(reason))
+	updated.Snapshot.Cursor++
+	updated.Operation.Phase = "blocked"
+	updated.Operation.UpdatedAt = time.Now().UTC()
+	return s.store.Save(ctx, record.Scope, updated, record.Snapshot.Generation)
+}
+
+func (s *LifecycleService) settleRecoveredWriter(ctx context.Context, record Record, paths Paths) error {
+	used, err := DiskUsage(ctx, paths.Root, s.limits)
+	if err != nil {
+		return err
+	}
+	manifest, err := BuildManifest(ctx, paths.Checkout, s.limits)
+	if err != nil {
+		return err
+	}
+	baseline, err := BuildManifest(ctx, paths.Baseline, s.limits)
+	if err != nil {
+		return err
+	}
+	updated := record
+	updated.Snapshot.State = StateKept
+	updated.Snapshot.WriterRunID = ""
+	updated.Snapshot.WorkspaceDigest = manifest.Digest
+	updated.Snapshot.ChangedFiles = changedManifestEntries(baseline.Entries, manifest.Entries)
+	updated.Snapshot.Cursor++
+	updated.Snapshot.Error = "writer process stopped during service recovery; workspace retained"
+	updated.UsedBytes = used
+	updated.Operation.Phase = "complete"
+	updated.Operation.Process = nil
+	updated.Operation.UpdatedAt = time.Now().UTC()
+	if err := s.store.Save(ctx, record.Scope, updated, record.Snapshot.Generation); err != nil {
+		return err
 	}
 	return nil
 }
@@ -642,6 +707,18 @@ func (s *LifecycleService) ReleaseCompletedWriter(ctx context.Context, lease Wri
 	if record.Snapshot.State != StateWriting && record.Snapshot.State != StateBlocked || record.Snapshot.WriterRunID != lease.RunID || record.Snapshot.Generation != lease.Generation {
 		return Snapshot{}, ErrOwnership
 	}
+	if record.Operation.Process != nil {
+		blocked := record
+		blocked.Snapshot.State = StateBlocked
+		blocked.Snapshot.Error = "workspace sandbox process group exit was not confirmed; writer identity retained"
+		blocked.Snapshot.Cursor++
+		blocked.Operation.Phase = "blocked"
+		blocked.Operation.UpdatedAt = time.Now().UTC()
+		if err := s.store.Save(ctx, lease.Scope, blocked, record.Snapshot.Generation); err != nil {
+			return Snapshot{}, err
+		}
+		return Snapshot{}, ErrUnavailable
+	}
 	paths, err := s.layout.Paths(lease.WorkspaceID)
 	if err != nil {
 		return Snapshot{}, err
@@ -666,6 +743,7 @@ func (s *LifecycleService) ReleaseCompletedWriter(ctx context.Context, lease Wri
 	updated.Snapshot.Cursor++
 	updated.UsedBytes = used
 	updated.Operation.Phase = "complete"
+	updated.Operation.Process = nil
 	updated.Operation.UpdatedAt = time.Now().UTC()
 	if err := s.store.Save(ctx, lease.Scope, updated, record.Snapshot.Generation); err != nil {
 		return Snapshot{}, err
@@ -708,6 +786,61 @@ func (s *LifecycleService) ReserveWriterWrite(ctx context.Context, lease WriterL
 		return nil, err
 	}
 	return &writerWriteReservation{service: s, lease: lease, reserve: reservation}, nil
+}
+
+// RegisterWriterProcess makes the process identity durable before command
+// execution proceeds. A generation may have only one active command sandbox.
+func (s *LifecycleService) RegisterWriterProcess(ctx context.Context, lease WriterLease, process proc.TrackedProcess) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.writers[lease.WorkspaceID]
+	if s.closed || !ok || current.RunID != lease.RunID || current.Generation != lease.Generation || !current.Scope.SameOwner(lease.Scope) {
+		return ErrOwnership
+	}
+	record, err := s.store.Load(ctx, lease.Scope, lease.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	if record.Snapshot.State != StateWriting || record.Snapshot.WriterRunID != lease.RunID || record.Snapshot.Generation != lease.Generation || record.Operation.Process != nil {
+		return ErrOwnership
+	}
+	if process.PID <= 0 || process.ProcessGroup != process.PID || process.StartTimeTicks == 0 || len(process.Token) != 64 || process.WorkspaceID != lease.WorkspaceID || process.RunID != lease.RunID || process.Generation != lease.Generation {
+		return ErrOwnership
+	}
+	updated := record
+	processCopy := process
+	updated.Operation.Process = &processCopy
+	updated.Operation.UpdatedAt = time.Now().UTC()
+	return s.store.Save(ctx, lease.Scope, updated, record.Snapshot.Generation)
+}
+
+// ClearWriterProcess is called only after the sandbox manager has waited for
+// the command process group to exit. Exact identity matching fences stale
+// callbacks from a later command or workspace generation.
+func (s *LifecycleService) ClearWriterProcess(ctx context.Context, lease WriterLease, process proc.TrackedProcess) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.writers[lease.WorkspaceID]
+	if !ok || current.RunID != lease.RunID || current.Generation != lease.Generation || !current.Scope.SameOwner(lease.Scope) {
+		return ErrOwnership
+	}
+	record, err := s.store.Load(ctx, lease.Scope, lease.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	if record.Snapshot.WriterRunID != lease.RunID || record.Snapshot.Generation != lease.Generation || record.Operation.Process == nil || *record.Operation.Process != process {
+		return ErrOwnership
+	}
+	updated := record
+	updated.Operation.Process = nil
+	updated.Operation.UpdatedAt = time.Now().UTC()
+	return s.store.Save(ctx, lease.Scope, updated, record.Snapshot.Generation)
 }
 
 func (r *writerWriteReservation) Release() {
@@ -852,7 +985,8 @@ func (s *LifecycleService) StopWriter(ctx context.Context, scope Scope, id strin
 	stopping := record
 	stopping.Snapshot.State = StateStopping
 	stopping.Snapshot.Cursor++
-	stopping.Operation = Operation{ID: mustID(), Kind: "stop", Phase: "intent", Generation: stopping.Snapshot.Generation, UpdatedAt: time.Now().UTC()}
+	process := stopping.Operation.Process
+	stopping.Operation = Operation{ID: mustID(), Kind: "stop", Phase: "intent", Generation: stopping.Snapshot.Generation, UpdatedAt: time.Now().UTC(), Process: process}
 	if err := s.store.Save(ctx, scope, stopping, record.Snapshot.Generation); err != nil {
 		return Snapshot{}, err
 	}
@@ -884,6 +1018,7 @@ func (s *LifecycleService) StopWriter(ctx context.Context, scope Scope, id strin
 	stopping.Snapshot.WriterRunID = ""
 	stopping.Snapshot.Cursor++
 	stopping.Operation.Phase = "complete"
+	stopping.Operation.Process = nil
 	stopping.Operation.UpdatedAt = time.Now().UTC()
 	paths, err := s.layout.Paths(id)
 	if err != nil {

@@ -235,12 +235,20 @@ func TestTeamCoordinatorModeIsScopedToSessionAndCanBeDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	service, request := teamServiceFixture(t, root, "run-a")
+	team, err := service.CreateTeam(context.Background(), request, "coordinator-bound")
+	if err != nil {
+		t.Fatal(err)
+	}
 	other, err := sessionlog.Create(root, "other coordinator session")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, enabled := range []bool{true, false} {
-		response, err := service.handleTeamRequest(context.Background(), ClientMsg{Op: "team_coordinator", SessionID: request.Work.SessionID, CoordinatorOn: enabled})
+		msg := ClientMsg{Op: "team_coordinator", SessionID: request.Work.SessionID, CoordinatorOn: enabled}
+		if enabled {
+			msg.CoordinatorTeamID = team.ID
+		}
+		response, err := service.handleTeamRequest(context.Background(), msg)
 		if err != nil || response.CoordinatorOn != enabled {
 			t.Fatalf("coordinator mode response %+v, %v", response, err)
 		}
@@ -250,6 +258,10 @@ func TestTeamCoordinatorModeIsScopedToSessionAndCanBeDisabled(t *testing.T) {
 		}
 		if stored != enabled {
 			t.Fatalf("session coordinator mode=%v, want %v", stored, enabled)
+		}
+		mode, err := teamCoordinatorModeForSession(root, request.Work.SessionID)
+		if err != nil || mode.TeamID != map[bool]string{true: team.ID, false: ""}[enabled] || response.CoordinatorTeamID != mode.TeamID {
+			t.Fatalf("session coordinator binding=%+v response=%+v err=%v", mode, response, err)
 		}
 	}
 	otherMode, err := teamCoordinatorModeEnabled(root, other.ID)

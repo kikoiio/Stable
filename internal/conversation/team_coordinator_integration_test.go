@@ -58,6 +58,14 @@ func TestCoordinatorModeIsSnapshottedForEachRun(t *testing.T) {
 	service, fixtureRequest := teamServiceFixture(t, root, "fixture-parent")
 	sessionID := fixtureRequest.Work.SessionID
 	service.deps.ProviderName, service.deps.Model = "fixture", "model-v1"
+	team, err := service.CreateTeam(t.Context(), fixtureRequest, "selected-coordinator-team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherTeam, err := service.CreateTeam(t.Context(), fixtureRequest, "other-coordinator-team")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defaults := []llm.ToolSchema{
 		{Name: "read_file"}, {Name: "write_file"}, {Name: "command"},
 		{Name: "team_list"}, {Name: "team_send"}, {Name: "team_task_update"},
@@ -85,7 +93,7 @@ func TestCoordinatorModeIsSnapshottedForEachRun(t *testing.T) {
 		}
 	})
 
-	if _, err := service.handleTeamRequest(t.Context(), ClientMsg{Op: "team_coordinator", SessionID: sessionID, CoordinatorOn: true}); err != nil {
+	if _, err := service.handleTeamRequest(t.Context(), ClientMsg{Op: "team_coordinator", SessionID: sessionID, CoordinatorOn: true, CoordinatorTeamID: team.ID}); err != nil {
 		t.Fatal(err)
 	}
 	requestA := agent.ExecutionRequest{
@@ -96,7 +104,7 @@ func TestCoordinatorModeIsSnapshottedForEachRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	runA = receiveCoordinatorRun(t, runner.started)
-	if !runA.request.TeamCoordinator {
+	if !runA.request.TeamCoordinator || runA.request.TeamCoordinatorTeamID != team.ID {
 		t.Fatal("run A did not receive the trusted coordinator mode")
 	}
 	if got, want := schemaNames(runA.request.ToolSchemas), []string{"team_list", "team_send", "team_task_update"}; !reflect.DeepEqual(got, want) {
@@ -109,14 +117,17 @@ func TestCoordinatorModeIsSnapshottedForEachRun(t *testing.T) {
 		t.Fatalf("run A lacks coordinator prompt guidance: %+v", runA.request.Messages)
 	}
 
-	if _, err := service.handleTeamRequest(t.Context(), ClientMsg{Op: "team_coordinator", SessionID: sessionID, CoordinatorOn: false}); err != nil {
+	if _, err := service.handleTeamRequest(t.Context(), ClientMsg{Op: "team_coordinator", SessionID: sessionID, CoordinatorOn: true, CoordinatorTeamID: otherTeam.ID}); err != nil {
 		t.Fatal(err)
 	}
 	service.mu.Lock()
 	activeA := service.activeRequests[requestA.RunID]
 	service.mu.Unlock()
-	if !activeA.TeamCoordinator || !reflect.DeepEqual(schemaNames(activeA.ToolSchemas), []string{"team_list", "team_send", "team_task_update"}) {
-		t.Fatalf("changing the session mode mutated active run A: coordinator=%v schemas=%v", activeA.TeamCoordinator, schemaNames(activeA.ToolSchemas))
+	if !activeA.TeamCoordinator || activeA.TeamCoordinatorTeamID != team.ID || !reflect.DeepEqual(schemaNames(activeA.ToolSchemas), []string{"team_list", "team_send", "team_task_update"}) {
+		t.Fatalf("changing the session mode mutated active run A: coordinator=%v team=%s schemas=%v", activeA.TeamCoordinator, activeA.TeamCoordinatorTeamID, schemaNames(activeA.ToolSchemas))
+	}
+	if _, err := service.handleTeamRequest(t.Context(), ClientMsg{Op: "team_coordinator", SessionID: sessionID, CoordinatorOn: false}); err != nil {
+		t.Fatal(err)
 	}
 
 	requestB := agent.ExecutionRequest{
@@ -143,8 +154,8 @@ func TestCoordinatorModeIsSnapshottedForEachRun(t *testing.T) {
 	activeA = service.activeRequests[requestA.RunID]
 	activeB := service.activeRequests[requestB.RunID]
 	service.mu.Unlock()
-	if !activeA.TeamCoordinator || activeB.TeamCoordinator {
-		t.Fatalf("active run modes were not static: A=%v B=%v", activeA.TeamCoordinator, activeB.TeamCoordinator)
+	if !activeA.TeamCoordinator || activeA.TeamCoordinatorTeamID != team.ID || activeB.TeamCoordinator || activeB.TeamCoordinatorTeamID != "" {
+		t.Fatalf("active run modes were not static: A=%v/%s B=%v/%s", activeA.TeamCoordinator, activeA.TeamCoordinatorTeamID, activeB.TeamCoordinator, activeB.TeamCoordinatorTeamID)
 	}
 
 	runA.finish(agent.RunCompleted)

@@ -237,6 +237,7 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 	cases := []struct {
 		line, op, teamID, runID, text, recipient, decision string
 		memberID, memberName, agentName                    string
+		coordinatorTeamID                                  string
 		afterTaskID                                        string
 		afterTeamRequestID                                 string
 		afterTeamID                                        string
@@ -249,7 +250,8 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 		{line: "/teams list", op: "team_list"},
 		{line: "/teams list 100", op: "team_list", limit: 100},
 		{line: "/teams list 100 team-9", op: "team_list", limit: 100, afterTeamID: "team-9"},
-		{line: "/teams coordinator on", op: "team_coordinator", coordinatorOn: true},
+		{line: "/teams coordinator 11111111111111111111111111111111", op: "team_coordinator", coordinatorOn: true, coordinatorTeamID: "11111111111111111111111111111111"},
+		{line: "/teams coordinator off", op: "team_coordinator"},
 		{line: "/teams create squad", op: "team_create", runID: "parent"},
 		{line: "/teams close team-1", op: "team_close", teamID: "team-1"},
 		{line: "/team team-1 get", op: "team_get", teamID: "team-1"},
@@ -297,6 +299,9 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 			}
 			if request.CoordinatorOn != tc.coordinatorOn {
 				t.Fatalf("coordinator mode=%v, want %v", request.CoordinatorOn, tc.coordinatorOn)
+			}
+			if request.CoordinatorTeamID != tc.coordinatorTeamID {
+				t.Fatalf("coordinator team=%q, want %q", request.CoordinatorTeamID, tc.coordinatorTeamID)
 			}
 			if tc.op != "team_create" && tc.op != "team_member_spawn" && tc.op != "team_member_resume" && request.RunID != "" {
 				t.Fatalf("session operation borrowed run ID: %+v", request)
@@ -352,7 +357,7 @@ func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 }
 
 func TestTeamCommandsRejectInvalidUsageAndRequireRunForCreate(t *testing.T) {
-	for _, line := range []string{"/teams", "/teams list 0", "/teams list 101", "/teams list 100 bad/cursor", "/teams create", "/teams close", "/teams coordinator", "/teams coordinator yes", "/team", "/team team-1 requests foo", "/team team-1 requests list 0", "/team team-1 requests list 101", "/team team-1 requests list 10 bad/cursor", "/team team-1 tasks update task-1 0 status completed", "/team team-1 tasks list 101", "/team team-1 tasks list 10 bad/cursor", "/team team-1 messages 0 999", "/team team-1 send all", "/team team-1 respond req-1 0 approve", "/team team-1 shutdown", "/team team-1 spawn reader explore inspect", "/team team-1 resume member-1"} {
+	for _, line := range []string{"/teams", "/teams list 0", "/teams list 101", "/teams list 100 bad/cursor", "/teams create", "/teams close", "/teams coordinator", "/teams coordinator yes", "/teams coordinator on", "/team", "/team team-1 requests foo", "/team team-1 requests list 0", "/team team-1 requests list 101", "/team team-1 requests list 10 bad/cursor", "/team team-1 tasks update task-1 0 status completed", "/team team-1 tasks list 101", "/team team-1 tasks list 10 bad/cursor", "/team team-1 messages 0 999", "/team team-1 send all", "/team team-1 respond req-1 0 approve", "/team team-1 shutdown", "/team team-1 spawn reader explore inspect", "/team team-1 resume member-1"} {
 		m := New("", t.TempDir())
 		m.ActiveSession = "session"
 		m.Composer.SetValue(line)
@@ -367,5 +372,23 @@ func TestTeamCommandsRejectInvalidUsageAndRequireRunForCreate(t *testing.T) {
 	updated, command := m.submitComposer()
 	if command != nil || !strings.Contains(updated.(Model).Status, "活动的 lead run") {
 		t.Fatal("team create without active lead run was accepted")
+	}
+}
+
+func TestTeamTaskTextFieldsCanBeCombinedWithOtherUpdates(t *testing.T) {
+	teamID := "0123456789abcdef0123456789abcdef"
+	memberID := "1123456789abcdef0123456789abcdef"
+	base := conversation.ClientMsg{SessionID: "2123456789abcdef0123456789abcdef", TeamID: teamID}
+	created, _ := parseTeamTaskCreate(base, "create prerequisite --description prepare the shared result --assignee "+memberID)
+	if created.Op != "team_task_create" || created.TaskDescription == nil || *created.TaskDescription != "prepare the shared result" || created.TaskAssignee == nil || *created.TaskAssignee != memberID {
+		t.Fatalf("composed create fields were not parsed: %+v", created)
+	}
+	fields, valid := splitTeamTaskFields("update task-1 4 title \"new shared title\" assignee " + memberID + " status completed description \"review the result\"")
+	if !valid {
+		t.Fatal("quoted task text was rejected")
+	}
+	updated, _ := parseTeamTaskUpdate(base, fields)
+	if updated.Op != "team_task_update" || updated.TaskTitle == nil || *updated.TaskTitle != "new shared title" || updated.TaskAssignee == nil || *updated.TaskAssignee != memberID || updated.TaskStatus == nil || *updated.TaskStatus != string(teams.TaskCompleted) || updated.TaskDescription == nil || *updated.TaskDescription != "review the result" {
+		t.Fatalf("composed update fields were not parsed: %+v", updated)
 	}
 }
