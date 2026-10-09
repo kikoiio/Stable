@@ -166,6 +166,128 @@ func TestTeamPlanApprovalAutomaticallyStartsReadOnlyFollowUp(t *testing.T) {
 	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberIdle)
 }
 
+func TestPendingTeamPlanSurvivesRestartAndRequiresLeadApproval(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	service, request := teamServiceFixture(t, root, "plan-restart-parent")
+	request.PermissionBounds, _ = json.Marshal(permission.Authority{RunID: request.RunID, SessionID: request.Work.SessionID, AllowedRoot: root})
+	service.activeRequests = map[string]agent.ExecutionRequest{request.RunID: request}
+	role := agentcatalog.Definition{Name: "explore", Instruction: "Inspect the assigned area.", Model: "inherit", Tools: []string{"read_file"}, MaxTurns: 3}
+	runner := &gatedTeamChildRunner{inputs: make(chan agent.ChildRunInput, 2), release: make(chan struct{}, 2)}
+	newPool := func() *agent.PoolDelegator {
+		pool, err := agent.NewPoolDelegator(agent.DefaultDelegationLimits(), runner, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pool
+	}
+	pool := newPool()
+	service.deps.Agents = fixedTeamRoleCatalog{definition: role}
+	service.deps.Delegator = pool
+	service.deps.ForkProvider = forkSkillFixtureProvider{}
+	service.deps.ForkExecutorFactory = forkSkillFixtureExecutorFactory{}
+	service.deps.ForkToolSchemas = []llm.ToolSchema{{Name: "read_file"}}
+	service.deps.ToolSchemas = []llm.ToolSchema{{Name: "read_file"}, {Name: "write_file"}, {Name: "command"}, {Name: "team_member_spawn"}}
+	service.deps.ProviderName, service.deps.Model = "fixture", "model-v1"
+	service.lifeCtx = context.Background()
+	service.teamScheduler = newTeamScheduler(service)
+	t.Cleanup(func() {
+		select {
+		case runner.release <- struct{}{}:
+		default:
+		}
+		service.teamScheduler.close()
+		pool.Close()
+	})
+	team, err := service.CreateTeam(t.Context(), request, "plan-restart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := service.SpawnTeamMember(t.Context(), request, TeamMemberSpawnRequest{
+		TeamID: team.ID, Name: "reader", AgentName: role.Name, Instruction: "Inspect the area.", PlanRequired: true, OriginCallID: "call-spawn",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := receiveTeamChildInput(t, runner.inputs)
+	if first.TeamTurn == nil || first.TeamTurn.MemberID != member.ID {
+		t.Fatalf("unexpected initial team turn: %+v", first.TeamTurn)
+	}
+	childRequest := agent.ExecutionRequest{RunID: first.ChildRunID, Work: request.Work, TeamTurn: first.TeamTurn}
+	outcome, err := service.ExecuteTeamTool(t.Context(), childRequest, llm.ToolUse{
+		ID: "call-plan-restart", Name: "team_plan_submit",
+		Arguments: json.RawMessage(`{"team_id":"` + team.ID + `","body":"Inspect parser references and report findings."}`),
+	})
+	if err != nil || outcome.Status != agent.ToolSucceeded {
+		t.Fatalf("plan submission outcome=%+v err=%v", outcome, err)
+	}
+	projection, err := sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pending teams.Request
+	for _, item := range projection.Requests {
+		if item.MemberID == member.ID && item.Type == teams.RequestPlan && item.Status == teams.RequestPending {
+			pending = item
+		}
+	}
+	if pending.ID == "" {
+		t.Fatal("plan submission did not persist a pending request")
+	}
+	runner.release <- struct{}{}
+	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberAwaitingPlan)
+	service.teamScheduler.close()
+	pool.Close()
+
+	if err := recoverTeamRuns(root); err != nil {
+		t.Fatal(err)
+	}
+	projection, err = sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := projection.Members[member.ID].Status; got != teams.MemberInterrupted {
+		t.Fatalf("member after recovery=%s, want interrupted", got)
+	}
+	if got := projection.Requests[pending.ID].Status; got != teams.RequestPending {
+		t.Fatalf("pending plan after recovery=%s, want pending", got)
+	}
+	if runner.childCount() != 1 {
+		t.Fatalf("recovery replayed provider: child turns=%d", runner.childCount())
+	}
+
+	restarted := &Service{
+		deps: service.deps, lifeCtx: context.Background(), activeRuns: map[string]string{request.RunID: request.Work.SessionID},
+		activeRequests: map[string]agent.ExecutionRequest{request.RunID: request},
+	}
+	restartedPool := newPool()
+	restarted.deps.Delegator = restartedPool
+	restarted.teamScheduler = newTeamScheduler(restarted)
+	t.Cleanup(func() {
+		select {
+		case runner.release <- struct{}{}:
+		default:
+		}
+		restarted.teamScheduler.close()
+		restartedPool.Close()
+	})
+	if _, err := restarted.RespondTeamRequest(t.Context(), request, team.ID, pending.ID, pending.Revision, string(teams.RequestApproved), "Proceed with the read-only inspection."); err != nil {
+		t.Fatal(err)
+	}
+	followUp := receiveTeamChildInput(t, runner.inputs)
+	if followUp.TeamTurn == nil || followUp.TeamTurn.MemberID != member.ID || followUp.TeamTurn.TurnID == first.TeamTurn.TurnID {
+		t.Fatalf("approval did not create a fresh turn: %+v", followUp.TeamTurn)
+	}
+	assertTeamPlanToolSchemas(t, followUp.ToolSchemas)
+	if runner.childCount() != 2 {
+		t.Fatalf("approval started %d child turns, want exactly two total", runner.childCount())
+	}
+	runner.release <- struct{}{}
+	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberIdle)
+}
+
 func TestExpiredTeamRequestIsPersistedAndCannotBeAnswered(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "project")
 	if err := os.MkdirAll(root, 0700); err != nil {
