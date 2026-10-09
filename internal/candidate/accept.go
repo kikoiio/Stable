@@ -192,6 +192,11 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 	if err = store.FinalizeAcceptance(ctx, decision, receipt, goalID, actionID); err != nil {
 		return Receipt{}, fmt.Errorf("project exchanged; acceptance recovery required: %w", err)
 	}
+	if c.ManifestPolicy == ManifestPolicyProject && tx.ExpectedRootIdentity != "" {
+		if err = NewTransactionCoordinator().Cleanup(ctx, tx); err != nil {
+			return Receipt{}, fmt.Errorf("acceptance finalized; transaction cleanup required: %w", err)
+		}
+	}
 	return receipt, nil
 }
 

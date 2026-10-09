@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -381,6 +382,75 @@ func (s *Store) ReconcileAcceptances(ctx context.Context) error {
 		}
 		receipt := candidate.Receipt{ID: "receipt-" + item.Decision.ID, DecisionID: item.Decision.ID, CandidateID: item.Record.Candidate.ID, FormalDigest: newDigest, AcceptedAt: time.Now().UTC()}
 		if err = s.FinalizeAcceptance(ctx, item.Decision, receipt, item.Record.GoalID, item.Record.ActionID); err != nil {
+			return err
+		}
+	}
+	// Acceptance finalization commits the receipt and candidate state before
+	// deleting the spent root. A crash in that window leaves a finalized
+	// journal, so recover cleanup only when the receipt and current formal root
+	// prove that this exact acceptance committed.
+	type finalizedAcceptance struct {
+		decisionID, candidateID, formalRoot, candidateRoot  string
+		candidatePolicy, candidateDigest, candidateStatus   string
+		oldDigest, newDigest, transactionMode, rollbackPath string
+		journalPolicy, expectedIdentity, targetIdentity     string
+		receiptCandidateID, receiptDigest                   string
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT j.decision_id,j.candidate_id,c.formal_root,c.candidate_root,c.manifest_policy,c.candidate_digest,c.status,j.old_digest,j.new_digest,j.transaction_mode,j.rollback_path,j.manifest_policy,j.expected_root_identity,j.target_root_identity,r.candidate_id,r.formal_digest FROM acceptance_apply_journal j JOIN candidates c ON c.id=j.candidate_id LEFT JOIN acceptance_receipts r ON r.decision_id=j.decision_id WHERE j.phase='finalized' AND j.manifest_policy=? AND j.expected_root_identity<>'' ORDER BY j.updated_at,j.decision_id`, candidate.ManifestPolicyProject)
+	if err != nil {
+		return err
+	}
+	var finalized []finalizedAcceptance
+	for rows.Next() {
+		var item finalizedAcceptance
+		if err = rows.Scan(&item.decisionID, &item.candidateID, &item.formalRoot, &item.candidateRoot, &item.candidatePolicy, &item.candidateDigest, &item.candidateStatus, &item.oldDigest, &item.newDigest, &item.transactionMode, &item.rollbackPath, &item.journalPolicy, &item.expectedIdentity, &item.targetIdentity, &item.receiptCandidateID, &item.receiptDigest); err != nil {
+			rows.Close()
+			return err
+		}
+		finalized = append(finalized, item)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	for _, item := range finalized {
+		if item.candidatePolicy != candidate.ManifestPolicyProject || item.candidateStatus != "accepted" || item.candidateDigest != item.newDigest || item.receiptCandidateID != item.candidateID || item.receiptDigest != item.newDigest {
+			continue
+		}
+		tx := candidate.DirectoryTransaction{
+			ID: item.decisionID, Kind: candidate.TransactionAcceptance, ManifestPolicy: item.journalPolicy,
+			ExpectedRootIdentity: item.expectedIdentity, TargetRootIdentity: item.targetIdentity,
+			CurrentRoot: item.formalRoot, IncomingRoot: item.candidateRoot, RollbackRoot: item.rollbackPath,
+			ExpectedDigest: item.oldDigest, TargetDigest: item.newDigest, Mode: item.transactionMode,
+		}
+		coordinator := candidate.NewTransactionCoordinator()
+		incomingErr := error(nil)
+		rollbackErr := error(nil)
+		if _, incomingErr = os.Lstat(tx.IncomingRoot); incomingErr != nil && !os.IsNotExist(incomingErr) {
+			return incomingErr
+		}
+		if _, rollbackErr = os.Lstat(tx.RollbackRoot); rollbackErr != nil && !os.IsNotExist(rollbackErr) {
+			return rollbackErr
+		}
+		if os.IsNotExist(incomingErr) && os.IsNotExist(rollbackErr) {
+			identity, identityErr := candidate.CaptureRootIdentity(tx.CurrentRoot)
+			_, digest, digestErr := candidate.BuildManifestForPolicy(tx.CurrentRoot, tx.ManifestPolicy)
+			if identityErr != nil || digestErr != nil || identity != tx.TargetRootIdentity || digest != tx.TargetDigest {
+				return errors.New("finalized acceptance roots no longer match receipt")
+			}
+			continue
+		}
+		state, inspectErr := coordinator.Inspect(ctx, tx, candidate.PhaseSwapped)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		if state != candidate.RecoveryNew {
+			return errors.New("finalized acceptance roots no longer match receipt")
+		}
+		if err = coordinator.Cleanup(ctx, tx); err != nil {
 			return err
 		}
 	}
