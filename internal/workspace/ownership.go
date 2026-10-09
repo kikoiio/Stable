@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -34,6 +35,7 @@ type Operation struct {
 	Phase      string               `json:"phase"` // intent, complete, blocked
 	Generation uint64               `json:"generation"`
 	UpdatedAt  time.Time            `json:"updated_at"`
+	Quarantine string               `json:"quarantine,omitempty"`
 	Process    *proc.TrackedProcess `json:"process,omitempty"`
 }
 
@@ -282,6 +284,9 @@ func validateRecord(record Record) error {
 		return ErrOwnership
 	}
 	if !ValidID(record.Operation.ID) || !ValidID(record.Operation.Kind) || record.Operation.Generation != record.Snapshot.Generation {
+		return ErrOwnership
+	}
+	if record.Operation.Quarantine != "" && (record.Operation.Kind != "remove" || !strings.HasPrefix(record.Operation.Quarantine, ".remove-") || !ValidID(strings.TrimPrefix(record.Operation.Quarantine, ".remove-"))) {
 		return ErrOwnership
 	}
 	if record.Snapshot.Error == unknownCreatingRootIdentityReason && !hasUnknownCreatingRootIdentity(record) {

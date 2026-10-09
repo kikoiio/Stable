@@ -1787,52 +1787,113 @@ func (s *Service) watchTeamMember(root, sessionID, teamID, memberID, turnID stri
 	// committing the child terminal/member state; the single expiry timer retries
 	// the request and reconciles an awaiting-plan member after the write recovers.
 	_ = s.expireDueTeamRequestsForMember(root, sessionID, teamID, memberID)
-	projection, err = sessionlog.ReplayTeams(root, sessionID, teamID)
-	if err != nil {
-		return
-	}
-	member = projection.Members[memberID]
-	planExpired := false
-	pendingPlan := false
-	for _, request := range projection.Requests {
-		if request.TeamID != teamID || request.MemberID != memberID || request.Type != teams.RequestPlan {
-			continue
+	for {
+		projection, err = sessionlog.ReplayTeams(root, sessionID, teamID)
+		if err != nil {
+			return
 		}
-		switch request.Status {
-		case teams.RequestExpired:
-			planExpired = true
-		case teams.RequestPending, teams.RequestDeferred:
-			pendingPlan = true
+		currentTurn, ok := projection.Turns[turnID]
+		if !ok || !turnTerminalTeamStatus(currentTurn.Status) {
+			return
+		}
+		member, ok = projection.Members[memberID]
+		if !ok {
+			return
+		}
+		planExpired := false
+		pendingPlan := false
+		for _, request := range projection.Requests {
+			if request.TeamID != teamID || request.MemberID != memberID || request.Type != teams.RequestPlan {
+				continue
+			}
+			switch request.Status {
+			case teams.RequestExpired:
+				planExpired = true
+			case teams.RequestPending, teams.RequestDeferred:
+				pendingPlan = true
+			}
+		}
+		if member.Status == teams.MemberStopping {
+			member.Status = teams.MemberStopped
+		} else {
+			switch status {
+			case "succeeded":
+				member.Status = teams.MemberIdle
+			case "failed", "canceled", "interrupted":
+				member.Status = teams.MemberInterrupted
+			default:
+				member.Status = teams.MemberInterrupted
+			}
+		}
+		if member.Status != teams.MemberStopped && member.PlanRequired && !member.PlanApproved {
+			if member.Status == teams.MemberIdle && planExpired && !pendingPlan {
+				member.Status = teams.MemberIdle
+			} else if member.Status == teams.MemberIdle {
+				member.Status = teams.MemberAwaitingPlan
+			}
+		}
+		if member.Budget.CanAccept() != nil && member.Status != teams.MemberStopped {
+			member.Status = teams.MemberBudgetExhausted
+		}
+		member.RunID, member.TurnID = turn.RunID, turn.ID
+		// An append can report an error after its event reached disk. Detect that
+		// case before retrying so an ambiguous write cannot duplicate the fact.
+		if projection.Members[memberID].Status == member.Status && projection.Members[memberID].RunID == member.RunID && projection.Members[memberID].TurnID == member.TurnID {
+			break
+		}
+		member.Revision = projection.Members[memberID].Revision + 1
+		team := projection.Teams[teamID]
+		if appendErr := s.appendTeamMemberState(root, team, turn.OriginRunID, "service", member); appendErr == nil {
+			break
+		}
+		if !s.waitForTeamWatcherRetry() {
+			return
 		}
 	}
-	if member.Status == teams.MemberStopping {
-		member.Status = teams.MemberStopped
-	} else {
-		switch status {
-		case "succeeded":
-			member.Status = teams.MemberIdle
-		case "failed", "canceled", "interrupted":
-			member.Status = teams.MemberInterrupted
+	for {
+		projection, err = sessionlog.ReplayTeams(root, sessionID, teamID)
+		if err != nil || projection.Teams[teamID].Status != teams.TeamClosing {
+			return
+		}
+		if _, err = s.closeTeamIfIdleLocked(root, sessionID, teamID); err == nil {
+			return
+		}
+		if !s.waitForTeamWatcherRetry() {
+			return
+		}
+	}
+}
+
+// waitForTeamWatcherRetry yields the event lock between short persistence
+// retries. The existing watcher owns the work and service/scheduler shutdown
+// releases it; retries therefore cannot create an unbounded goroutine backlog.
+// The caller holds eventMu and it is held again when this helper returns.
+func (s *Service) waitForTeamWatcherRetry() bool {
+	s.eventMu.Unlock()
+	timer := time.NewTimer(100 * time.Millisecond)
+	var serviceDone <-chan struct{}
+	if s.lifeCtx != nil {
+		serviceDone = s.lifeCtx.Done()
+	}
+	var schedulerDone <-chan struct{}
+	if s.teamScheduler != nil {
+		schedulerDone = s.teamScheduler.done
+	}
+	select {
+	case <-timer.C:
+		s.eventMu.Lock()
+		return true
+	case <-serviceDone:
+	case <-schedulerDone:
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
 		default:
-			member.Status = teams.MemberInterrupted
 		}
 	}
-	if member.Status != teams.MemberStopped && member.PlanRequired && !member.PlanApproved {
-		if member.Status == teams.MemberIdle && planExpired && !pendingPlan {
-			member.Status = teams.MemberIdle
-		} else if member.Status == teams.MemberIdle {
-			member.Status = teams.MemberAwaitingPlan
-		}
-	}
-	if member.Budget.CanAccept() != nil && member.Status != teams.MemberStopped {
-		member.Status = teams.MemberBudgetExhausted
-	}
-	member.Revision++
-	_ = appendTeamFactLocked(root, sessionID, teamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: turn.OriginRunID, Member: &member})
-	projection, err = sessionlog.ReplayTeams(root, sessionID, teamID)
-	if err == nil && projection.Teams[teamID].Status == teams.TeamClosing {
-		_, _ = s.closeTeamIfIdleLocked(root, sessionID, teamID)
-	}
+	s.eventMu.Lock()
+	return false
 }
 
 func (s *Service) persistTeamChildStart(root string, scope teams.Scope, memberID, turnID, originRunID, originCallID string, child agent.ChildRunInput, runSeq *uint64) error {

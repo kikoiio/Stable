@@ -371,6 +371,38 @@ func (s *LifecycleService) recoverInterruptedOperations(ctx context.Context, rec
 			continue
 		}
 		if record.Snapshot.State == StateRemoving && errors.Is(statErr, os.ErrNotExist) {
+			if record.Operation.Quarantine != "" {
+				_, quarantineErr := os.Lstat(filepath.Join(s.layout.projectRoot(), record.Operation.Quarantine))
+				if quarantineErr == nil {
+					quarantineRoot, openErr := s.openRemovalQuarantine(record, record.Operation.Quarantine)
+					if openErr != nil {
+						return openErr
+					}
+					if removeErr := removePinnedRootContents(quarantineRoot); removeErr != nil {
+						_ = quarantineRoot.Close()
+						return removeErr
+					}
+					if closeErr := quarantineRoot.Close(); closeErr != nil {
+						return closeErr
+					}
+					if err := s.layout.projectIdentity.Revalidate(); err != nil {
+						return err
+					}
+					project, _, err := openVerifiedRoot(s.layout.projectRoot())
+					if err != nil {
+						return err
+					}
+					if err := project.Remove(record.Operation.Quarantine); err != nil {
+						_ = project.Close()
+						return err
+					}
+					if err := project.Close(); err != nil {
+						return err
+					}
+				} else if !errors.Is(quarantineErr, os.ErrNotExist) {
+					return quarantineErr
+				}
+			}
 			// Resolve the session binding before finalizing the removal. If the
 			// binding cannot be read or removed, leave the journal in removing so
 			// a later startup can retry this identity-checked cleanup.
@@ -388,6 +420,7 @@ func (s *LifecycleService) recoverInterruptedOperations(ctx context.Context, rec
 			removed.Snapshot.WriterRunID = ""
 			removed.Snapshot.Cursor++
 			removed.Operation.Phase = "complete"
+			removed.Operation.Quarantine = ""
 			removed.Operation.UpdatedAt = time.Now().UTC()
 			if err := s.store.Save(ctx, record.Scope, removed, record.Snapshot.Generation); err != nil {
 				return err
@@ -1445,13 +1478,32 @@ func (s *LifecycleService) RemoveClean(ctx context.Context, scope Scope, id stri
 }
 
 func (s *LifecycleService) removeRecordLocked(ctx context.Context, scope Scope, record Record) (Snapshot, error) {
+	return s.removeRecordLockedWithHooks(ctx, scope, record, removeHooks{})
+}
+
+type removeHooks struct {
+	afterIntent     func() error
+	afterQuarantine func(string) error
+}
+
+func (s *LifecycleService) removeRecordLockedWithHooks(ctx context.Context, scope Scope, record Record, hooks removeHooks) (Snapshot, error) {
 	id := record.Snapshot.ID
+	quarantineID, err := NewID()
+	if err != nil {
+		return Snapshot{}, err
+	}
+	quarantineName := ".remove-" + quarantineID
 	removing := record
 	removing.Snapshot.State = StateRemoving
 	removing.Snapshot.Cursor++
-	removing.Operation = Operation{ID: mustID(), Kind: "remove", Phase: "intent", Generation: removing.Snapshot.Generation, UpdatedAt: time.Now().UTC()}
+	removing.Operation = Operation{ID: mustID(), Kind: "remove", Phase: "intent", Generation: removing.Snapshot.Generation, UpdatedAt: time.Now().UTC(), Quarantine: quarantineName}
 	if err := s.store.Save(ctx, scope, removing, record.Snapshot.Generation); err != nil {
 		return Snapshot{}, err
+	}
+	if hooks.afterIntent != nil {
+		if err := hooks.afterIntent(); err != nil {
+			return Snapshot{}, err
+		}
 	}
 	if err := s.layout.projectIdentity.Revalidate(); err != nil {
 		return Snapshot{}, err
@@ -1465,7 +1517,38 @@ func (s *LifecycleService) removeRecordLocked(ctx context.Context, scope Scope, 
 		project.Close()
 		return Snapshot{}, ErrOwnership
 	}
-	if err := project.RemoveAll(id); err != nil {
+	if _, err := project.Lstat(quarantineName); !errors.Is(err, os.ErrNotExist) {
+		project.Close()
+		if err != nil {
+			return Snapshot{}, err
+		}
+		return Snapshot{}, ErrOwnership
+	}
+	if err := project.Rename(id, quarantineName); err != nil {
+		project.Close()
+		return Snapshot{}, err
+	}
+	if hooks.afterQuarantine != nil {
+		if err := hooks.afterQuarantine(quarantineName); err != nil {
+			project.Close()
+			return Snapshot{}, err
+		}
+	}
+	quarantineRoot, err := s.openRemovalQuarantine(removing, quarantineName)
+	if err != nil {
+		project.Close()
+		return Snapshot{}, err
+	}
+	if err := removePinnedRootContents(quarantineRoot); err != nil {
+		_ = quarantineRoot.Close()
+		project.Close()
+		return Snapshot{}, err
+	}
+	if err := quarantineRoot.Close(); err != nil {
+		project.Close()
+		return Snapshot{}, err
+	}
+	if err := project.Remove(quarantineName); err != nil {
 		project.Close()
 		return Snapshot{}, err
 	}
@@ -1484,12 +1567,98 @@ func (s *LifecycleService) removeRecordLocked(ctx context.Context, scope Scope, 
 	removing.Snapshot.State = StateRemoved
 	removing.Snapshot.Cursor++
 	removing.Operation.Phase = "complete"
+	removing.Operation.Quarantine = ""
 	removing.Operation.UpdatedAt = time.Now().UTC()
 	if err := s.store.Save(ctx, scope, removing, removing.Snapshot.Generation); err != nil {
 		return Snapshot{}, err
 	}
 	_ = s.budget.Remove(id)
 	return removing.Snapshot, nil
+}
+
+func (s *LifecycleService) openRemovalQuarantine(record Record, name string) (*os.Root, error) {
+	if !strings.HasPrefix(name, ".remove-") || !ValidID(strings.TrimPrefix(name, ".remove-")) {
+		return nil, ErrOwnership
+	}
+	if err := s.layout.projectIdentity.Revalidate(); err != nil {
+		return nil, err
+	}
+	project, projectInfo, err := openVerifiedRoot(s.layout.projectRoot())
+	if err != nil {
+		return nil, err
+	}
+	defer project.Close()
+	currentProject, err := os.Lstat(s.layout.projectRoot())
+	if err != nil || !os.SameFile(projectInfo, currentProject) {
+		return nil, ErrOwnership
+	}
+	root, err := project.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	identity, identityErr := rootIdentity(info)
+	if identityErr != nil || !info.IsDir() || identity != record.RootIdentity {
+		_ = root.Close()
+		return nil, ErrOwnership
+	}
+	return root, nil
+}
+
+// removePinnedRootContents deletes entries through a root handle pinned to the
+// verified workspace inode. The caller removes the now-empty directory from
+// its parent with a non-recursive Remove, so a path replacement cannot be
+// recursively deleted after identity verification.
+func removePinnedRootContents(root *os.Root) error {
+	dir, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	entries, err := dir.ReadDir(-1)
+	closeErr := dir.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		info, err := root.Lstat(name)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			child, err := root.OpenRoot(name)
+			if err != nil {
+				return err
+			}
+			opened, err := child.Stat(".")
+			if err != nil || !opened.IsDir() || !os.SameFile(info, opened) {
+				_ = child.Close()
+				return ErrOwnership
+			}
+			if err := removePinnedRootContents(child); err != nil {
+				_ = child.Close()
+				return err
+			}
+			if err := child.Close(); err != nil {
+				return err
+			}
+			if err := root.Remove(name); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := root.Remove(name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *LifecycleService) Close(ctx context.Context) error {
