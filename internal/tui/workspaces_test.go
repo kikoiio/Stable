@@ -49,6 +49,54 @@ func TestWorktreePreviewCommandRejectsInvalidUsage(t *testing.T) {
 	}
 }
 
+func TestWorktreeCommandsDispatchSessionScopedLifecycleRequests(t *testing.T) {
+	const sessionID = "0123456789abcdef0123456789abcdef"
+	const workspaceID = "1123456789abcdef0123456789abcdef"
+	tests := []struct {
+		line  string
+		op    string
+		id    string
+		runID string
+		text  string
+	}{
+		{line: "/worktrees", op: "worktree_list"},
+		{line: "/worktrees get " + workspaceID, op: "worktree_get", id: workspaceID},
+		{line: "/worktrees enter " + workspaceID, op: "worktree_enter", id: workspaceID},
+		{line: "/worktrees exit", op: "worktree_exit"},
+		{line: "/worktrees keep " + workspaceID, op: "worktree_keep", id: workspaceID},
+		{line: "/worktrees export " + workspaceID, op: "worktree_export", id: workspaceID},
+		{line: "/worktrees resolve " + workspaceID, op: "worktree_preview", id: workspaceID},
+		{line: "/worktrees remove " + workspaceID, op: "worktree_remove", id: workspaceID},
+		{line: "/worktrees discard " + workspaceID, op: "worktree_discard_preview", id: workspaceID},
+		{line: "/worktrees create review space", op: "worktree_create", runID: "parent-run", text: "review space"},
+	}
+	for _, test := range tests {
+		t.Run(test.op, func(t *testing.T) {
+			m := New("", t.TempDir())
+			m.ActiveSession = sessionID
+			m.Pending, m.ActiveRunID, m.LastCursor = true, "parent-run", 17
+			parentStream := &conversation.StreamClient{}
+			m.stream = parentStream
+			socket, requests := agentSocketFixture(t, conversation.ServerMsg{Type: "worktree"})
+			m.Socket = socket
+			m.Composer.SetValue(test.line)
+
+			updated, command := m.submitComposer()
+			got := updated.(Model)
+			if command == nil || !got.Pending || got.ActiveRunID != "parent-run" || got.LastCursor != 17 || got.stream != parentStream {
+				t.Fatalf("command changed parent run state: pending=%v run=%q cursor=%d", got.Pending, got.ActiveRunID, got.LastCursor)
+			}
+			if result := command().(resultMsg); result.err != nil {
+				t.Fatal(result.err)
+			}
+			request := agentFixtureRequest(t, requests)
+			if request.Op != test.op || request.SessionID != sessionID || request.WorkKind != "session" || request.ID != test.id || request.RunID != test.runID || request.Text != test.text || request.Run != nil {
+				t.Fatalf("request=%+v want op=%s id=%s run=%s text=%q", request, test.op, test.id, test.runID, test.text)
+			}
+		})
+	}
+}
+
 func TestWorktreePreviewRendersConflictPathsAndInputDigests(t *testing.T) {
 	text := formatWorktreeMessages([]conversation.ServerMsg{{
 		Type: "worktree",
