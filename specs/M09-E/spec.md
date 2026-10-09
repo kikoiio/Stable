@@ -55,7 +55,7 @@
 
 | 源文件/行为 | 源端可观察实现或缺口 | E 提案与验收归属 |
 |---|---|---|
-| `teams.go`、`spawn.go`、`inprocess.go`、`runner.go` | 真正多轮 Conv、成员 goroutine、idle mailbox polling、进度；in-process 与终端后端 | 适配逻辑多轮成员；有界摘要+消息延续，不保存完整 Conv/transcript；空闲调度不占 worker |
+| `teams.go`、`spawn.go`、`inprocess.go`、`runner.go` | 真正多轮 Conv、成员 goroutine、idle mailbox polling、实时进度；in-process 与终端后端 | 适配逻辑多轮成员；有界摘要+消息延续，不保存完整 Conv/transcript；空闲调度不占 worker。源端实时 tool/activity counters 本轮未迁移；Stable 只展示 queued/running/idle/interrupted 与终态摘要，不能把 coarse 状态宣称为实时进度等价。若产品需要实时活动计数，需另立明确隐私/事件预算需求。 |
 | `filemailbox.go`、`tools.go` | JSON inbox、p2p/broadcast、mark-all-read；全局名称路由和文件 fallback | 适配为 session 事件、队内身份、精确批次交接；禁止 unknown recipient fallback，防丢失并发新邮件 |
 | `sharedtask.go`、`tasktools.go` | 任务CRUD、归属、Blocks/BlockedBy；源码追加依赖和保存，不实现完整环检验/原子跨进程认领 | 适配并补明确依赖合法性、阻塞门和expected_revision；不宣称源端已有这些保障 |
 | `protocol.go`、`runner.go` | 计划/关闭 request ID 与响应；源码计划通过会改变checker，空闲关闭支持文本前缀 | 保留协议行为，审批不扩大只读权限；typed facts，关闭拒绝/超时/强停均可观察；写入归F |

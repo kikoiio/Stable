@@ -154,6 +154,9 @@ func applyWorktreeMessages(m *Model, op string, messages []conversation.ServerMs
 		}
 	}
 	text := formatWorktreeMessages(messages)
+	if op == "worktree_create" && text != "" {
+		text += "\n源项目的本地 settings、hooks 未复制或执行，.worktreeinclude 规则未应用；如需，请先检查，再在隔离工作树内手动配置。"
+	}
 	if text == "" {
 		m.Status = "工作树请求已完成。"
 		return
@@ -164,7 +167,7 @@ func applyWorktreeMessages(m *Model, op string, messages []conversation.ServerMs
 	case "worktree_list":
 		m.Status = fmt.Sprintf("工作树列表已更新（%d）。", len(m.Worktrees))
 	case "worktree_create":
-		m.Status = "隔离工作树已创建。"
+		m.Status = "工作树已创建；源 settings/hooks 未复制或执行，.worktreeinclude 未应用。需要时请先检查，再在隔离工作树内手动配置。"
 	case "worktree_remove":
 		m.Status = "干净工作树已删除。"
 	case "worktree_discard":
