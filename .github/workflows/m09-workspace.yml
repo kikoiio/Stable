@@ -49,7 +49,7 @@ jobs:
           sudo mount -t ext4 -o nodev,nosuid "$fixture_loop" "$fixture_dir/mount"
           sudo env STABLE_M09_VOLUME="$fixture_dir/mount" \
             "$RUNNER_TEMP/m09-binaries/sandbox.test" \
-            -test.run '^TestWorkspaceRealVolumeQuotaAndMetadataAttacks$' -test.v -test.timeout 2m
+            -test.run '^(TestWorkspaceRealVolumeQuotaAndMetadataAttacks|TestWorkspaceVolumeRejectsUnsafeEntries)$' -test.v -test.timeout 2m
           sudo env STABLE_M09_VOLUME="$fixture_dir/mount" \
             STABLE_M09_WRITER_HELPER="$RUNNER_TEMP/m09-binaries/agentworker" \
             "$RUNNER_TEMP/m09-binaries/conversation.test" \

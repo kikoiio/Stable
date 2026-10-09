@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -100,6 +101,84 @@ func TestWorkspaceRealVolumeQuotaAndMetadataAttacks(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(p.RunRoot, "quota.bin")); !os.IsNotExist(err) {
 		t.Fatalf("quota fixture leaked file: %v", err)
+	}
+}
+
+func TestWorkspaceVolumeRejectsUnsafeEntries(t *testing.T) {
+	volume := os.Getenv("STABLE_M09_VOLUME")
+	if volume == "" {
+		t.Skip("requires disposable cloud disk volume")
+	}
+	if err := BoundedWorkspaceVolume(volume); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(volume, "unsafe-volume-fixture-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+
+	regular := filepath.Join(root, "regular")
+	if err := os.WriteFile(regular, []byte("private"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	assertAccepted := func(stage string) {
+		t.Helper()
+		if err := BoundedWorkspaceVolume(root); err != nil {
+			t.Fatalf("clean bounded volume rejected after %s: %v", stage, err)
+		}
+	}
+	assertRejected := func(stage string) {
+		t.Helper()
+		if err := BoundedWorkspaceVolume(root); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("unsafe volume entry %s was accepted: %v", stage, err)
+		}
+	}
+
+	link := filepath.Join(root, "symlink")
+	if err := os.Symlink(regular, link); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected("symlink")
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	assertAccepted("symlink removal")
+
+	hardlink := filepath.Join(root, "hardlink")
+	if err := os.Link(regular, hardlink); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected("hardlink")
+	if err := os.Remove(hardlink); err != nil {
+		t.Fatal(err)
+	}
+	assertAccepted("hardlink removal")
+
+	fifo := filepath.Join(root, "fifo")
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected("FIFO")
+	if err := os.Remove(fifo); err != nil {
+		t.Fatal(err)
+	}
+	assertAccepted("FIFO removal")
+
+	outside := filepath.Dir(root)
+	if err := BoundedWorkspaceVolume(root, outside); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("path outside volume was accepted: %v", err)
+	}
+	checkout := filepath.Join(root, "checkout")
+	if err := os.Mkdir(checkout, 0700); err != nil {
+		t.Fatal(err)
+	}
+	checkoutLink := filepath.Join(root, "checkout-link")
+	if err := os.Symlink(checkout, checkoutLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := BoundedWorkspaceVolume(root, checkoutLink); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("symlink workspace root was accepted: %v", err)
 	}
 }
 

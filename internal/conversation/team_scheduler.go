@@ -508,8 +508,17 @@ func (s *teamScheduler) invalidateParentRun(runID string) []context.CancelFunc {
 }
 
 func (s *teamScheduler) signalFromLead(request agent.ExecutionRequest, scope teams.Scope, teamID, memberID, callID string) {
-	if request.TeamTurn == nil && !request.TeamUser && request.RunID != "" {
-		generation := s.rememberParent(request, scope, teamID, memberID, callID)
+	if request.TeamTurn == nil {
+		generation := uint64(0)
+		if !request.TeamUser && request.RunID != "" {
+			generation = s.rememberParent(request, scope, teamID, memberID, callID)
+		} else {
+			s.mu.Lock()
+			if grant, ok := s.grants[memberID]; ok && grant.TeamID == teamID && grant.Scope.Matches(scope) {
+				generation = grant.Generation
+			}
+			s.mu.Unlock()
+		}
 		if generation != 0 {
 			s.mu.Lock()
 			if grant, ok := s.grants[memberID]; ok && grant.Generation == generation {
