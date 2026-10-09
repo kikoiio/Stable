@@ -1,6 +1,6 @@
 # M09-F 受控工作树与并行写入 Checklist
 
-> 状态：规格已批准，实施代码已提交；AC1–9 仍需逐项验收。最新代码 SHA `39bf411` 的真实 Linux writer/sandbox/quota workflow、Go build/unit、package 与 E2E 全部 jobs 通过；A/B/C/D旧CI不作为F实现证据（2026-10-09）。
+> 状态：规格已批准，实施代码已提交；AC1–9 仍需逐项验收。最新代码 SHA `220b070` 的真实 Linux writer/sandbox/quota workflow、Go build/unit、package 与 E2E 全部 jobs 通过；A/B/C/D旧CI不作为F实现证据（2026-10-09）。
 
 ## 审批与追溯
 
@@ -125,3 +125,4 @@
 | E2E及M09组合 | SHA `eba916a` | [E2E run 37874596359](https://github.com/kikoiio/Stable/actions/runs/37874596359), [Workspace Linux run 37874596321](https://github.com/kikoiio/Stable/actions/runs/37874596321) | 所有 E2E jobs 与 `writer-sandbox-volume` 成功；M03 isolated computer bridge 首次 EOF，复跑失败 job 后全绿。workflow 未覆盖 E/F AC1–9 全部 lifecycle 和组合场景。 |
 | 当前 Go、package、E2E 与 Workspace Linux 组合回归 | SHA `60a3cc669e8cd950c8bcb0cf4ed9345b92b4cf96` | [Go run 37876744035](https://github.com/kikoiio/Stable/actions/runs/37876744035), [E2E run 37876744085](https://github.com/kikoiio/Stable/actions/runs/37876744085), [Workspace Linux run 37876743971](https://github.com/kikoiio/Stable/actions/runs/37876743971) | Go `build-and-test`/`test-package`、E2E 全部 jobs 与 `writer-sandbox-volume` 均成功；E2E `e2e-m03` 首次 isolated computer bridge EOF，单独复跑失败 job 后成功。通用回归仍不替代 F AC1–9 的生命周期、并行导出/接收组合验收。 |
 | Workspace interrupted-operation coverage 与 E/F 组合复验 | SHA `39bf4117274a381c0ad4023fd8ceeaac086e3636` | [Go run 37879308947](https://github.com/kikoiio/Stable/actions/runs/37879308947), [E2E run 37879308946](https://github.com/kikoiio/Stable/actions/runs/37879308946), [Workspace Linux run 37879308940](https://github.com/kikoiio/Stable/actions/runs/37879308940) | 三条 workflow 全部成功；新增 interrupted `writing`/`stopping` writer 不被误判退出、export candidate 引用保留且重复恢复幂等。通用回归仍不替代 F AC1–9 生命周期、并行导出/接收组合验收。 |
+| Idle shutdown integration 与当前 E/F 组合复验 | SHA `220b0705b0a9b7f2a3b1d79be8874e4866b860c5` | [Go run 37880499789](https://github.com/kikoiio/Stable/actions/runs/37880499789), [E2E run 37880499793](https://github.com/kikoiio/Stable/actions/runs/37880499793), [Workspace Linux run 37880499781](https://github.com/kikoiio/Stable/actions/runs/37880499781) | Go `build-and-test`/`test-package`、E2E 全 jobs 与 `writer-sandbox-volume` 全部成功；F behavior 未改动，E test 增量随完整组合回归通过。仍不替代 F AC1–9 生命周期与并行导出/接收验收。 |
