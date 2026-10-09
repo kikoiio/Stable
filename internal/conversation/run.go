@@ -242,6 +242,12 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		s.eventMu.Unlock()
 		return taskErr
 	}
+	teamPrefix, teamErr := s.teamLeadNotifications(request, authority)
+	if teamErr != nil {
+		s.eventMu.Unlock()
+		return teamErr
+	}
+	taskPrefix = append(taskPrefix, teamPrefix...)
 	if request.Work.Kind != agent.WorkSession {
 		request.Messages = append(taskPrefix, request.Messages...)
 	}
