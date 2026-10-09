@@ -67,3 +67,7 @@ KiCad GUI 会话进程。
 `/agent <角色> <任务>` 启动独立后台任务，`/tasks`（或 `/tasks next`）分页查看，`/tasks get <ID>` 查询，`/tasks stop <ID>` 请求取消。父 agent 可通过 `run_agent` 同步等待或后台提交，用 `task_output` 有界等待、`task_stop` 取消。它们与委派、fork、hook 共用池；父正常结束和 TUI 断线后后台任务继续，父显式取消会停止关联任务。取消显示实际退出后的终态；服务重启把未完成任务记为 `interrupted`，不重新执行模型。结果保存在 session 日志，脱敏摘要交接给下次同属工作项的父 run，完成不会自动启动新 run。M09-D 不提供 child 写入、团队或工作树功能。
 
 标记为 `mode: fork`（或旧式 `context: fork`）的技能通过 `/技能名 <参数>` 启动当前 session 下的独立 fork run，也可由父 agent 通过 `load_skill` 工具调用。`fork_context` 支持 `none`（默认）、`recent`（最近 5 轮可见对话）和预算内的 `full`。fork skill 只开放读、搜、列工具，沿用 M09-A 的共享资源池和单项预算；运行状态与脱敏摘要写入 session run 事件，可按游标续读。服务重启中断未完成的 fork skill，不自动重跑。
+
+## M09-E/F 实施状态
+
+M09-E 增加持久化团队协作、消息、任务和只读协调器；M09-F 增加受控工作树、隔离写入和显式候选接收。两项仍在逐条验收，未整体验收完成。当前状态与可复核证据见 [M09-E checklist](specs/M09-E/checklist.md) 和 [M09-F checklist](specs/M09-F/checklist.md)。
