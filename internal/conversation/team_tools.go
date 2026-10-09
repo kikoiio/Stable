@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sort"
 
 	"stable/internal/agent"
 	"stable/internal/llm"
@@ -102,8 +101,7 @@ func (s *Service) ExecuteTeamTool(ctx context.Context, request agent.ExecutionRe
 					members = append(members, member)
 				}
 			}
-			sort.Slice(members, func(i, j int) bool { return members[i].Name < members[j].Name })
-			result = members
+			result = teams.MembersPage(members, args.Limit)
 		}
 	case "team_close":
 		if args.TeamID == "" {

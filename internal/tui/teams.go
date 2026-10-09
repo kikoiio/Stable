@@ -67,7 +67,7 @@ func registerTeamCommands(host *commandHost, registry *commands.Registry) {
 		sendTeamRequest(host, req, "正在读取团队…")
 	}})
 
-	registry.Register(&commands.Command{Name: "team", Description: "查看团队、任务、消息和请求", ArgPrompt: "ID get|members|tasks list [limit]|messages|requests [list [limit]]|send|respond|shutdown", Kind: commands.KindLocal, Local: func(args string) {
+	registry.Register(&commands.Command{Name: "team", Description: "查看团队、任务、消息和请求", ArgPrompt: "ID get|members [limit]|tasks list [limit]|messages|requests [list [limit]]|send|respond|shutdown", Kind: commands.KindLocal, Local: func(args string) {
 		m := host.model
 		fields := strings.Fields(args)
 		if m.ActiveSession == "" {
@@ -91,11 +91,21 @@ func registerTeamCommands(host *commandHost, registry *commands.Registry) {
 			base.Op = "team_get"
 			req = base
 		case "members":
+			limit := 0
 			if rest != "" {
-				m.Status = "用法：/team <ID> members"
-				return
+				fields := strings.Fields(rest)
+				if len(fields) != 1 {
+					m.Status = "用法：/team <ID> members [条数，1-100]"
+					return
+				}
+				parsed, err := strconv.Atoi(fields[0])
+				if err != nil || parsed < 1 || parsed > teams.MaxPageSize {
+					m.Status = "用法：/team <ID> members [条数，1-100]"
+					return
+				}
+				limit = parsed
 			}
-			m.showTeamMembers(teamID)
+			m.showTeamMembers(teamID, limit)
 			return
 		case "tasks":
 			req, m.Status = teamTaskRequest(base, rest)
@@ -490,7 +500,7 @@ func upsertTeamRequest(items []teams.Request, item teams.Request) []teams.Reques
 	return append(items, item)
 }
 
-func (m *Model) showTeamMembers(teamID string) {
+func (m *Model) showTeamMembers(teamID string, limit int) {
 	projection, err := sessionlog.ProjectTeams(sessionlog.Transcript{Session: sessionlog.SessionInfo{ID: m.ActiveSession}, Events: m.Events})
 	if err != nil {
 		m.Status = "无法读取会话团队投影：" + err.Error()
@@ -502,14 +512,13 @@ func (m *Model) showTeamMembers(teamID string) {
 			members = append(members, member)
 		}
 	}
-	sort.Slice(members, func(i, j int) bool { return members[i].Name < members[j].Name })
 	if _, ok := projection.Teams[teamID]; !ok {
 		m.Status = "当前会话中找不到该团队。"
 		return
 	}
-	m.TeamMembers = append([]teams.Member(nil), members...)
-	m.appendTeamNote(formatTeamMembers(teamID, members))
-	m.Status = fmt.Sprintf("团队成员：%d", len(members))
+	m.TeamMembers = teams.MembersPage(members, limit)
+	m.appendTeamNote(formatTeamMembers(teamID, m.TeamMembers))
+	m.Status = fmt.Sprintf("团队成员：%d/%d", len(m.TeamMembers), len(members))
 }
 
 func (m *Model) appendTeamNote(text string) {

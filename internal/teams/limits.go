@@ -2,6 +2,7 @@ package teams
 
 import (
 	"errors"
+	"sort"
 	"time"
 )
 
@@ -103,6 +104,22 @@ func PageSize(limit int) int {
 		return DefaultPageSize
 	}
 	return min(limit, MaxPageSize)
+}
+
+// MembersPage returns a stable, bounded copy of a team's member history.
+func MembersPage(members []Member, limit int) []Member {
+	page := append([]Member(nil), members...)
+	sort.Slice(page, func(i, j int) bool {
+		if page[i].Name == page[j].Name {
+			return page[i].ID < page[j].ID
+		}
+		return page[i].Name < page[j].Name
+	})
+	pageSize := PageSize(limit)
+	if len(page) > pageSize {
+		page = page[:pageSize]
+	}
+	return page
 }
 
 func WaitDuration(wait time.Duration) time.Duration {
