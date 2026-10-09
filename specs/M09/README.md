@@ -1,6 +1,6 @@
 # M09 并行协作与工作树：范围与进度
 
-> 2026-10-09 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。D/E/F 实现改动已提交并推送。SHA `8d1f5bfbc34cda21bd8e222e0512a7128e695d0b` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 全部通过；新增真实 TUI/service 停止请求路径、TUI 创建工作树并在 service 重启后恢复列表、并发候选接受事务串行化与回归测试；E/F checklist 仍有逐项验收缺口。
+> 2026-10-09 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。D/E/F 实现改动已提交并推送。SHA `d6be6bd946b81317608fc3200f92ef84ba223c40` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 全部通过；其间补入消息累计配额/批次边界、工作树删除和候选导出恢复回归。其后的本地提交继续增加 E/F 定向证据，尚待本轮云端组合验证；E/F checklist 仍有逐项验收缺口。
 
 ## 已完成
 
@@ -50,3 +50,5 @@ Linux 为当前首发平台，源端 iTerm 专用后端不属于本轮 Linux 验
 继续完成 [M09-E checklist](../M09-E/checklist.md) 与 [M09-F checklist](../M09-F/checklist.md) 的逐项证据映射和剩余组合场景。D 的 AC1–9 已完成核对；`dependency_change.sh` checker 恢复问题在 SHA `8223aaf` 的 `e2e-core` 通过。M09 整体仍需等 E/F 验收完成后再更新状态。
 
 最新验证更新：SHA `dfaf16b` 的 Go `build-and-test`/`test-package` 与 Workspace Linux `writer-sandbox-volume` 全部通过；E2E 的 `e2e-sessions`、`e2e-m03`、`e2e-m04` 与 `cases` 成功，`e2e-core` 和 `unit` 当时仍在运行。随后新增 SHA `69484b3` 的 lead/member 8 KiB 消息边界测试，等待与本轮其他增量一起云端验证。普通 session run 未从 workspace binding 派生 writer authority 仍是 M09-F 未完成项，未将 M09 标记完成。
+
+2026-10-09 后续补入 E 的 32 KiB 消息 handoff、pending aggregate quota、父 run 失败后 child 续行、plan request 冲突重复响应、child terminal credential 脱敏与 stop 不伪完成 task 证据；F 修复候选导出失败残留路径与 remove recovery stale binding 重试，并补 workspace root replacement、writer cancel/restart generation、manifest file-count 和 binding cleanup 边界测试。SHA `d6be6bd` 的 Go build/unit、package、全部 E2E jobs 与 Workspace Linux 均通过；其后本地代码/测试提交 `51051a7`、`670e24e`、`11fdf43`、`f2f6f99`、`8fef6ea` 定向测试通过，尚待推送后的云端验证。标准 session run 仍未从 active workspace binding 获得受信 writer authority；需要完整解决 run admission 锁、writer lease、per-run executor、取消/终态和候选接受路径，不能以单纯 AllowedRoot 改动替代。M09-E/F AC1–9 及组合验收仍开放，M09 整体保持未完成。
