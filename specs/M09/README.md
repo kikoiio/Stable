@@ -48,3 +48,5 @@ Linux 为当前首发平台，源端 iTerm 专用后端不属于本轮 Linux 验
 ## 下一步
 
 继续完成 [M09-E checklist](../M09-E/checklist.md) 与 [M09-F checklist](../M09-F/checklist.md) 的逐项证据映射和剩余组合场景。D 的 AC1–9 已完成核对；`dependency_change.sh` checker 恢复问题在 SHA `8223aaf` 的 `e2e-core` 通过。M09 整体仍需等 E/F 验收完成后再更新状态。
+
+最新验证更新：SHA `dfaf16b` 的 Go `build-and-test`/`test-package` 与 Workspace Linux `writer-sandbox-volume` 全部通过；E2E 的 `e2e-sessions`、`e2e-m03`、`e2e-m04` 与 `cases` 成功，`e2e-core` 和 `unit` 当时仍在运行。随后新增 SHA `69484b3` 的 lead/member 8 KiB 消息边界测试，等待与本轮其他增量一起云端验证。普通 session run 未从 workspace binding 派生 writer authority 仍是 M09-F 未完成项，未将 M09 标记完成。
