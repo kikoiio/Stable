@@ -46,6 +46,13 @@ func TestNamedRunAgentWriterFactoryEnforcesPermissionRoleAndLease(t *testing.T) 
 	started := make(chan agent.ChildRunInput, 1)
 	runner := agentTaskTestRunner(func(ctx context.Context, input agent.ChildRunInput) agent.ChildRunResult {
 		started <- input
+		var childAuthority permission.Authority
+		if err := json.Unmarshal(input.PermissionBounds, &childAuthority); err != nil {
+			return agent.ChildRunResult{Status: agent.DelegationFailed, Error: fmt.Sprintf("decode child authority: %v", err)}
+		}
+		if childAuthority.CandidateRoot == "" {
+			return agent.ChildRunResult{Status: agent.DelegationFailed, Error: "named writer has no checkout candidate root"}
+		}
 		executor, err := input.ExecutorFactory.ForRun(agent.ExecutionRequest{RunID: input.ChildRunID, Work: input.Work, PermissionBounds: input.PermissionBounds})
 		if err != nil {
 			return agent.ChildRunResult{Status: agent.DelegationFailed, Error: err.Error()}
@@ -58,7 +65,7 @@ func TestNamedRunAgentWriterFactoryEnforcesPermissionRoleAndLease(t *testing.T) 
 		if err != nil || denied.Status != agent.ToolDenied || !denied.IsError {
 			return agent.ChildRunResult{Status: agent.DelegationFailed, Error: fmt.Sprintf("forbidden role tool outcome=%+v err=%v", denied, err)}
 		}
-		if _, err := os.Stat(filepath.Join(input.ProjectRoot, marker)); !os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(childAuthority.CandidateRoot, marker)); !os.IsNotExist(err) {
 			return agent.ChildRunResult{Status: agent.DelegationFailed, Error: fmt.Sprintf("forbidden command reached checkout: %v", err)}
 		}
 		write := llm.ToolUse{ID: "allowed-write", Name: "write_file", Arguments: json.RawMessage(`{"file_path":"named.txt","content":"leased child bytes"}`)}
@@ -174,7 +181,7 @@ func TestNamedRunAgentWriterFactoryEnforcesPermissionRoleAndLease(t *testing.T) 
 	if err != nil || task.Status != agent.DelegationSucceeded || task.WorkspaceID != input.WorkspaceID || task.WorkspaceGeneration != input.WorkspaceGeneration {
 		t.Fatalf("named writer did not settle on the same lease: task=%+v err=%v", task, err)
 	}
-	if got, err := os.ReadFile(filepath.Join(input.ProjectRoot, "named.txt")); err != nil || string(got) != "leased child bytes" {
+	if got, err := os.ReadFile(filepath.Join(childAuthority.CandidateRoot, "named.txt")); err != nil || string(got) != "leased child bytes" {
 		t.Fatalf("authorized write missing from leased checkout: %q err=%v", got, err)
 	}
 	if got, err := os.ReadFile(filepath.Join(formal, "base.txt")); err != nil || string(got) != "formal baseline" {
@@ -183,7 +190,7 @@ func TestNamedRunAgentWriterFactoryEnforcesPermissionRoleAndLease(t *testing.T) 
 	if _, err := os.Stat(filepath.Join(formal, "named.txt")); !os.IsNotExist(err) {
 		t.Fatalf("authorized child wrote outside its checkout: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(input.ProjectRoot, "must-not-run.txt")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(childAuthority.CandidateRoot, "must-not-run.txt")); !os.IsNotExist(err) {
 		t.Fatalf("forbidden role tool reached the sandbox: %v", err)
 	}
 

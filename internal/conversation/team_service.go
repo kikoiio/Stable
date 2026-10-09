@@ -316,7 +316,7 @@ func (s *Service) ListTeamsPage(ctx context.Context, request agent.ExecutionRequ
 	if afterTeamID != "" && teams.ValidateID(afterTeamID) != nil {
 		return nil, errors.New("team list cursor is invalid")
 	}
-	root, _, err := s.scopeForWork(ctx, currentProjectRoot(s.deps.ProjectRoot), request.Work)
+	root, _, _, err := s.teamOperationScope(ctx, request)
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +393,7 @@ func (s *Service) teamScopeStillAuthorized(ctx context.Context, projectRoot stri
 }
 
 func (s *Service) GetTeam(ctx context.Context, request agent.ExecutionRequest, teamID string) (teams.Team, error) {
-	root, _, err := s.scopeForWork(ctx, currentProjectRoot(s.deps.ProjectRoot), request.Work)
+	root, _, _, err := s.teamOperationScope(ctx, request)
 	if err != nil {
 		return teams.Team{}, err
 	}
