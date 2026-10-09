@@ -87,6 +87,11 @@ func TestWorkspaceExportPartialCandidateFailureCanRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	formalIdentity, err := workspace.CaptureRootIdentity(formalAbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.FormalRootIdentity = formalIdentity
 	paths := workspace.Paths{FormalRoot: formalAbs, Baseline: baseline, Checkout: checkout}
 	exporter := workspaceCandidateExporter{service: &Service{deps: Deps{Store: db}}}
 	base, err := workspace.BuildManifest(ctx, baseline, workspace.DefaultLimits())
@@ -241,6 +246,11 @@ func TestWorkspacePreviewExporterReturnsOnlyConflictsAndInputDigests(t *testing.
 	}
 	scope := workspace.Scope{ProjectID: "project", SessionID: "0123456789abcdef0123456789abcdef", Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: "0123456789abcdef0123456789abcdef"}}
 	record := workspace.Record{Scope: scope, Snapshot: workspace.Snapshot{ID: "1123456789abcdef0123456789abcdef"}}
+	formalIdentity, err := workspace.CaptureRootIdentity(formal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.FormalRootIdentity = formalIdentity
 	preview, err := (workspaceCandidateExporter{service: &Service{}}).PreviewWorkspace(context.Background(), scope, record, workspace.Paths{FormalRoot: formal, Baseline: baseline, Checkout: checkout})
 	if err != nil {
 		t.Fatal(err)

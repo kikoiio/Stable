@@ -129,6 +129,9 @@ func TestSequentialWorkspaceCandidateAcceptsPreserveIndependentChanges(t *testin
 		t.Fatalf("inspect first candidate's second.txt: %v", err)
 	}
 	accept(firstExport.CandidateID)
+	if err := service.replayAcceptedWorkspaceRoots(ctx, manager, formalAbs); err != nil {
+		t.Fatalf("replay accepted formal-root identity for older workspace: %v", err)
+	}
 
 	secondPreview, err := manager.Preview(ctx, scope, second.ID)
 	if err != nil || secondPreview.ConflictCount != 0 || len(secondPreview.Conflicts) != 0 {

@@ -1072,9 +1072,11 @@ func (s *LifecycleService) Export(ctx context.Context, scope Scope, id string) (
 	if record.Snapshot.State != StateReady && record.Snapshot.State != StateKept && record.Snapshot.State != StateExported {
 		return Snapshot{}, ErrOwnership
 	}
-	if _, err := s.git.Validate(ctx, scope, id); err != nil {
+	gitState, err := s.git.Validate(ctx, scope, id)
+	if err != nil {
 		return Snapshot{}, err
 	}
+	record.FormalRootIdentity = gitState.FormalRootIdentity
 	if record.Snapshot.State == StateExported && record.Snapshot.CandidateID != "" {
 		paths, err := s.layout.Paths(id)
 		if err != nil {
@@ -1109,6 +1111,9 @@ func (s *LifecycleService) Export(ctx context.Context, scope Scope, id string) (
 		kept.Operation.Phase = "blocked"
 		kept.Operation.UpdatedAt = time.Now().UTC()
 		_ = s.store.Save(context.Background(), scope, kept, exporting.Snapshot.Generation)
+		return Snapshot{}, err
+	}
+	if err := ValidateRootIdentity(paths.FormalRoot, record.FormalRootIdentity); err != nil {
 		return Snapshot{}, err
 	}
 	if exported.ID != id || exported.CandidateID == "" || !ValidID(exported.CandidateID) {
@@ -1152,15 +1157,20 @@ func (s *LifecycleService) Preview(ctx context.Context, scope Scope, id string) 
 	if record.Snapshot.State != StateReady && record.Snapshot.State != StateKept {
 		return Snapshot{}, ErrOwnership
 	}
-	if _, err := s.git.Validate(ctx, scope, id); err != nil {
+	gitState, err := s.git.Validate(ctx, scope, id)
+	if err != nil {
 		return Snapshot{}, err
 	}
+	record.FormalRootIdentity = gitState.FormalRootIdentity
 	paths, err := s.layout.Paths(id)
 	if err != nil {
 		return Snapshot{}, err
 	}
 	preview, err := previewer.PreviewWorkspace(ctx, scope, record, paths)
 	if err != nil {
+		return Snapshot{}, err
+	}
+	if err := ValidateRootIdentity(paths.FormalRoot, record.FormalRootIdentity); err != nil {
 		return Snapshot{}, err
 	}
 	if preview.ID != id || preview.CandidateID != "" || preview.ConflictCount < len(preview.Conflicts) || preview.ConflictCount < 0 || len(preview.Conflicts) > 100 || !validDigest(preview.BaselineDigest) || !validDigest(preview.FormalDigest) || !validDigest(preview.WorkspaceDigest) {
@@ -1189,6 +1199,39 @@ func (s *LifecycleService) Preview(ctx context.Context, scope Scope, id string) 
 		return Snapshot{}, err
 	}
 	return updated.Snapshot, nil
+}
+
+// RebindAcceptedFormalRoot replays one receipt-backed candidate acceptance
+// transition across existing workspaces. Exact old-identity matching makes
+// this operation idempotent and prevents it from adopting an unrelated root.
+func (s *LifecycleService) RebindAcceptedFormalRoot(ctx context.Context, expected, target RootIdentity) error {
+	if expected.Inode == 0 || target.Inode == 0 || expected == target {
+		return ErrOwnership
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ValidateRootIdentity(s.layout.FormalRoot(), target); err != nil {
+		return err
+	}
+	records, err := s.store.Records(ctx)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if record.Snapshot.State == StateRemoved || record.Snapshot.State == StateCreating || record.RootIdentity.Inode == 0 {
+			continue
+		}
+		if _, err := s.git.ValidateForDiscard(ctx, record.Scope, record.Snapshot.ID); err != nil {
+			return err
+		}
+		if err := s.git.rebindFormalRootIdentity(record.Scope, record.Snapshot.ID, expected, target); err != nil {
+			return err
+		}
+	}
+	return ValidateRootIdentity(s.layout.FormalRoot(), target)
 }
 
 func validDigest(value string) bool {
@@ -1239,7 +1282,7 @@ func (s *LifecycleService) RemoveClean(ctx context.Context, scope Scope, id stri
 	if boundID == id {
 		return Snapshot{}, ErrOwnership
 	}
-	state, err := s.git.Validate(ctx, scope, id)
+	state, err := s.git.ValidateForDiscard(ctx, scope, id)
 	if err != nil {
 		return Snapshot{}, err
 	}

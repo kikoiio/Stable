@@ -11,6 +11,7 @@ import (
 	"strconv"
 
 	"stable/internal/agent"
+	"stable/internal/candidate"
 	"stable/internal/permission"
 	"stable/internal/sessionlog"
 	"stable/internal/workspace"
@@ -137,8 +138,11 @@ func (s *Service) workspaceService(formalRoot string) (*workspace.LifecycleServi
 		return nil, err
 	}
 	s.workspaceMu.Lock()
-	defer s.workspaceMu.Unlock()
 	if manager := s.workspaces[root]; manager != nil {
+		s.workspaceMu.Unlock()
+		if err := s.replayAcceptedWorkspaceRoots(context.Background(), manager, root); err != nil {
+			return nil, err
+		}
 		return manager, nil
 	}
 	digest := sha256.Sum256([]byte(filepath.Clean(root)))
@@ -149,10 +153,53 @@ func (s *Service) workspaceService(formalRoot string) (*workspace.LifecycleServi
 	}
 	manager, err := workspace.NewService(layout, workspace.DefaultLimits(), workspace.ServiceDependencies{IdleGuard: s, Stopper: s, Exporter: workspaceCandidateExporter{service: s}})
 	if err != nil {
+		s.workspaceMu.Unlock()
 		return nil, err
 	}
 	s.workspaces[root] = manager
+	s.workspaceMu.Unlock()
+	if err := s.replayAcceptedWorkspaceRoots(context.Background(), manager, root); err != nil {
+		return nil, err
+	}
 	return manager, nil
+}
+
+func (s *Service) replayAcceptedWorkspaceRoots(ctx context.Context, manager *workspace.LifecycleService, formalRoot string) error {
+	if manager == nil || s.deps.Store == nil {
+		return nil
+	}
+	transitions, err := s.deps.Store.AcceptedProjectRootTransitions(ctx, formalRoot)
+	if err != nil {
+		return err
+	}
+	if len(transitions) == 0 {
+		return nil
+	}
+	currentToken, err := candidate.CaptureRootIdentity(formalRoot)
+	if err != nil {
+		return err
+	}
+	target, err := workspace.RootIdentityFromToken(currentToken)
+	if err != nil {
+		return err
+	}
+	// Walk the durable acceptance chain backward from the root currently at
+	// the formal path. Rebinding each exact predecessor to this verified final
+	// identity is safe after a crash in the middle of an earlier replay.
+	for i := len(transitions) - 1; i >= 0; i-- {
+		if transitions[i].TargetIdentity != currentToken {
+			continue
+		}
+		expected, parseErr := workspace.RootIdentityFromToken(transitions[i].ExpectedIdentity)
+		if parseErr != nil {
+			return parseErr
+		}
+		if err := manager.RebindAcceptedFormalRoot(ctx, expected, target); err != nil {
+			return err
+		}
+		currentToken = transitions[i].ExpectedIdentity
+	}
+	return nil
 }
 
 func (s *Service) workspaceScope(ctx context.Context, msg ClientMsg) (string, workspace.Scope, error) {

@@ -36,14 +36,15 @@ type Operation struct {
 }
 
 type Record struct {
-	Version      int             `json:"version"`
-	Scope        Scope           `json:"scope"`
-	Snapshot     Snapshot        `json:"snapshot"`
-	RootIdentity RootIdentity    `json:"root_identity"`
-	Operation    Operation       `json:"operation"`
-	UsedBytes    int64           `json:"used_bytes"`
-	Resolution   *UserResolution `json:"resolution,omitempty"`
-	Discard      *UserDiscard    `json:"discard,omitempty"`
+	Version            int             `json:"version"`
+	Scope              Scope           `json:"scope"`
+	Snapshot           Snapshot        `json:"snapshot"`
+	RootIdentity       RootIdentity    `json:"root_identity"`
+	FormalRootIdentity RootIdentity    `json:"-"`
+	Operation          Operation       `json:"operation"`
+	UsedBytes          int64           `json:"used_bytes"`
+	Resolution         *UserResolution `json:"resolution,omitempty"`
+	Discard            *UserDiscard    `json:"discard,omitempty"`
 }
 
 // OwnershipStore persists resource intent separately from public session facts.

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"stable/internal/platform/secfile"
@@ -110,6 +111,53 @@ func revalidateRoot(path string, expected os.FileInfo) error {
 		return ErrSourceChanged
 	}
 	return nil
+}
+
+// CaptureRootIdentity records a directory's physical identity for an
+// operation that must stay bound to the same project root across filesystem
+// path replacement.
+func CaptureRootIdentity(path string) (RootIdentity, error) {
+	root, info, err := openVerifiedRoot(path)
+	if err != nil {
+		return RootIdentity{}, err
+	}
+	defer root.Close()
+	identity, err := rootIdentity(info)
+	if err != nil {
+		return RootIdentity{}, err
+	}
+	if err := revalidateRoot(path, info); err != nil {
+		return RootIdentity{}, ErrOwnership
+	}
+	return identity, nil
+}
+
+// ValidateRootIdentity fails closed if path no longer names the captured
+// directory.
+func ValidateRootIdentity(path string, expected RootIdentity) error {
+	actual, err := CaptureRootIdentity(path)
+	if err != nil || actual != expected {
+		return ErrOwnership
+	}
+	return nil
+}
+
+// RootIdentityFromToken converts the transaction journal's Unix device/inode
+// identity into the workspace receipt representation.
+func RootIdentityFromToken(token string) (RootIdentity, error) {
+	parts := strings.Split(token, ":")
+	if len(parts) != 3 || parts[0] != "unix" {
+		return RootIdentity{}, ErrOwnership
+	}
+	device, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil {
+		return RootIdentity{}, ErrOwnership
+	}
+	inode, err := strconv.ParseUint(parts[2], 10, 64)
+	if err != nil || inode == 0 {
+		return RootIdentity{}, ErrOwnership
+	}
+	return RootIdentity{Device: device, Inode: inode}, nil
 }
 
 func BuildManifest(ctx context.Context, path string, limits Limits) (Manifest, error) {

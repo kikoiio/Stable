@@ -414,6 +414,96 @@ func createAtomicReceipt(root *os.Root, name string, data []byte) (os.FileInfo, 
 	return identity, nil
 }
 
+func replaceAtomicReceipt(root *os.Root, name string, data []byte) error {
+	current, err := root.Lstat(name)
+	if err != nil || validatePrivateFile(current, filepath.Join(root.Name(), name)) != nil {
+		return ErrOwnership
+	}
+	id, err := NewID()
+	if err != nil {
+		return err
+	}
+	temp := ".git-receipt-" + id
+	file, err := root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	identity, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return err
+	}
+	defer func() {
+		_ = file.Close()
+		if info, statErr := root.Lstat(temp); statErr == nil && os.SameFile(identity, info) {
+			_ = root.Remove(temp)
+		}
+	}()
+	if _, err = file.Write(data); err != nil {
+		return err
+	}
+	if err = file.Sync(); err != nil {
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	latest, err := root.Lstat(name)
+	if err != nil || !os.SameFile(current, latest) {
+		return ErrOwnership
+	}
+	if err = root.Rename(temp, name); err != nil {
+		return err
+	}
+	return syncDirectory(root)
+}
+
+func (g *PrivateGit) rebindFormalRootIdentity(scope Scope, id string, expected, target RootIdentity) error {
+	paths, err := g.layout.Paths(id)
+	if err != nil {
+		return err
+	}
+	root, _, err := openVerifiedRoot(paths.Root)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	raw, err := readPrivateFile(root, gitStateName, 4096)
+	if err != nil {
+		return err
+	}
+	var state GitState
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil {
+		return ErrOwnership
+	}
+	if decoder.Decode(new(any)) != io.EOF {
+		return ErrOwnership
+	}
+	if state.Version != privateGitVersion || state.WorkspaceID != id {
+		return nil
+	}
+	if state.FormalRootIdentity == target {
+		return nil
+	}
+	if state.FormalRootIdentity != expected {
+		return nil
+	}
+	if err := g.validateFormalRootIdentity(target); err != nil {
+		return err
+	}
+	state.FormalRootIdentity = target
+	updated, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	if err := replaceAtomicReceipt(root, gitStateName, updated); err != nil {
+		return err
+	}
+	return g.validateFormalRootIdentity(target)
+}
+
 func replacePrivateFile(root *os.Root, name string, data []byte) error {
 	info, err := root.Lstat(name)
 	if err != nil || !info.Mode().IsRegular() || validateHardlinks(info) != nil {
@@ -716,6 +806,17 @@ func validateRepositoryConfiguration(path string) error {
 // Git initialization or a model. Checkout data may be dirty; metadata and the
 // immutable baseline must still match this physically owned resource.
 func (g *PrivateGit) Validate(ctx context.Context, scope Scope, id string) (GitState, error) {
+	return g.validate(ctx, scope, id, true, false)
+}
+
+// ValidateForDiscard verifies only the private workspace. It permits explicit,
+// user-confirmed cleanup of a legacy receipt or a workspace whose original
+// formal root has been replaced; it never authorizes execution or export.
+func (g *PrivateGit) ValidateForDiscard(ctx context.Context, scope Scope, id string) (GitState, error) {
+	return g.validate(ctx, scope, id, false, true)
+}
+
+func (g *PrivateGit) validate(ctx context.Context, scope Scope, id string, requireFormalRoot, allowLegacy bool) (GitState, error) {
 	record, err := g.store.Load(ctx, scope, id)
 	if err != nil {
 		return GitState{}, err
@@ -742,10 +843,11 @@ func (g *PrivateGit) Validate(ctx context.Context, scope Scope, id string) (GitS
 	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
 		return GitState{}, ErrOwnership
 	}
-	if state.Version != privateGitVersion || state.WorkspaceID != id || state.Generation == 0 || state.Generation > record.Snapshot.Generation || !validGitOID(state.BaselineCommit) || state.UsedBytes < 0 {
+	validVersion := state.Version == privateGitVersion || allowLegacy && state.Version == 1
+	if !validVersion || state.WorkspaceID != id || state.Generation == 0 || state.Generation > record.Snapshot.Generation || !validGitOID(state.BaselineCommit) || state.UsedBytes < 0 {
 		return GitState{}, ErrOwnership
 	}
-	if err := g.validateFormalRootIdentity(state.FormalRootIdentity); err != nil {
+	if requireFormalRoot && (state.Version != privateGitVersion || g.validateFormalRootIdentity(state.FormalRootIdentity) != nil) {
 		return GitState{}, ErrOwnership
 	}
 	if record.Snapshot.BaselineDigest != "" && record.Snapshot.BaselineDigest != state.BaselineDigest {

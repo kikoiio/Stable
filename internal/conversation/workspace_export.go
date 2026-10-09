@@ -27,6 +27,11 @@ func (e workspaceCandidateExporter) PreviewWorkspace(ctx context.Context, scope 
 	if e.service == nil || !record.Scope.SameOwner(scope) || scope.Validate() != nil || paths.FormalRoot == "" {
 		return workspace.Snapshot{}, workspace.ErrOwnership
 	}
+	unlockFormalRoot := candidate.LockProjectTransaction(paths.FormalRoot)
+	defer unlockFormalRoot()
+	if err := workspace.ValidateRootIdentity(paths.FormalRoot, record.FormalRootIdentity); err != nil {
+		return workspace.Snapshot{}, err
+	}
 	baseline, err := workspace.BuildManifest(ctx, paths.Baseline, workspace.DefaultLimits())
 	if err != nil {
 		return workspace.Snapshot{}, err
@@ -41,6 +46,9 @@ func (e workspaceCandidateExporter) PreviewWorkspace(ctx context.Context, scope 
 	}
 	preview, err := workspace.ThreeWayPreview(baseline, formal, working, workspace.DefaultLimits())
 	if err != nil {
+		return workspace.Snapshot{}, err
+	}
+	if err := workspace.ValidateRootIdentity(paths.FormalRoot, record.FormalRootIdentity); err != nil {
 		return workspace.Snapshot{}, err
 	}
 	pathsOnly := make([]string, 0, min(100, len(preview.Conflicts)))
@@ -69,6 +77,9 @@ func (e workspaceCandidateExporter) ExportWorkspace(ctx context.Context, scope w
 	// do not acquire workspace lifecycle locks while holding it.
 	unlockFormalRoot := candidate.LockProjectTransaction(formalRoot)
 	defer unlockFormalRoot()
+	if err := workspace.ValidateRootIdentity(formalRoot, record.FormalRootIdentity); err != nil {
+		return workspace.Snapshot{}, err
+	}
 	baseline, err := workspace.BuildManifest(ctx, paths.Baseline, workspace.DefaultLimits())
 	if err != nil {
 		return workspace.Snapshot{}, err
@@ -146,6 +157,9 @@ func (e workspaceCandidateExporter) ExportWorkspace(ctx context.Context, scope w
 	if err := installMergedManifest(ctx, created.CandidateRoot, formalRoot, paths.Checkout, formal, working, preview.Manifest); err != nil {
 		return workspace.Snapshot{}, cleanupPartial(err)
 	}
+	if err := workspace.ValidateRootIdentity(formalRoot, record.FormalRootIdentity); err != nil {
+		return workspace.Snapshot{}, cleanupPartial(err)
+	}
 	formalAfter, err := workspace.BuildManifest(ctx, formalRoot, workspace.DefaultLimits())
 	if err != nil {
 		return workspace.Snapshot{}, cleanupPartial(err)
@@ -168,12 +182,18 @@ func (e workspaceCandidateExporter) ExportWorkspace(ctx context.Context, scope w
 	if candidateDigest != preview.Manifest.Digest || len(entries) != len(preview.Manifest.Entries) {
 		return workspace.Snapshot{}, cleanupPartial(workspace.ErrSourceChanged)
 	}
+	if err := workspace.ValidateRootIdentity(formalRoot, record.FormalRootIdentity); err != nil {
+		return workspace.Snapshot{}, cleanupPartial(err)
+	}
 	frozen, err := candidate.FreezeCandidate(created, nil, ctx)
 	if err != nil {
 		return workspace.Snapshot{}, cleanupPartial(err)
 	}
 	if frozen.CandidateDigest != candidateDigest {
 		return workspace.Snapshot{}, cleanupPartial(workspace.ErrSourceChanged)
+	}
+	if err := workspace.ValidateRootIdentity(formalRoot, record.FormalRootIdentity); err != nil {
+		return workspace.Snapshot{}, cleanupPartial(err)
 	}
 	// Persist the existing candidate lifecycle's reviewable state after the
 	// freezer has sealed and verified the merged manifest.

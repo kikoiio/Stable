@@ -111,6 +111,7 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 	}
 	intentIDs := make([]string, 0, len(projection.Turns))
 	turnIDs := make([]string, 0, len(projection.Turns))
+	reconciledTurnIDs := make(map[string]bool, len(projection.Turns))
 	for id, turn := range projection.Turns {
 		if turn.Status == "intent" {
 			intentIDs = append(intentIDs, id)
@@ -151,6 +152,7 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 		if !ok || member.TeamID != team.ID {
 			return fmt.Errorf("accepted turn %s has no member", turnID)
 		}
+		reconciledTurnIDs[turnID] = true
 		hadDurableChildTerminal := terminal[turn.RunID]
 		if _, ok := started[turn.RunID]; !ok {
 			work := sessionlog.RunStarted{RunID: turn.RunID, WorkKind: team.Scope.WorkKind, GoalID: team.Scope.GoalID, WorkItemID: team.Scope.WorkItemID, Intent: "recovered interrupted team turn", TeamID: team.ID, TeamMemberID: member.ID, TeamTurnID: turn.ID, WorkspaceID: turn.WorkspaceID, WorkspaceGeneration: turn.WorkspaceGeneration, OriginRunID: turn.OriginRunID, OriginCallID: turn.OriginCallID}
@@ -259,7 +261,7 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 	// recovery never leaves a terminal turn displayed as queued/running.
 	for _, member := range projection.Members {
 		if !member.Status.HasTurn() {
-			if turn, ok := projection.Turns[member.TurnID]; ok && turnTerminalTeamStatus(turn.Status) {
+			if reconciledTurnIDs[member.TurnID] {
 				// The turn loop above already reconciled this member from the
 				// durable child outcome. Do not reinterpret its newly idle state
 				// as a live member that needs interruption.

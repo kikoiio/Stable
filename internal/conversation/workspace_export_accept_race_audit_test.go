@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -48,7 +49,7 @@ func (s *acceptanceGateStore) SaveAcceptanceRootIdentities(ctx context.Context, 
 	return s.Store.SaveAcceptanceRootIdentities(ctx, id, expected, target)
 }
 
-func TestWorkspaceExportWaitsForConcurrentAcceptanceAndUsesCurrentFormalRoot(t *testing.T) {
+func TestWorkspaceExportWaitsForConcurrentAcceptanceAndRequiresReboundRootIdentity(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	formal := filepath.Join(root, "project")
@@ -128,7 +129,11 @@ func TestWorkspaceExportWaitsForConcurrentAcceptanceAndUsesCurrentFormalRoot(t *
 			FormalRoot: formalAbs, CandidateRoot: filepath.Join(root, "ordinary-candidate"),
 		},
 	}
-	record := workspace.Record{Scope: scope, Snapshot: workspace.Snapshot{ID: "1123456789abcdef0123456789abcdef", Generation: 1}}
+	formalIdentity, err := workspace.CaptureRootIdentity(formalAbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := workspace.Record{Scope: scope, Snapshot: workspace.Snapshot{ID: "1123456789abcdef0123456789abcdef", Generation: 1}, FormalRootIdentity: formalIdentity}
 	exporter := workspaceCandidateExporter{service: &Service{deps: Deps{Store: state}}}
 	paths := workspace.Paths{FormalRoot: formalAbs, Baseline: baseline, Checkout: checkout}
 	exportStarted := make(chan struct{})
@@ -157,9 +162,21 @@ func TestWorkspaceExportWaitsForConcurrentAcceptanceAndUsesCurrentFormalRoot(t *
 		t.Fatalf("accept candidate: %v", err)
 	}
 	exportOutcome := <-exportResult
-	exported := exportOutcome.snapshot
-	if exportOutcome.err != nil || exported.CandidateID == "" {
-		t.Fatalf("export after acceptance: snapshot=%+v err=%v", exported, exportOutcome.err)
+	if exportOutcome.err == nil {
+		t.Fatalf("export accepted a stale formal-root identity after concurrent acceptance: snapshot=%+v", exportOutcome.snapshot)
+	}
+	if !errors.Is(exportOutcome.err, workspace.ErrOwnership) {
+		t.Fatalf("stale identity export error=%v, want ownership failure", exportOutcome.err)
+	}
+	// In production workspaceService replays the finalized acceptance journal
+	// and updates the private receipt before returning the lifecycle manager.
+	record.FormalRootIdentity, err = workspace.CaptureRootIdentity(formalAbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exported, err := exporter.ExportWorkspace(ctx, scope, record, paths)
+	if err != nil || exported.CandidateID == "" {
+		t.Fatalf("export after authorized root rebind: snapshot=%+v err=%v", exported, err)
 	}
 	stored, err := state.GetCandidate(ctx, exported.CandidateID)
 	if err != nil {

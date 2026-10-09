@@ -227,7 +227,7 @@ func (s *LifecycleService) removableRecord(ctx context.Context, scope Scope, id 
 }
 
 func (s *LifecycleService) discardFacts(ctx context.Context, scope Scope, record Record) (string, int, []string, error) {
-	state, err := s.git.Validate(ctx, scope, record.Snapshot.ID)
+	state, err := s.git.ValidateForDiscard(ctx, scope, record.Snapshot.ID)
 	if err != nil {
 		return "", 0, nil, err
 	}

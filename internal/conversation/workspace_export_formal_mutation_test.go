@@ -71,7 +71,11 @@ func TestWorkspaceExportRejectsFormalMutationDuringCandidateMaterialization(t *t
 		t.Fatal(err)
 	}
 	paths := workspace.Paths{FormalRoot: formalAbs, Baseline: baseline, Checkout: checkout}
-	record := workspace.Record{Scope: scope, Snapshot: workspace.Snapshot{ID: workspaceID, Generation: 1}}
+	formalIdentity, err := workspace.CaptureRootIdentity(formalAbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := workspace.Record{Scope: scope, Snapshot: workspace.Snapshot{ID: workspaceID, Generation: 1}, FormalRootIdentity: formalIdentity}
 	exporter := workspaceCandidateExporter{service: &Service{deps: Deps{Store: db}}}
 
 	baseManifest, err := workspace.BuildManifest(context.Background(), baseline, workspace.DefaultLimits())

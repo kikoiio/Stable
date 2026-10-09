@@ -40,6 +40,37 @@ type AcceptanceRecovery struct {
 	TargetRootIdentity   string
 }
 
+// AcceptedRootTransition is a durable, receipt-backed project-root exchange.
+// It exists so services bound to a project can migrate their own physical-root
+// receipts after an authorized candidate acceptance.
+type AcceptedRootTransition struct {
+	ExpectedIdentity string
+	TargetIdentity   string
+}
+
+// AcceptedProjectRootTransitions returns only finalized project acceptances
+// whose candidate state and receipt still agree with the committed target.
+func (s *Store) AcceptedProjectRootTransitions(ctx context.Context, formalRoot string) ([]AcceptedRootTransition, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT j.expected_root_identity,j.target_root_identity,c.candidate_digest,j.new_digest,r.candidate_id,j.candidate_id,r.formal_digest FROM acceptance_apply_journal j JOIN candidates c ON c.id=j.candidate_id JOIN acceptance_receipts r ON r.decision_id=j.decision_id WHERE j.phase='finalized' AND j.manifest_policy=? AND c.manifest_policy=? AND c.formal_root=? AND c.status='accepted' ORDER BY j.updated_at,j.decision_id`, candidate.ManifestPolicyProject, candidate.ManifestPolicyProject, formalRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var transitions []AcceptedRootTransition
+	for rows.Next() {
+		var transition AcceptedRootTransition
+		var candidateDigest, journalDigest, receiptCandidate, candidateID, receiptDigest string
+		if err := rows.Scan(&transition.ExpectedIdentity, &transition.TargetIdentity, &candidateDigest, &journalDigest, &receiptCandidate, &candidateID, &receiptDigest); err != nil {
+			return nil, err
+		}
+		if transition.ExpectedIdentity == "" || transition.TargetIdentity == "" || candidateDigest != journalDigest || receiptCandidate != candidateID || receiptDigest != journalDigest {
+			continue
+		}
+		transitions = append(transitions, transition)
+	}
+	return transitions, rows.Err()
+}
+
 func (s *Store) CheckAcceptance(ctx context.Context, d candidate.AcceptanceDecision) (bool, candidate.Receipt, bool, error) {
 	findings, err := json.Marshal(d.ConfirmedFindings)
 	if err != nil {
