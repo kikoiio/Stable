@@ -164,7 +164,7 @@ func (g *TaskGraph) Update(id string, expectedRevision uint64, patch TaskPatch, 
 		return g.project(current), ErrRevisionConflict
 	}
 	if !actor.Lead {
-		claim := current.Assignee == "" && patch.Assignee != nil && *patch.Assignee == actor.MemberID
+		claim := current.Status != TaskCompleted && current.Assignee == "" && patch.Assignee != nil && *patch.Assignee == actor.MemberID
 		if current.Assignee != actor.MemberID && !claim {
 			return Task{}, ErrPermission
 		}
