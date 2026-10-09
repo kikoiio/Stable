@@ -11,6 +11,7 @@ import (
 
 	"stable/internal/agent"
 	"stable/internal/llm"
+	"stable/internal/permission"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
 	"stable/internal/teams"
@@ -37,13 +38,33 @@ func TestTeamLeadMessagesEnterOnlyNextMatchingParentRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Simulate process death after the durable handoff reference but before its
+	// destination RunStarted fact. Replay must keep the notice pending.
+	abandoned := leadRequest
+	abandoned.RunID = "lead-notification-abandoned"
+	service.eventMu.Lock()
+	reserved, err := service.teamLeadNotifications(abandoned, permission.Authority{AllowedRoot: root})
+	service.eventMu.Unlock()
+	if err != nil {
+		t.Fatalf("persist pre-start handoff: %v", err)
+	}
+	findTeamLeadNotice(t, reserved, body)
+	projection, err := sessionlog.ReplayTeams(root, leadRequest.Work.SessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, pending := projection.Messages[message.ID]; !pending {
+		t.Fatalf("handoff without destination RunStarted consumed message: %+v", projection.Messages)
+	}
+	// Rebuild the service to prove the retry depends on durable facts only.
+	service = &Service{deps: service.deps}
 
 	first := startCapturedParent(t, service, leadRequest, "lead-notification-next")
 	firstNotice := findTeamLeadNotice(t, first.request.Messages, body)
 	if firstNotice.Role != "user" || !strings.Contains(firstNotice.Content, "untrusted reference data") || !strings.Contains(firstNotice.Content, message.ID) {
 		t.Fatalf("parent notification is not labeled reference data: %+v", firstNotice)
 	}
-	projection, err := sessionlog.ReplayTeams(root, leadRequest.Work.SessionID, team.ID)
+	projection, err = sessionlog.ReplayTeams(root, leadRequest.Work.SessionID, team.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,6 +82,7 @@ func TestTeamLeadMessagesEnterOnlyNextMatchingParentRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	handOffFacts := 0
+	deliveredHandoffs := 0
 	for _, event := range history {
 		var fact sessionlog.TeamEvent
 		if err := decodeSessionData(event.Data, &fact); err != nil {
@@ -68,19 +90,18 @@ func TestTeamLeadMessagesEnterOnlyNextMatchingParentRun(t *testing.T) {
 		}
 		if fact.Kind == sessionlog.TeamLeadHandoff && fact.Handoff != nil && fact.Handoff.MessageID == message.ID {
 			handOffFacts++
+			if _, found, findErr := sessionlog.FindRunStart(root, leadRequest.Work.SessionID, fact.Handoff.DestinationRunID); findErr != nil {
+				t.Fatal(findErr)
+			} else if found {
+				deliveredHandoffs++
+				if fact.Handoff.DestinationRunID != "lead-notification-next" {
+					t.Fatalf("message was delivered to unexpected parent run %q", fact.Handoff.DestinationRunID)
+				}
+			}
 		}
 	}
-	if handOffFacts != 1 {
-		t.Fatalf("lead handoff facts for message=%d, want exactly one", handOffFacts)
-	}
-	for _, event := range history {
-		var fact sessionlog.TeamEvent
-		if err := decodeSessionData(event.Data, &fact); err != nil {
-			t.Fatal(err)
-		}
-		if fact.Kind == sessionlog.TeamLeadHandoff && fact.Handoff != nil && fact.Handoff.MessageID == message.ID && fact.Handoff.DestinationRunID != "lead-notification-next" {
-			t.Fatalf("lead handoff targeted %q, want first matching parent run", fact.Handoff.DestinationRunID)
-		}
+	if handOffFacts != 2 || deliveredHandoffs != 1 {
+		t.Fatalf("lead handoff facts=%d delivered=%d; want one failed pre-start reservation and one actual delivery", handOffFacts, deliveredHandoffs)
 	}
 }
 

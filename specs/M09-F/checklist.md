@@ -1,6 +1,6 @@
 # M09-F 受控工作树与并行写入 Checklist
 
-> 状态：规格已批准，实施代码已提交；AC1–9 仍需逐项验收。SHA `6b4b51eac877a89b04685894b847df7286e51894` 的 Go `build-and-test`/`test-package`、全部六个 E2E jobs 与真实 Linux writer/sandbox/quota workflow 均通过。F AC1–9 仍未整体验收；A/B/C/D旧CI不作为F实现证据（2026-10-09）。
+> 状态：规格已批准，实施代码已提交；AC1–9 仍需逐项验收。SHA `0f32bd26e44909d9416cd4513d05af9faf425712` 的 Go `build-and-test`、`test-package`、真实 Linux writer/sandbox/quota workflow 和全部六个 E2E jobs 均通过。F AC1–9 仍未整体验收；A/B/C/D旧CI不作为F实现证据（2026-10-09）。
 
 ## 审批与追溯
 

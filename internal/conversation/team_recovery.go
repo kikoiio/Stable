@@ -259,6 +259,12 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 	// recovery never leaves a terminal turn displayed as queued/running.
 	for _, member := range projection.Members {
 		if !member.Status.HasTurn() {
+			if turn, ok := projection.Turns[member.TurnID]; ok && turnTerminalTeamStatus(turn.Status) {
+				// The turn loop above already reconciled this member from the
+				// durable child outcome. Do not reinterpret its newly idle state
+				// as a live member that needs interruption.
+				continue
+			}
 			if member.Status != teams.MemberIdle && member.Status != teams.MemberAwaitingPlan && member.Status != teams.MemberCreated {
 				continue
 			}
