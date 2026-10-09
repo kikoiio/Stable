@@ -55,7 +55,7 @@
 
 ## AC7 有界资源
 
-- [ ] 3 workers/32 queue与D/A/B/C共池，单materializer/8 pending、20,000 files/128 MiB snapshot/16 MiB file真实边界和拒绝路径有屏障证据。
+- [ ] 3 workers/32 queue与D/A/B/C共池，单materializer/8 pending、20,000 files/128 MiB snapshot/16 MiB file真实边界和拒绝路径有屏障证据。增量证据：`TestMaterializerSingleWorkerAndEightPendingSlots` 以channel-gated callback验证单 materializer 同时仅运行一个任务、容纳8个pending、第9个返回 `ErrQueueFull` 且不持久化；定向测试本地通过（2026-10-10）。共池和文件/字节边界仍未整体验收。
 - [ ] 每项512 MiB/每project2 GiB/16未删除项、child8轮/3分钟/50,000输出/8 KiB摘要/64 KiB输入生效；定义/请求只能收窄。
 - [ ] create/materialize3分钟、command90秒并受childdeadline、query最多30秒、stop清理10秒边界生效；等待不占额外childworker、不产生未接受无界goroutine。
 - [ ] 配额/持久化/取消/队列失败可见，临时资源只清理自身；构建/全量/容器/大数据走已授权云端，未完成检查如实保留。
