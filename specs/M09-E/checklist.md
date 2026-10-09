@@ -29,6 +29,8 @@
 
 增量场景证据（不代表上述完整用户场景已通过）：[`team_two_member_two_round_socket_integration_test.go`](../../internal/tui/team_two_member_two_round_socket_integration_test.go) 现覆盖 member 通过 team tool 向 lead 报告、TUI 查询持久消息，以及下一匹配 parent run 经 conversation socket 收到带不可信引用标记的通知；测试使用 fake runner，不调用真实 provider。AC 与完整场景仍保持未勾选。
 
+AC5 增量证据（不代表 AC5 已通过）：[`team_busy_shutdown_defer_integration_test.go`](../../internal/tui/team_busy_shutdown_defer_integration_test.go) 覆盖 lead 经 TUI/socket 对运行中 member 发起 typed shutdown、member 以受信 tool 延期、TUI request list 显示延期反馈，且当前 child turn 继续至 idle；使用 fake runner，无真实 provider。AC5 保持未勾选。
+
 ## 源端覆盖和工程证据
 
 - [x] 对照源端 `teams.go`、`spawn.go`、`inprocess.go`、`runner.go`：成员使用常驻 goroutine、完整 `conversation.Manager` 多轮、500ms idle mailbox polling 与 progress；Stable 使用持久 turn + 有界摘要/指定消息延续，不迁移源端完整 Conv/transcript。对照结论见 [spec 源端行为表](spec.md#源端行为对照与边界)。
