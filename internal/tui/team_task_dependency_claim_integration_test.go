@@ -143,9 +143,10 @@ func TestTeamTaskDependencyFlowsFromTUIThroughMemberClaimsAndReplay(t *testing.T
 	if _, err := svc.UpdateTeamTask(ctx, requests[1], teamID, createB.TeamTask.ID, createB.TeamTask.Revision, teams.TaskPatch{Assignee: &assigneeB, Status: &statusProgress}); err == nil {
 		t.Fatal("member B claim before prerequisite completion succeeded")
 	}
-	beforeComplete, err := svc.GetTeamTask(ctx, agent.ExecutionRequest{Work: requests[1].Work, TeamUser: true}, teamID, createB.TeamTask.ID)
-	if err != nil || beforeComplete.Assignee != memberIDs[1] || beforeComplete.Status != teams.TaskBlocked || beforeComplete.Revision != createB.TeamTask.Revision {
-		t.Fatalf("blocked member claim mutated B: task=%+v err=%v", beforeComplete, err)
+	model, listStillBlocked := submitAcceptanceTeamCommand(t, model, "/team "+teamID+" tasks list")
+	stillBlocked := findTeamTask(acceptanceTeamResponse(t, listStillBlocked, "team_task_list").TeamTasks, createB.TeamTask.ID)
+	if stillBlocked.Assignee != memberIDs[1] || stillBlocked.Status != teams.TaskBlocked || stillBlocked.Revision != createB.TeamTask.Revision {
+		t.Fatalf("blocked member claim mutated B: task=%+v", stillBlocked)
 	}
 
 	assigneeA := memberIDs[0]

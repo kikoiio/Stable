@@ -43,6 +43,8 @@
 
 新增组合证据：`TestWorkspaceManualThirdValueMergeResolvesAndExportsForReview` 与 `TestSequentialWorkspaceCandidateAcceptsPreserveIndependentChanges` 定向运行通过（`TMPDIR=$PWD/.tmp GOMAXPROCS=1 go test -p 1 ./internal/conversation -run '^(TestWorkspaceManualThirdValueMergeResolvesAndExportsForReview|TestSequentialWorkspaceCandidateAcceptsPreserveIndependentChanges)$' -count=1`，2026-10-10）。前者覆盖冲突选择绑定、手工第三值、重新预览、导出后review及显式接收；formal 在接收前不变。后者覆盖两个工作树先后接受且第二候选保留第一项已接受的独立改动。AC4其余逐路径B/F/W矩阵、完整socket组合、并发/崩溃边界仍开放。
 
+新增 rename 矩阵：`TestThreeWayPreviewHandlesAddedDeletedAndRenamedPaths` 增加 workspace rename 遇 formal 对旧路径编辑时的逐路径冲突，并验证选择 formal 后旧路径编辑和 workspace 新路径都保留；另验证双方把同一路径改名到不同目标时旧路径删除、两侧新路径均保留。定向 workspace 测试本地通过（2026-10-10）；完整 AC4 仍开放。
+
 - [ ] B/F/W相等/仅一方变/双方相同/双方不同表覆盖bytes、mode、创建、删除；rename按delete/add，冲突有绑定digest的路径摘要，无自动文本merge/force旁路。
 - [ ] 两工作树不同文件依次导出并接受不会回退先前正式改动；相同文件冲突阻断，用户手工合并W后，逐路径user resolution可继续导出，不要求W等于旧B/F；生成候选有新真实版本。
 - [ ] conflict preview/resolution绑定真实user/session/workspace/generation、完整B/F/W digests及所有精确冲突路径的W/F选择；缺失/额外路径、源变化、过期或模型决策拒绝；resolution不改正式根或baseline，导出后仍须新候选review/用户accept。
@@ -79,7 +81,7 @@
 
 ## AC7 有界资源
 
-- [ ] 3 workers/32 queue与D/A/B/C共池，单materializer/8 pending、20,000 files/128 MiB snapshot/16 MiB file真实边界和拒绝路径有屏障证据。增量证据：`TestMaterializerSingleWorkerAndEightPendingSlots` 以channel-gated callback验证单 materializer 同时仅运行一个任务、容纳8个pending、第9个返回 `ErrQueueFull` 且不持久化；定向测试本地通过（2026-10-10）。代码审阅确认 supervisor 只创建一个 `PoolDelegator`，并将同一实例注入 `AgentTaskCoordinator`、team scheduler 与 workspace child dispatch；`TestTeamCapacityUsesSharedPoolAndResumesWaitingMessagesFairly` 和 `TestWorktreeTeamMemberFlowsThroughExportReviewAndAcceptance` 分别覆盖共池排队与真实workspace成员路径。后者现新增屏障：worktree writer 持有 lease 时 D named task 保持queued，释放 writer 后 named child 才启动，两个任务均成功settle；focused conversation test passed 2026-10-10。`TestPoolDelegatorUsesDefaultWorkerAndQueueCapacity` 使用生产默认值并实际验证3 worker同时运行、32项排队、第33项拒绝、35个已接纳任务全部只执行一次；本地定向测试通过（2026-10-10）。新增 `TestManifestDefaultSnapshotLimitAtBoundary` 用 sparse fixtures 验证生产默认 128 MiB 快照精确上限成功，超出 1 byte 返回 `ErrQuota` 且不创建目标目录；定向 workspace 测试本地通过（2026-10-10）。20,000 文件生产边界、16 MiB 和其他文件/字节边界以及跨入口全量容量矩阵仍未整体验收，当前实现 SHA 云端复验待完成。
+- [ ] 3 workers/32 queue与D/A/B/C共池，单materializer/8 pending、20,000 files/128 MiB snapshot/16 MiB file真实边界和拒绝路径有屏障证据。增量证据：`TestMaterializerSingleWorkerAndEightPendingSlots` 以channel-gated callback验证单 materializer 同时仅运行一个任务、容纳8个pending、第9个返回 `ErrQueueFull` 且不持久化；定向测试本地通过（2026-10-10）。代码审阅确认 supervisor 只创建一个 `PoolDelegator`，并将同一实例注入 `AgentTaskCoordinator`、team scheduler 与 workspace child dispatch；`TestTeamCapacityUsesSharedPoolAndResumesWaitingMessagesFairly` 和 `TestWorktreeTeamMemberFlowsThroughExportReviewAndAcceptance` 分别覆盖共池排队与真实workspace成员路径。后者现新增屏障：worktree writer 持有 lease 时 D named task 保持queued，释放 writer 后 named child 才启动，两个任务均成功settle；focused conversation test passed 2026-10-10。`TestPoolDelegatorUsesDefaultWorkerAndQueueCapacity` 使用生产默认值并实际验证3 worker同时运行、32项排队、第33项拒绝、35个已接纳任务全部只执行一次；本地定向测试通过（2026-10-10）。`TestManifestDefaultSnapshotLimitAtBoundary` 用 sparse fixtures 验证生产默认128 MiB快照精确上限通过、超1 byte返回 `ErrQuota` 且不创建目标；`TestManifestDefaultFileCountLimitAtBoundary` 验证默认20,000个空文件通过、第20,001个返回 `ErrQuota`。两项 workspace 定向测试本地通过（2026-10-10）。16 MiB 已有直接证据；其他跨入口容量组合与全量矩阵仍未整体验收，当前实现 SHA 云端复验待完成。
 - [ ] 每项512 MiB/每project2 GiB/16未删除项、child8轮/3分钟/50,000输出/8 KiB摘要/64 KiB输入生效；定义/请求只能收窄。
 - [ ] create/materialize3分钟、command90秒并受childdeadline、query最多30秒、stop清理10秒边界生效；等待不占额外childworker、不产生未接受无界goroutine。
 - [ ] 配额/持久化/取消/队列失败可见，临时资源只清理自身；构建/全量/容器/大数据走已授权云端，未完成检查如实保留。

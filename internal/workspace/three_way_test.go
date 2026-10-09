@@ -104,6 +104,8 @@ func TestThreeWayPreviewHandlesAddedDeletedAndRenamedPaths(t *testing.T) {
 	formalAdd := mergeEntry("new.txt", "formal", 0644)
 	workspaceAdd := mergeEntry("new.txt", "workspace", 0644)
 	renamed := mergeEntry("renamed.txt", "base", 0644)
+	formalRename := mergeEntry("formal-name.txt", "base", 0644)
+	workspaceRename := mergeEntry("workspace-name.txt", "base", 0644)
 
 	tests := []struct {
 		name      string
@@ -112,6 +114,8 @@ func TestThreeWayPreviewHandlesAddedDeletedAndRenamedPaths(t *testing.T) {
 		workspace []ManifestEntry
 		conflicts []string
 		merged    []ManifestEntry
+		choices   map[string]string
+		resolved  []ManifestEntry
 	}{
 		{name: "formal add", formal: []ManifestEntry{formalAdd}, merged: []ManifestEntry{formalAdd}},
 		{name: "workspace add", workspace: []ManifestEntry{formalAdd}, merged: []ManifestEntry{formalAdd}},
@@ -121,6 +125,23 @@ func TestThreeWayPreviewHandlesAddedDeletedAndRenamedPaths(t *testing.T) {
 		{name: "formal delete", base: []ManifestEntry{baseFile}, workspace: []ManifestEntry{baseFile}},
 		{name: "delete against edit", base: []ManifestEntry{baseFile}, workspace: []ManifestEntry{mergeEntry("old.txt", "workspace", 0644)}, conflicts: []string{"old.txt"}},
 		{name: "rename is delete and add", base: []ManifestEntry{baseFile}, formal: []ManifestEntry{baseFile}, workspace: []ManifestEntry{renamed}, merged: []ManifestEntry{renamed}},
+		{
+			name:      "workspace rename conflicts with formal edit of old path",
+			base:      []ManifestEntry{baseFile},
+			formal:    []ManifestEntry{mergeEntry("old.txt", "formal edit", 0644)},
+			workspace: []ManifestEntry{renamed},
+			conflicts: []string{"old.txt"},
+			merged:    []ManifestEntry{renamed},
+			choices:   map[string]string{"old.txt": UseFormal},
+			resolved:  []ManifestEntry{mergeEntry("old.txt", "formal edit", 0644), renamed},
+		},
+		{
+			name:      "independent renames retain both new paths",
+			base:      []ManifestEntry{baseFile},
+			formal:    []ManifestEntry{formalRename},
+			workspace: []ManifestEntry{workspaceRename},
+			merged:    []ManifestEntry{formalRename, workspaceRename},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -147,6 +168,20 @@ func TestThreeWayPreviewHandlesAddedDeletedAndRenamedPaths(t *testing.T) {
 			for i, entry := range preview.Manifest.Entries {
 				if entry != test.merged[i] {
 					t.Fatalf("merged entry[%d]=%+v, want %+v", i, entry, test.merged[i])
+				}
+			}
+			if test.choices != nil {
+				resolved, err := ResolveThreeWay(preview, test.choices, Limits{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(resolved.Entries) != len(test.resolved) {
+					t.Fatalf("resolved entries=%+v, want %+v", resolved.Entries, test.resolved)
+				}
+				for i, entry := range resolved.Entries {
+					if entry != test.resolved[i] {
+						t.Fatalf("resolved entry[%d]=%+v, want %+v", i, entry, test.resolved[i])
+					}
 				}
 			}
 		})
