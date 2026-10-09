@@ -76,6 +76,6 @@ M09-E 增加持久化团队协作、消息、任务和只读协调器；M09-F �
 
 后续本地回归已覆盖 M09-E TUI 自身的 parent-stream EOF 恢复状态机，以及 M09-F 同内容不同 inode 的 `.stable` 目录替换恢复；两项定向测试通过。当前组合 SHA 的 Go、M09 Workspace Linux 与 E2E 云端结果见 checklist；M09-E/F 仍未完成整体验收。
 
-另补齐 production 默认 128 MiB snapshot 边界拒绝无副作用、64 KiB 完整 team-turn 编码边界，以及 coordinator 对 worktree lifecycle 伪造调用的零副作用拒绝回归；定向测试通过，checklist 记录对应证据。当前云端复验以最新推送 SHA 为准。
+SHA `a8fbddd` 的 Go `build-and-test`、`test-package`、M09 Workspace Linux 和六个 E2E jobs 均通过：Go run [37998687925](https://github.com/kikoiio/Stable/actions/runs/37998687925)、Workspace Linux run [37998687877](https://github.com/kikoiio/Stable/actions/runs/37998687877)、E2E run [37998687884](https://github.com/kikoiio/Stable/actions/runs/37998687884)。该 SHA 补充 team 请求响应者拒绝、coordinator TUI 启停闭环、rename 冲突和生产默认20,000文件上限回归。Go 首轮曾发现旧 TUI task-board fixture 直接伪造 `TeamUser` 标记；夹具现通过真实 TUI/socket 查询，复验全绿。
 
-SHA `a895665` 的 Go 全量 build/unit + package 与 M09 Workspace Linux 均通过，E2E 仍运行。后续本地修复了 clean/discard remove 的 intent 后内容变更竞态，并以服务内短期 HMAC proof 阻止伪造 `TeamUser` 提权；conversation/workspace 定向回归、gofmt 和 diff-check 通过，待新 SHA 云端复验。
+当前本地下一批还补充 E 身份/恢复/协调器拒绝/限额与 F workspace 所有权、plan-mode writer、metadata 恢复、重启用量、workspace 数和 child 输出预算证据；新增定向用例均通过，待提交及对应 SHA 云端复验。M09-E/F checklist 与 M09 总体仍保持未整体验收状态。
