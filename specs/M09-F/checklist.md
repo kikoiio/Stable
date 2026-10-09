@@ -12,6 +12,7 @@
 
 - [ ] workspace ID/label分离，label不用于路径/ref，创建与所有query/lifecycle操作拒绝跨session/project/Goal/WorkItem或伪造根。增量证据：双 session TUI same-label 与 Goal/WorkItem socket scope 矩阵通过；后者覆盖 get/enter/list、keep/export/remove/preview/discard-preview/discard/resolve，并验证客户端伪造 ProjectRoot 的 query 拒绝和越权后 owner binding、snapshot、checkout/formal bytes 与 candidate 不变（`TestWorkspaceSocketScopesGoalAndWorkItemOwnership`）。另有 `TestWorkspaceCreateOverSocketRequiresExactGoalWorkItemRunScope` 用真实 owner Goal run 验证 worktree_create 拒绝跨 Goal 和跨 WorkItem、正确 owner scope 可创建并查询。两项定向 Go 测试本地通过（2026-10-10）；剩余 ownership predicate 与完整 AC1 仍需验收。
 - 增量证据：`TestWorkspaceSocketSessionScopeCannotMutateGoalOwnedWorkspace` 用 session-scope socket 请求触达 Goal-owned workspace，验证 get/enter/keep/export/remove/preview/discard-preview 等操作拒绝、list 为空，且 owner/binding、checkout/formal、candidate 数据均不变。定向 conversation 测试本地通过（2026-10-10）；完整 AC1 仍开放。
+- 增量证据：`TestWorkspaceBindingDenialsPreserveOwnerAndSiblingState` 验证 sibling session 的 Get/Enter 被拒、owner 有活动 run 时 Exit/切换也被拒；每次拒绝后 owner/sibling bindings、generation/state、checkout bytes 与运行中 request authority 均不变。定向 conversation 测试本地通过（2026-10-10）；完整 AC1 仍开放。
 - [ ] 两个session binding及多个独立child同时存在；没有全局cwd切换，单项单writer/generation约束生效。增量证据：双 session TUI/socket创建、进入和并发lead run记录精确workspace/generation，cwd不变；单项单writer的完整并发矩阵仍未整体验收，SHA `fb4353aaa1eae4003641d9232a913d69e1886029` Go `build-and-test`通过。
 - [ ] 活跃run期间禁止变更其binding/authority；默认exit/keep保留变更且确认writer真实退出，父正常完成/断线保持D后台语义。（子项证据：Session TUI/socket 与 `TestGoalWorktreeActiveBindingEnterAndExitOverSocket` 均验证活跃 writer 下 enter 被拒绝且原 lease 保持，exit 等到取消终态后解除 binding；TUI 新增 `/worktrees scope goal <GoalID> <WorkItemID>` 显式选择与 `scope session` 清除，所有请求传递精确 scope，并由 `TestWorktreeScopeSelectionRequiresGoalAndWorkItemAndCanClear`、`TestWorktreeCommandsDispatchSelectedGoalWorkItemScope`、`TestWorktreeLateResponseFromPreviousGoalItemIsIgnored`、`TestWorktreeTUIGoalWorkItemLifecycleScope` 覆盖scope传递、迟到回复隔离和真实 Goal run 下 create/list/get/enter/exit、错 scope get/enter拒绝。四项定向 TUI 测试本地通过（2026-10-10）。父正常完成/真实断线语义仍未覆盖。）
 
@@ -47,6 +48,10 @@
 新增组合证据：`TestWorkspaceManualThirdValueMergeResolvesAndExportsForReview` 与 `TestSequentialWorkspaceCandidateAcceptsPreserveIndependentChanges` 定向运行通过（`TMPDIR=$PWD/.tmp GOMAXPROCS=1 go test -p 1 ./internal/conversation -run '^(TestWorkspaceManualThirdValueMergeResolvesAndExportsForReview|TestSequentialWorkspaceCandidateAcceptsPreserveIndependentChanges)$' -count=1`，2026-10-10）。前者覆盖冲突选择绑定、手工第三值、重新预览、导出后review及显式接收；formal 在接收前不变。后者覆盖两个工作树先后接受且第二候选保留第一项已接受的独立改动。AC4其余逐路径B/F/W矩阵、完整socket组合、并发/崩溃边界仍开放。
 
 新增 rename 矩阵：`TestThreeWayPreviewHandlesAddedDeletedAndRenamedPaths` 增加 workspace rename 遇 formal 对旧路径编辑时的逐路径冲突，并验证选择 formal 后旧路径编辑和 workspace 新路径都保留；另验证双方把同一路径改名到不同目标时旧路径删除、两侧新路径均保留。定向 workspace 测试本地通过（2026-10-10）；完整 AC4 仍开放。
+
+新增 resolution 源变化证据：`TestWorkspaceResolutionExpiresWhenBaselineChangesBeforeExport` 在用户完成冲突选择后改动私有 baseline，验证 Export 与后续 Preview 均返回 `ErrSourceChanged`，formal 内容保持不变。定向 conversation 测试本地通过（2026-10-10）；其它源绑定/并发切口仍开放。
+
+新增 preview 绑定证据：`TestWorkspaceResolutionRejectsStaleWorkspaceDigest` 在三方冲突 preview 后仅改变 checkout/W digest，验证旧 preview 的用户 resolution 返回 `ErrSourceChanged`，不写 resolution/ResolvedCount，formal 和 baseline 内容保持不变。定向 workspace 测试本地通过（2026-10-10）；其它 stale/session/generation 组合仍开放。
 
 - [ ] B/F/W相等/仅一方变/双方相同/双方不同表覆盖bytes、mode、创建、删除；rename按delete/add，冲突有绑定digest的路径摘要，无自动文本merge/force旁路。
 - [ ] 两工作树不同文件依次导出并接受不会回退先前正式改动；相同文件冲突阻断，用户手工合并W后，逐路径user resolution可继续导出，不要求W等于旧B/F；生成候选有新真实版本。
@@ -102,6 +107,7 @@
 - [ ] `/worktrees`、create/enter/exit/keep/export/resolve/remove、`/agent --worktree`与父工具形成真实service闭环，完整用法/错误/状态/冲突反馈可见。（TUI 增加显式 Goal+WorkItem 工作树范围选择/清除与贯穿请求；Session 默认不变。真实 Goal lifecycle 集成及四项定向 TUI 测试本地通过；其余入口闭环仍待验收。）
 - [ ] 独立task/workspace session游标重连、重复通知去重，不覆盖父ActiveRunID/stream；恢复能看到同一工作树/candidate/保留原因。
 - [ ] 用户冲突resolution、discard与候选接受是单独可审阅决策；目录/事件/日志/TUI不显示角色正文、凭据、thinking、raw transcript或无限diff。
+- 增量证据：`TestWorktreeStatusRenderingOmitsPrivateSummaryAndDiffBody` 验证工作树状态只展示标签、冲突路径与摘要 digest，不展示角色正文、API key、thinking、raw transcript 或 diff 正文。定向 TUI 测试本地通过（2026-10-10）；目录、事件、日志及完整 diff 限制矩阵仍开放。
 - [ ] 后台成功/summary/export不成为Goal证据，候选接受后仍需独立目标复检；Session/Goal WorkRef沿可信事件保持关联。
 
 ## AC9 组合回归与源差异

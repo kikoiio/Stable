@@ -80,4 +80,6 @@ SHA `a8fbddd` 的 Go `build-and-test`、`test-package`、M09 Workspace Linux 和
 
 SHA `2eca48a` 的 Go run [37999887455](https://github.com/kikoiio/Stable/actions/runs/37999887455) 与 M09 Workspace Linux run [37999887767](https://github.com/kikoiio/Stable/actions/runs/37999887767) 通过。E2E run [37999887580](https://github.com/kikoiio/Stable/actions/runs/37999887580) 的 `e2e-core` 在 `dependency_change.sh` 的 `PROJECT TABLE REMOVAL` 收敛后断言失败：证据和依赖已 current，但读取时 Goal 仍为 active；其余五个 jobs 通过。该 SHA 不含相关脚本或运行时代码改动，待后续 SHA 复验。
 
-当前本地下一批还补充 E lead 消息字节边界和身份 proof 过期、F workspace/project 存储额度及 live writer 退出失败保护；新增定向用例均通过，待提交及对应 SHA 云端复验。M09-E/F checklist 与 M09 总体仍保持未整体验收状态。
+SHA `ad14e4f` 的 Go run [38005341959](https://github.com/kikoiio/Stable/actions/runs/38005341959) 与 M09 Workspace Linux run [38005341823](https://github.com/kikoiio/Stable/actions/runs/38005341823) 通过；E2E run [38005341767](https://github.com/kikoiio/Stable/actions/runs/38005341767) 仍在运行。该 SHA 增加 lead 通知批次字节边界、proof 过期、存储上限和 live writer 退出失败用例。
+
+当前本地下一批补充六项回归：aborted team intent 后的 member 恢复、workspace binding owner/sibling 状态不可变、冲突 resolution 遇 baseline 或 checkout digest 变化时失败关闭、coordinator 管理入口零副作用拒绝，以及工作树 TUI 的敏感摘要/diff 隐私；定向用例均通过，待提交及云端复验。M09-E/F checklist 与 M09 总体仍保持未整体验收状态。
