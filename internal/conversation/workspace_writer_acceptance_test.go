@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"stable/internal/execution"
 	"stable/internal/llm"
 	"stable/internal/permission"
+	"stable/internal/platform/proc"
 	"stable/internal/platform/sandbox"
 	"stable/internal/sessionlog"
 	"stable/internal/workspace"
@@ -25,6 +28,260 @@ type writerAcceptanceGate struct{}
 
 func (writerAcceptanceGate) Authorize(context.Context, permission.Authority, permission.Operation) (permission.PermissionDecision, error) {
 	return permission.PermissionDecision{Kind: permission.DecisionAllow}, nil
+}
+
+type workspaceCrashMarker struct {
+	WorkspaceID string              `json:"workspace_id"`
+	RunID       string              `json:"run_id"`
+	Generation  uint64              `json:"generation"`
+	Checkout    string              `json:"checkout"`
+	Process     proc.TrackedProcess `json:"process"`
+}
+
+// crashMarkerAccounting makes the durable process identity visible to the
+// parent test only after LifecycleService has journaled it. This lets the
+// parent kill the test helper at the exact point where recovery matters.
+type crashMarkerAccounting struct {
+	*workspace.LifecycleService
+	markerPath string
+	marker     workspaceCrashMarker
+}
+
+func (a crashMarkerAccounting) RegisterWriterProcess(ctx context.Context, lease workspace.WriterLease, process proc.TrackedProcess) error {
+	if err := a.LifecycleService.RegisterWriterProcess(ctx, lease, process); err != nil {
+		return err
+	}
+	a.marker.WorkspaceID = lease.WorkspaceID
+	a.marker.RunID = lease.RunID
+	a.marker.Generation = lease.Generation
+	a.marker.Checkout = lease.Paths.Checkout
+	a.marker.Process = process
+	data, err := json.Marshal(a.marker)
+	if err != nil {
+		return err
+	}
+	tmp := a.markerPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, a.markerPath)
+}
+
+// TestWorkspaceWriterAbruptBwrapDeathRecoversJournalIdempotently runs only in
+// the dedicated Linux cloud workflow. A child test process starts a real
+// bwrap command, journals its host process identity, and blocks in sleep. The
+// parent then SIGKILLs that helper (so no Go defer or service Close runs),
+// reopens LifecycleService, and verifies safe settlement plus idempotent
+// repeated recovery while the checkout remains preserved.
+func TestWorkspaceWriterAbruptBwrapDeathRecoversJournalIdempotently(t *testing.T) {
+	const helperEnv = "STABLE_M09_WRITER_RECOVERY_CHILD"
+	if os.Getenv(helperEnv) == "1" {
+		runWorkspaceWriterRecoveryChild(t)
+		return
+	}
+	helper := os.Getenv("STABLE_M09_WRITER_HELPER")
+	volume := os.Getenv("STABLE_M09_VOLUME")
+	if helper == "" || volume == "" {
+		t.Skip("requires cloud helper and disposable bounded disk volume")
+	}
+	if err := sandbox.BoundedWorkspaceVolume(volume); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture, err := os.MkdirTemp(volume, "writer-crash-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := workspaceCrashMarker{}
+	safeToRemove := false
+	defer func() {
+		if marker.Process.ProcessGroup <= 0 {
+			safeToRemove = true
+		} else if !safeToRemove {
+			active, activeErr := proc.ProcessGroupActive(marker.Process.ProcessGroup)
+			if activeErr == nil && active {
+				// Only signal the exact durable identity published by the helper.
+				// A failed recovery must not leave the long-running sandbox command
+				// behind after the test reports its failure.
+				if stopErr := proc.StopTrackedProcess(marker.Process, 5*time.Second); stopErr != nil {
+					t.Errorf("stop remaining tracked writer before cleanup: %v", stopErr)
+				}
+				active, activeErr = proc.ProcessGroupActive(marker.Process.ProcessGroup)
+			}
+			safeToRemove = activeErr == nil && !active
+		}
+		if safeToRemove {
+			if err := os.RemoveAll(fixture); err != nil {
+				t.Errorf("remove test fixture after confirming writer process group is gone: %v", err)
+			}
+		} else {
+			t.Errorf("preserving recovery fixture %s because writer process-group state is uncertain", fixture)
+		}
+	}()
+	formal := filepath.Join(fixture, "formal")
+	stateRoot := filepath.Join(fixture, "state")
+	markerPath := filepath.Join(fixture, "tracked-process.json")
+	if err := os.MkdirAll(formal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formal, "base.txt"), []byte("formal baseline"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	child := exec.Command(os.Args[0], "-test.run=^TestWorkspaceWriterAbruptBwrapDeathRecoversJournalIdempotently$", "-test.v")
+	child.Env = append(os.Environ(), helperEnv+"=1", "STABLE_M09_RECOVERY_FORMAL="+formal, "STABLE_M09_RECOVERY_STATE="+stateRoot, "STABLE_M09_RECOVERY_MARKER="+markerPath, "STABLE_M09_WRITER_HELPER="+helper)
+	child.Stdout = os.Stderr
+	child.Stderr = os.Stderr
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	childExit := make(chan error, 1)
+	go func() { childExit <- child.Wait() }()
+	childWaited := false
+	t.Cleanup(func() {
+		if !childWaited && child.Process != nil {
+			_ = child.Process.Kill()
+			<-childExit
+			childWaited = true
+		}
+	})
+
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		data, readErr := os.ReadFile(markerPath)
+		if readErr == nil && json.Unmarshal(data, &marker) == nil && marker.Process.PID > 1 {
+			if _, err := os.Stat(filepath.Join(marker.Checkout, "recovery-running.txt")); err == nil {
+				break
+			}
+		}
+		select {
+		case childErr := <-childExit:
+			childWaited = true
+			t.Fatalf("recovery helper exited before the sandbox command became active: %v", childErr)
+		default:
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if marker.WorkspaceID == "" || marker.Generation == 0 || marker.Process.PID <= 1 {
+		t.Fatalf("helper did not publish a journaled process identity: %+v", marker)
+	}
+	if _, err := os.Stat(filepath.Join(marker.Checkout, "recovery-running.txt")); err != nil {
+		t.Fatalf("real bwrap command did not reach the workspace checkout: %v", err)
+	}
+	if err := child.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatalf("simulate abrupt test-helper death: %v", err)
+	}
+	select {
+	case <-childExit:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SIGKILL did not terminate the recovery helper")
+	}
+	childWaited = true
+
+	scope := workspaceCrashScope(formal)
+	reopen := func() *workspace.LifecycleService {
+		t.Helper()
+		layout, err := workspace.NewLayout(stateRoot, formal, "m09project")
+		if err != nil {
+			t.Fatal(err)
+		}
+		manager, err := workspace.NewService(layout, workspace.Limits{}, workspace.ServiceDependencies{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return manager
+	}
+	first := reopen()
+	firstSnapshot, err := first.Get(context.Background(), scope, marker.WorkspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(marker.Checkout, "recovery-running.txt")); err != nil {
+		t.Fatalf("recovery discarded the writer checkout: %v", err)
+	}
+	if firstSnapshot.State == workspace.StateKept {
+		if firstSnapshot.WriterRunID != "" {
+			t.Fatalf("settled workspace retained writer authority: %+v", firstSnapshot)
+		}
+		active, activeErr := proc.ProcessGroupActive(marker.Process.ProcessGroup)
+		if activeErr != nil || active {
+			t.Fatalf("workspace settled while its original process group may still be active: active=%v err=%v", active, activeErr)
+		}
+		safeToRemove = true
+	} else if firstSnapshot.State != workspace.StateInterrupted && firstSnapshot.State != workspace.StateBlocked {
+		t.Fatalf("recovery did not settle or conservatively block the writer: %+v", firstSnapshot)
+	} else if firstSnapshot.WriterRunID != marker.RunID || firstSnapshot.Error == "" {
+		t.Fatalf("blocked recovery lost the writer identity or reason: %+v", firstSnapshot)
+	}
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	second := reopen()
+	defer second.Close(context.Background())
+	secondSnapshot, err := second.Get(context.Background(), scope, marker.WorkspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondSnapshot.State != firstSnapshot.State || secondSnapshot.Cursor != firstSnapshot.Cursor || secondSnapshot.WriterRunID != firstSnapshot.WriterRunID {
+		t.Fatalf("repeated recovery was not idempotent: first=%+v second=%+v", firstSnapshot, secondSnapshot)
+	}
+	if _, err := os.Stat(filepath.Join(marker.Checkout, "recovery-running.txt")); err != nil {
+		t.Fatalf("repeated recovery discarded the writer checkout: %v", err)
+	}
+	if original, err := os.ReadFile(filepath.Join(formal, "base.txt")); err != nil || string(original) != "formal baseline" {
+		t.Fatalf("abrupt workspace writer changed the formal tree: %q err=%v", original, err)
+	}
+}
+
+func runWorkspaceWriterRecoveryChild(t *testing.T) {
+	formal := os.Getenv("STABLE_M09_RECOVERY_FORMAL")
+	stateRoot := os.Getenv("STABLE_M09_RECOVERY_STATE")
+	markerPath := os.Getenv("STABLE_M09_RECOVERY_MARKER")
+	helper := os.Getenv("STABLE_M09_WRITER_HELPER")
+	layout, err := workspace.NewLayout(stateRoot, formal, "m09project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := workspace.NewService(layout, workspace.Limits{}, workspace.ServiceDependencies{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "m09recovery0000000000000000000000"
+	const leadRunID = "m09recoverylead000000000000000000"
+	const childRunID = "m09recoverychild00000000000000000"
+	work := agent.WorkRef{Kind: agent.WorkSession, SessionID: sessionID}
+	scope := workspace.Scope{ProjectID: "m09project", SessionID: sessionID, Work: work, Authority: permission.Authority{RunID: leadRunID, SessionID: sessionID, AllowedRoot: formal, FormalRoot: formal, CandidateRoot: filepath.Join(formal, "candidate"), Mode: permission.ModeBypass}}
+	created, err := manager.Create(context.Background(), scope, "abrupt writer recovery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := manager.AcquireWriter(context.Background(), scope, created.ID, childRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounting := crashMarkerAccounting{LifecycleService: manager, markerPath: markerPath}
+	base := execution.NewToolExecutorFactory(execution.ToolExecutorDeps{Sandbox: sandbox.New(), Gate: writerAcceptanceGate{}, HelperPath: helper})
+	factory := execution.WorkspaceWriterExecutorFactory(base, lease, accounting)
+	permissionBounds, err := json.Marshal(lease.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := factory.ForRun(agent.ExecutionRequest{RunID: childRunID, Work: work, PermissionBounds: permissionBounds})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = executor.Execute(context.Background(), llm.ToolUse{ID: "long-running-command", Name: "command", Arguments: json.RawMessage(`{"command":"printf active > recovery-running.txt; exec sleep 120"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Fatalf("long-running sandbox command unexpectedly returned")
+}
+
+func workspaceCrashScope(formal string) workspace.Scope {
+	const sessionID = "m09recovery0000000000000000000000"
+	const leadRunID = "m09recoverylead000000000000000000"
+	work := agent.WorkRef{Kind: agent.WorkSession, SessionID: sessionID}
+	return workspace.Scope{ProjectID: "m09project", SessionID: sessionID, Work: work, Authority: permission.Authority{RunID: leadRunID, SessionID: sessionID, AllowedRoot: formal, FormalRoot: formal, CandidateRoot: filepath.Join(formal, "candidate"), Mode: permission.ModeBypass}}
 }
 
 // This fixture is enabled by the dedicated cloud workflow. It executes the

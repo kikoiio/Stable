@@ -4,6 +4,8 @@ package sandbox
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -42,13 +44,30 @@ func TestWorkspaceRealVolumeQuotaAndMetadataAttacks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	target := filepath.Join(root, "network-target.txt")
+	runtime := filepath.Join(root, "runtime")
+	if err := os.Mkdir(runtime, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(runtime, "network-target.txt")
 	if err := os.WriteFile(target, []byte(listener.Addr().String()), 0600); err != nil {
 		t.Fatal(err)
 	}
-	p.ReadOnlyFiles = []ReadOnlyFileMount{{HostPath: target, GuestPath: "/workspace/runtime/network-target.txt"}}
-	p.ReadOnlyFiles = append(p.ReadOnlyFiles, ReadOnlyFileMount{HostPath: os.Args[0], GuestPath: "/workspace/runtime/sandbox.test"})
-	probe := SandboxProfile{ProjectRoot: p.ProjectRoot, CandidateRoot: p.CandidateRoot, RunRoot: p.RunRoot, WorkspaceIsolation: true, WorkspaceVolumeRoot: root, Timeout: 5 * time.Second, ReadOnlyFiles: p.ReadOnlyFiles}
+	helperPath := filepath.Join(runtime, "sandbox.test")
+	source, err := os.Open(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper, err := os.OpenFile(helperPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)
+	if err != nil {
+		_ = source.Close()
+		t.Fatal(err)
+	}
+	_, copyErr := io.Copy(helper, source)
+	closeErr := errors.Join(source.Close(), helper.Close())
+	if err := errors.Join(copyErr, closeErr); err != nil {
+		t.Fatal(err)
+	}
+	probe := SandboxProfile{ProjectRoot: p.ProjectRoot, CandidateRoot: p.CandidateRoot, RunRoot: p.RunRoot, WorkspaceIsolation: true, WorkspaceVolumeRoot: root, Timeout: 5 * time.Second, ReadOnlyMounts: []ReadOnlyMount{{HostPath: runtime, GuestPath: "/workspace/runtime"}}}
 	networkResult, err := New().RunIsolated(context.Background(), probe, []string{"/workspace/runtime/sandbox.test", "-test.run=^TestWorkspaceNetworkProbeHelper$"}, nil)
 	if err != nil || networkResult.ExitCode != 0 {
 		t.Fatalf("workspace command network probe result=%+v error=%v", networkResult, err)

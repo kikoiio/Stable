@@ -22,6 +22,8 @@ import (
 	"stable/internal/workspace"
 )
 
+var errTeamMemberAlreadyActive = errors.New("team member already has an active turn")
+
 // TeamMemberSpawnRequest contains member configuration from a trusted lead
 // operation. Actor, scope, member ID, turn ID and child run ID are service-owned.
 type TeamMemberSpawnRequest struct {
@@ -607,13 +609,21 @@ func (s *Service) resumeTeamMember(ctx context.Context, request agent.ExecutionR
 		return teams.Member{}, err
 	}
 	member, ok := projection.Members[memberID]
-	if !ok || member.TeamID != team.ID || (member.Status != teams.MemberIdle && member.Status != teams.MemberInterrupted) {
+	if !ok || member.TeamID != team.ID {
 		return teams.Member{}, teams.ErrPermission
 	}
 	// A persisted worktree member can write on every resumed turn. Keep the
 	// same server-side team binding required for its initial spawn; callers
 	// cannot turn an ordinary lead run into workspace writer authority.
 	if grantGeneration == 0 && member.WorkspaceID != "" && (!request.TeamCoordinator || request.TeamCoordinatorTeamID != team.ID) {
+		return teams.Member{}, teams.ErrPermission
+	}
+	// A message or approved plan may already have queued the member by the time
+	// an explicit resume reaches the service. Treat that request as satisfied.
+	if (member.Status == teams.MemberQueued || member.Status == teams.MemberRunning) && hasAcceptedCurrentTeamTurn(projection, member) {
+		return member, nil
+	}
+	if member.Status != teams.MemberIdle && member.Status != teams.MemberInterrupted {
 		return teams.Member{}, teams.ErrPermission
 	}
 	planRevisionAllowed := false
@@ -1006,6 +1016,18 @@ func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams
 		}
 		currentMember, found := currentProjection.Members[member.ID]
 		if memberExists {
+			if found && currentMember.TeamID == team.ID && (currentMember.Status == teams.MemberQueued || currentMember.Status == teams.MemberRunning) && hasAcceptedCurrentTeamTurn(currentProjection, currentMember) {
+				// Automatic scheduling and an explicit resume can race. Once the
+				// member already owns an accepted turn, the later resume is satisfied.
+				member = currentMember
+				return errTeamMemberAlreadyActive
+			}
+			if found && waitingRetry && currentMember.TeamID == team.ID && currentMember.Status == teams.MemberInterrupted && member.Status == teams.MemberWaitingCapacity && currentMember.RunID == member.RunID && currentMember.TurnID == member.TurnID {
+				// A previous capacity retry may have failed its admission check and
+				// restored this exact waiter to interrupted. Refresh only that same
+				// prior turn identity; grant validation above still fences stop/close.
+				member = currentMember
+			}
 			allowedStatus := currentMember.Status == teams.MemberIdle || currentMember.Status == teams.MemberInterrupted || waitingRetry && currentMember.Status == teams.MemberWaitingCapacity
 			if !found || currentMember.Revision != member.Revision || currentMember.Status != member.Status || currentMember.TeamID != team.ID || !allowedStatus {
 				return teams.ErrPermission
@@ -1083,6 +1105,9 @@ func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errTeamMemberAlreadyActive) {
+			return member, nil
+		}
 		if admissionCommitted {
 			if compensateErr := s.compensateUnpublishedTeamAdmission(root, scope.SessionID, team.ID, member.ID, turnID, childInput, runSeq, err); compensateErr != nil {
 				return teams.Member{}, fmt.Errorf("team turn admission failed: %v; durable compensation failed: %w", err, compensateErr)
@@ -1113,6 +1138,14 @@ func (s *Service) submitTeamMember(ctx context.Context, root string, scope teams
 	go s.watchTeamMember(root, scope.SessionID, team.ID, member.ID, turnID, handle, startedAt, durableTerminal, durableResult, memberWorkspace, writerLease, workspaceRunDone)
 	member.Status, member.RunID, member.TurnID = teams.MemberQueued, childRunID, turnID
 	return member, nil
+}
+
+func hasAcceptedCurrentTeamTurn(projection sessionlog.TeamProjection, member teams.Member) bool {
+	if member.TurnID == "" {
+		return false
+	}
+	turn, ok := projection.Turns[member.TurnID]
+	return ok && turn.MemberID == member.ID && (turn.Status == "queued" || turn.Status == "running")
 }
 
 // prepareTeamMemberWorkspace materializes or reuses the member's service-owned

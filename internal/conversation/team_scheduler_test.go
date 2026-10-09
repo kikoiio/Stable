@@ -440,5 +440,20 @@ func waitForTeamMemberStatus(t *testing.T, root, sessionID, teamID, memberID str
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Fatalf("member status=%s, want %s", projection.Members[memberID].Status, status)
+	member := projection.Members[memberID]
+	turn := projection.Turns[member.TurnID]
+	transcript, replayErr := sessionlog.Replay(root, sessionID)
+	var recent []string
+	if replayErr == nil {
+		for _, event := range transcript.Events {
+			if event.Type != sessionlog.EventTeam {
+				continue
+			}
+			var fact sessionlog.TeamEvent
+			if decodeSessionData(event.Data, &fact) == nil && fact.TeamID == teamID && fact.Member != nil && fact.Member.ID == memberID {
+				recent = append(recent, fmt.Sprintf("%s:%s:r%d", fact.Kind, fact.Member.Status, fact.Member.Revision))
+			}
+		}
+	}
+	t.Fatalf("member status=%s, want %s; member=%+v turn=%+v member-events=%v", member.Status, status, member, turn, recent)
 }
