@@ -14,6 +14,48 @@ func validTeamTurnInput() TeamTurnInput {
 	return TeamTurnInput{Identity: TeamTurnIdentity{TeamID: "team-1", MemberID: "member-1", TurnID: "turn-1", MemberName: "researcher"}, Summary: "Previous finding: config.yaml", Messages: []teams.Message{{ID: "message-1", TeamID: "team-1", SenderID: teams.Lead, Recipients: []string{"member-1"}, Body: "Inspect the parser next."}}}
 }
 
+func TestBuildTeamTurnTaskEnforcesEncodedInputAtExactByteLimit(t *testing.T) {
+	input := TeamTurnInput{Identity: TeamTurnIdentity{TeamID: "team-1", MemberID: "member-1", TurnID: "turn-1"}}
+	const taskID = "task-1"
+	probe, err := BuildTeamTurnTask(taskID, "x", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeEncoding, err := json.Marshal([]DelegationTask{probe})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The probe instruction begins with one byte of role text. The JSON task
+	// envelope and the fixed team context contribute the remaining bytes.
+	encodedOverhead := len(probeEncoding) - len(probe.Instruction)
+	instructionBytes := teams.MaxInputBytes - encodedOverhead
+	roleBytes := instructionBytes - (len(probe.Instruction) - 1)
+	if roleBytes <= 0 || roleBytes > teams.MaxInputBytes {
+		t.Fatalf("computed role size %d cannot reach encoded input limit", roleBytes)
+	}
+
+	role := strings.Repeat("x", roleBytes)
+	task, err := BuildTeamTurnTask(taskID, role, input)
+	if err != nil {
+		t.Fatalf("BuildTeamTurnTask at encoded byte limit: %v", err)
+	}
+	if got := len(task.Instruction); got != instructionBytes {
+		t.Fatalf("instruction length=%d, want %d", got, instructionBytes)
+	}
+	encoded, err := json.Marshal([]DelegationTask{task})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) != teams.MaxInputBytes {
+		t.Fatalf("encoded task length=%d, want exact limit %d", len(encoded), teams.MaxInputBytes)
+	}
+
+	tooLongRole := role + "x"
+	if _, err := BuildTeamTurnTask(taskID, tooLongRole, input); err == nil {
+		t.Fatal("BuildTeamTurnTask accepted encoded task one byte over the limit")
+	}
+}
+
 func TestTeamTurnInputIsBoundedReferenceDataAndPreservesFullRole(t *testing.T) {
 	input := validTeamTurnInput()
 	role := "Use concrete file paths and report parser behavior."

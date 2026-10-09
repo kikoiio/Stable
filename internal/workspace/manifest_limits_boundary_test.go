@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -93,5 +94,56 @@ func TestManifestDefaultSingleFileLimitAtBoundary(t *testing.T) {
 	}
 	if _, err := BuildManifest(context.Background(), root, Limits{}); !errors.Is(err, ErrQuota) {
 		t.Fatalf("default-size file one byte over limit was not rejected with ErrQuota: %v", err)
+	}
+}
+
+func TestManifestDefaultSnapshotLimitAtBoundary(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	limit := DefaultLimits().MaxSnapshotBytes
+	fileLimit := DefaultLimits().MaxFileBytes
+	for i := int64(0); i < limit/fileLimit; i++ {
+		path := filepath.Join(source, fmt.Sprintf("part-%02d.bin", i))
+		file, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Truncate(fileLimit); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	manifest, err := BuildManifest(context.Background(), source, Limits{})
+	if err != nil {
+		t.Fatalf("manifest exactly at the default snapshot limit was rejected: %v", err)
+	}
+	if manifest.Bytes != limit || int64(len(manifest.Entries)) != limit/fileLimit {
+		t.Fatalf("unexpected manifest at default snapshot limit: bytes=%d entries=%d want bytes=%d entries=%d", manifest.Bytes, len(manifest.Entries), limit, limit/fileLimit)
+	}
+
+	extra, err := os.Create(filepath.Join(source, "zz-extra.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := extra.Truncate(1); err != nil {
+		extra.Close()
+		t.Fatal(err)
+	}
+	if err := extra.Close(); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "target")
+	if _, err := CopySnapshot(context.Background(), source, target, Limits{}); !errors.Is(err, ErrQuota) {
+		t.Fatalf("default snapshot limit plus one byte was not rejected with ErrQuota: %v", err)
+	}
+	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("over-limit snapshot created a target: lstat err=%v", err)
 	}
 }

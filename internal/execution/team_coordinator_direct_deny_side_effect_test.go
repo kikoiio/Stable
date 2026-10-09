@@ -9,6 +9,7 @@ import (
 	"stable/internal/agent"
 	"stable/internal/llm"
 	"stable/internal/permission"
+	"stable/internal/workspace"
 )
 
 func TestCoordinatorRejectsForgedDirectCallsBeforeExecutionSideEffects(t *testing.T) {
@@ -23,12 +24,18 @@ func TestCoordinatorRejectsForgedDirectCallsBeforeExecutionSideEffects(t *testin
 	mcp := newFakeMCPCaller()
 	tasks := &agentTaskServiceStub{result: agent.AgentTaskSnapshot{ID: "task-1", Status: agent.DelegationQueued}}
 	delegator := &delegationStub{}
+	lifecycle := NewWorkspaceLifecycleToolHost()
+	lifecycleCalls := 0
+	lifecycle.Bind(func(_ context.Context, _ agent.ExecutionRequest, _ *workspace.WriterLease, call llm.ToolUse) (agent.ToolOutcome, error) {
+		lifecycleCalls++
+		return agent.ToolOutcome{CallID: call.ID, ToolName: call.Name, Status: agent.ToolSucceeded, Content: "unexpected"}, nil
+	})
 	factory := NewToolExecutorFactory(ToolExecutorDeps{
 		Gate:       gate,
 		HookRunner: hooks,
 		MCP:        mcp,
 		Now:        time.Now,
-	}, WithAgentTaskService(tasks), WithDelegator(delegator, testDelegationProvider{}))
+	}, WithAgentTaskService(tasks), WithDelegator(delegator, testDelegationProvider{}), WithWorkspaceLifecycleToolHost(lifecycle))
 	executor, err := factory.ForRun(request)
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +58,9 @@ func TestCoordinatorRejectsForgedDirectCallsBeforeExecutionSideEffects(t *testin
 		m06Call("delegate_tasks", `{"tasks":[{"id":"nested","name":"nested","instruction":"recurse"}]}`),
 		m06Call("task_update", `{"taskId":"todo-1"}`),
 		m06Call("http_request", `{"url":"https://example.invalid"}`),
+		m06Call("enter_worktree", `{"label":"forged"}`),
+		m06Call("exit_worktree", `{}`),
+		m06Call("worktree_export", `{"workspace_id":"workspace-1"}`),
 	} {
 		outcome, execErr := executor.Execute(context.Background(), call)
 		if execErr != nil || outcome.Status != agent.ToolDenied || !outcome.IsError || !strings.Contains(outcome.Content, "coordinator mode") {
@@ -69,6 +79,9 @@ func TestCoordinatorRejectsForgedDirectCallsBeforeExecutionSideEffects(t *testin
 	}
 	if tasks.calls != 0 {
 		t.Fatalf("forged coordinator calls reached named-task service %d times", tasks.calls)
+	}
+	if lifecycleCalls != 0 {
+		t.Fatalf("forged coordinator calls reached workspace lifecycle host %d times", lifecycleCalls)
 	}
 	if len(delegator.tasks) != 0 {
 		t.Fatalf("forged coordinator calls reached recursive delegator: %+v", delegator.tasks)
