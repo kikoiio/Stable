@@ -26,6 +26,8 @@
 
 本轮新增 E 的 TUI busy-member stop 重试 service 证据，F 的真实 TUI workspace create/restart/list-restore 定向测试，并发候选接受曾复现 formal transaction topology 损坏，修复为 formal-root 完整事务串行化；SHA `8d1f5bf` 的 Go/package、全部 E2E 与 Workspace Linux 均通过。这些增量只缩小 E/F AC 缺口，不表示对应 AC 已验收。
 
+2026-10-09 继续补入 F 的 TUI create→conversation service restart→冲突决策→candidate review/accept 组合测试，SHA `d4f6677` 本地定向 TUI 测试连续 3 次通过。此 SHA 尚无云端 Go/package、E2E 或 Workspace Linux workflow 结果；测试通过临时 fixture 写工作树内容，真实 `run_agent` writer/sandbox 组合仍待补证。M09-E/F AC1–9 仍未整体验收，M09 整体保持未完成。
+
 ## 全部完成的条件
 
 - [x] M09-A/B/C 已实现并通过对应 checklist。
