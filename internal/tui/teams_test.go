@@ -108,6 +108,131 @@ func TestTeamListTUIRequestUsesConversationServiceAndPreservesParentRun(t *testi
 	}
 }
 
+func TestTeamStopTUIRequestUsesConversationServiceAndPreservesParentRun(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	socketDir := t.TempDir()
+	socket := filepath.Join(socketDir, "c.sock")
+	svc, err := conversation.Serve(ctx, conversation.Deps{
+		Store: db, ProjectRoot: project, SocketPath: socket, PollEvery: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := svc.Close(); err != nil {
+			t.Errorf("close conversation service: %v", err)
+		}
+	})
+
+	reqctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	created, err := conversation.Request(reqctx, socket, conversation.ClientMsg{Op: "session_create", ProjectRoot: project})
+	if err != nil || len(created) != 1 || created[0].Session == nil {
+		t.Fatalf("create session: messages=%+v err=%v", created, err)
+	}
+	sessionID := created[0].Session.ID
+	teamID, err := sessionlog.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	memberID, err := sessionlog.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	turnID, err := sessionlog.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	childRunID, err := sessionlog.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	team := teams.Team{
+		ID: teamID, Name: "research", Scope: teams.Scope{SessionID: sessionID, WorkKind: "session", ProjectRoot: project},
+		Status: teams.TeamOpen, Revision: 1, CreatedAt: time.Now().UTC(),
+	}
+	appendTeamEvent := func(kind string, revision uint64, actor string, member *teams.Member, turn *sessionlog.TurnFact) {
+		t.Helper()
+		eventID, idErr := sessionlog.NewID()
+		if idErr != nil {
+			t.Fatal(idErr)
+		}
+		_, appendErr := sessionlog.Append(project, sessionID, sessionlog.EventTeam, sessionlog.TeamEvent{
+			ID: eventID, TeamID: teamID, SessionID: sessionID, Kind: kind,
+			Revision: revision, ActorID: actor, Team: nil, Member: member, Turn: turn,
+		})
+		if appendErr != nil {
+			t.Fatal(appendErr)
+		}
+	}
+	eventID, err := sessionlog.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessionlog.Append(project, sessionID, sessionlog.EventTeam, sessionlog.TeamEvent{
+		ID: eventID, TeamID: teamID, SessionID: sessionID, Kind: sessionlog.TeamCreated,
+		Revision: 1, ActorID: teams.Lead, Team: &team,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	member := teams.Member{ID: memberID, TeamID: teamID, Name: "reader", AgentName: "explore", RoleHash: "fixture", Model: "fixture", Tools: []string{"read_file"}, Status: teams.MemberCreated, Revision: 1}
+	appendTeamEvent(sessionlog.TeamMemberAdded, 2, teams.Lead, &member, nil)
+	turn := sessionlog.TurnFact{ID: turnID, MemberID: memberID, RunID: childRunID, TaskID: turnID, Status: "intent"}
+	appendTeamEvent(sessionlog.TeamTurnIntent, 3, "service", nil, &turn)
+	turn.Status = "queued"
+	appendTeamEvent(sessionlog.TeamTurnAccepted, 4, "service", nil, &turn)
+	member.Status, member.TurnID, member.RunID, member.Revision = teams.MemberQueued, turnID, childRunID, 2
+	member.Budget.AcceptedTurns = 1
+	appendTeamEvent(sessionlog.TeamMemberState, 5, "service", &member, nil)
+	member.Status, member.Revision = teams.MemberStopping, 3
+	appendTeamEvent(sessionlog.TeamMemberState, 6, "service", &member, nil)
+
+	m := New(socket, project)
+	m.ActiveSession = sessionID
+	m.Pending, m.ActiveRunID, m.LastCursor = true, "parent-run", 17
+	parentStream := &conversation.StreamClient{}
+	m.stream = parentStream
+	m.Composer.SetValue("/team " + teamID + " stop " + memberID)
+	updated, command := m.submitComposer()
+	got := updated.(Model)
+	if command == nil || !got.Pending || got.ActiveRunID != "parent-run" || got.LastCursor != 17 || got.stream != parentStream {
+		t.Fatalf("team stop changed parent run state before response: pending=%v run=%q cursor=%d stream=%p", got.Pending, got.ActiveRunID, got.LastCursor, got.stream)
+	}
+	result, ok := command().(resultMsg)
+	if !ok || result.err != nil {
+		t.Fatalf("TUI stop result=%+v, err=%v", result, result.err)
+	}
+	updated, _ = got.handleResult(result)
+	got = updated.(Model)
+	if len(got.TeamMembers) != 1 || got.TeamMembers[0].ID != memberID || got.TeamMembers[0].Status != teams.MemberStopping {
+		t.Fatalf("TUI did not render service-owned stopping member: %+v", got.TeamMembers)
+	}
+	if !got.Pending || got.ActiveRunID != "parent-run" || got.LastCursor != 17 || got.stream != parentStream {
+		t.Fatal("one-shot team stop response ended or replaced the parent run")
+	}
+	projection, err := sessionlog.ReplayTeams(project, sessionID, teamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Members[memberID].Status != teams.MemberStopping || projection.Turns[turnID].Status != "queued" {
+		t.Fatalf("TUI stop changed the child terminal state before actual exit: member=%s turn=%s", projection.Members[memberID].Status, projection.Turns[turnID].Status)
+	}
+}
+
 func TestTeamCommandsUseSessionScopeAndPreserveParentRun(t *testing.T) {
 	cases := []struct {
 		line, op, teamID, runID, text, recipient, decision string
