@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -78,7 +79,63 @@ func TestTeamRecoveryCompletesDelegationTerminalWithoutRunTerminal(t *testing.T)
 	if before.Turns[turn.ID].Status != "queued" || before.Members[member.ID].Status != teams.MemberRunning {
 		t.Fatalf("fixture did not preserve the run-terminal gap: turn=%s member=%s", before.Turns[turn.ID].Status, before.Members[member.ID].Status)
 	}
+
 	runner := &capturingTeamChildRunner{inputs: make(chan agent.ChildRunInput, 1)}
+	terminalAppendFailure := errors.New("injected recovery run-terminal append failure")
+	terminalAppendCalls := 0
+	err = recoverTeamRunsWithTerminalAppender(root, func(appendRoot, sessionID string, event sessionlog.RunEvent) (sessionlog.Event, error) {
+		terminalAppendCalls++
+		if event.Kind != string(agent.EventTerminal) {
+			return sessionlog.Event{}, errors.New("recovery appender received a nonterminal run event")
+		}
+		return sessionlog.Event{}, terminalAppendFailure
+	})
+	if !errors.Is(err, terminalAppendFailure) {
+		t.Fatalf("first recovery error=%v, want injected terminal append failure", err)
+	}
+	if terminalAppendCalls != 1 {
+		t.Fatalf("injected terminal appender called %d times, want exactly once", terminalAppendCalls)
+	}
+	failedProjection, err := sessionlog.ReplayTeams(root, request.Work.SessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failedProjection.Turns[turn.ID].Status != "queued" || failedProjection.Members[member.ID].Status != teams.MemberRunning {
+		t.Fatalf("failed recovery published a false terminal state: turn=%s member=%s", failedProjection.Turns[turn.ID].Status, failedProjection.Members[member.ID].Status)
+	}
+	failedTranscript, err := sessionlog.Replay(root, request.Work.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range failedTranscript.Events {
+		if event.Type != sessionlog.EventRunEvent {
+			continue
+		}
+		var runEvent sessionlog.RunEvent
+		if err := decodeSessionData(event.Data, &runEvent); err != nil {
+			t.Fatal(err)
+		}
+		if runEvent.RunID == turn.RunID && runEvent.Kind == string(agent.EventTerminal) {
+			t.Fatal("failed recovery persisted a run terminal")
+		}
+	}
+	failedHistory, err := sessionlog.TeamHistory(root, request.Work.SessionID, team.ID, 0, teams.MaxPageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range failedHistory {
+		var fact sessionlog.TeamEvent
+		if err := decodeSessionData(event.Data, &fact); err != nil {
+			t.Fatal(err)
+		}
+		if fact.Kind == sessionlog.TeamTurnTerminal && fact.Turn != nil && fact.Turn.ID == turn.ID {
+			t.Fatal("failed recovery persisted a team turn terminal")
+		}
+	}
+	if runner.count() != 0 {
+		t.Fatalf("failed recovery invoked child runner %d times, want zero", runner.count())
+	}
+
 	pool, err := agent.NewPoolDelegator(agent.DefaultDelegationLimits(), runner, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -165,18 +222,18 @@ func TestTeamRecoveryCompletesDelegationTerminalWithoutRunTerminal(t *testing.T)
 	if runner.count() != 0 {
 		t.Fatalf("recovery reran child %d times, want zero", runner.count())
 	}
-	beforeSecondRecovery := len(transcript.Events)
+	eventsAfterSuccessfulRetry := len(transcript.Events)
 	if err := recoverTeamRuns(root); err != nil {
-		t.Fatalf("second recovery: %v", err)
+		t.Fatalf("third recovery: %v", err)
 	}
 	transcript, err = sessionlog.Replay(root, request.Work.SessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(transcript.Events) != beforeSecondRecovery {
-		t.Fatalf("second recovery appended events: %d -> %d", beforeSecondRecovery, len(transcript.Events))
+	if len(transcript.Events) != eventsAfterSuccessfulRetry {
+		t.Fatalf("third recovery appended events: %d -> %d", eventsAfterSuccessfulRetry, len(transcript.Events))
 	}
 	if runner.count() != 0 {
-		t.Fatalf("second recovery reran child %d times, want zero", runner.count())
+		t.Fatalf("third recovery reran child %d times, want zero", runner.count())
 	}
 }

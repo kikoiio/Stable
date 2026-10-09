@@ -13,11 +13,20 @@ import (
 	"stable/internal/teams"
 )
 
+type teamRecoveryRunTerminalAppender func(root, sessionID string, event sessionlog.RunEvent) (sessionlog.Event, error)
+
 // recoverTeamRuns closes accepted turns left by a process crash. Recovery
 // records an interrupted outcome and never calls the provider or replays the
 // model. A later explicit resume creates a new turn that can reference the
 // interrupted turn and its undelivered messages.
 func recoverTeamRuns(root string) error {
+	return recoverTeamRunsWithTerminalAppender(root, appendTeamRecoveryRunTerminal)
+}
+
+// recoverTeamRunsWithTerminalAppender keeps the run-terminal persistence
+// boundary injectable for focused recovery-failure tests. All other recovery
+// facts continue to use their normal sessionlog append paths.
+func recoverTeamRunsWithTerminalAppender(root string, appendTerminal teamRecoveryRunTerminalAppender) error {
 	dir, err := sessionlog.Prepare(root)
 	if err != nil {
 		return err
@@ -43,14 +52,18 @@ func recoverTeamRuns(root string) error {
 		if projectErr != nil {
 			continue
 		}
-		if err := recoverTeamSession(root, sessionID, transcript.Events, projection); err != nil {
+		if err := recoverTeamSession(root, sessionID, transcript.Events, projection, appendTerminal); err != nil {
 			return fmt.Errorf("recover team session %s: %w", sessionID, err)
 		}
 	}
 	return nil
 }
 
-func recoverTeamSession(root, sessionID string, events []sessionlog.Event, projection sessionlog.TeamProjection) error {
+func appendTeamRecoveryRunTerminal(root, sessionID string, event sessionlog.RunEvent) (sessionlog.Event, error) {
+	return sessionlog.Append(root, sessionID, sessionlog.EventRunEvent, event)
+}
+
+func recoverTeamSession(root, sessionID string, events []sessionlog.Event, projection sessionlog.TeamProjection, appendTerminal teamRecoveryRunTerminalAppender) error {
 	started := make(map[string]sessionlog.RunStarted)
 	terminal := make(map[string]bool)
 	recoveredMembers := make(map[string]bool)
@@ -203,7 +216,7 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 			}
 			payload := map[string]string{"status": runStatus, "reason": "service restarted before team turn completed"}
 			event := sessionlog.RunEvent{ID: id, RunID: turn.RunID, SessionID: sessionID, RunSeq: seq + 1, At: time.Now().UTC(), Kind: string(agent.EventTerminal), Payload: payload}
-			if _, err := sessionlog.Append(root, sessionID, sessionlog.EventRunEvent, event); err != nil {
+			if _, err := appendTerminal(root, sessionID, event); err != nil {
 				return err
 			}
 			terminal[turn.RunID] = true
