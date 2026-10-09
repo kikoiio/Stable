@@ -154,6 +154,39 @@ func TestProtectedMetadataIdentityAndPartialRestore(t *testing.T) {
 	}
 }
 
+func TestProtectedMetadataRestoreBlocksMetadataCreatedAfterCapture(t *testing.T) {
+	formal := t.TempDir()
+	spent := t.TempDir()
+	facts, err := CaptureProtectedMetadata(formal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fact := range facts {
+		if fact.Present {
+			t.Fatalf("fixture unexpectedly captured %s", fact.Name)
+		}
+	}
+
+	// A concurrent writer creates protected metadata after the transaction
+	// captured its absent-state facts. Recovery must block without deleting it.
+	metadata := filepath.Join(formal, ".git")
+	if err := os.Mkdir(metadata, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(metadata, "config"), []byte("concurrent"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreProtectedMetadataFacts(formal, spent, facts); err == nil {
+		t.Fatal("restore accepted metadata that appeared after capture")
+	}
+	if data, err := os.ReadFile(filepath.Join(metadata, "config")); err != nil || string(data) != "concurrent" {
+		t.Fatalf("concurrent metadata was changed: %q, %v", data, err)
+	}
+	if _, err := os.Lstat(filepath.Join(spent, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected metadata was materialized in spent root: %v", err)
+	}
+}
+
 func TestCreateCandidateProjectV2OmitsProtectedMetadata(t *testing.T) {
 	formal := t.TempDir()
 	for _, name := range []string{".git/config", ".stable/state", ".mewcode/settings"} {

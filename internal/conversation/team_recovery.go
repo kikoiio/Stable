@@ -151,6 +151,7 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 		if !ok || member.TeamID != team.ID {
 			return fmt.Errorf("accepted turn %s has no member", turnID)
 		}
+		hadDurableChildTerminal := terminal[turn.RunID]
 		if _, ok := started[turn.RunID]; !ok {
 			work := sessionlog.RunStarted{RunID: turn.RunID, WorkKind: team.Scope.WorkKind, GoalID: team.Scope.GoalID, WorkItemID: team.Scope.WorkItemID, Intent: "recovered interrupted team turn", TeamID: team.ID, TeamMemberID: member.ID, TeamTurnID: turn.ID, WorkspaceID: turn.WorkspaceID, WorkspaceGeneration: turn.WorkspaceGeneration, OriginRunID: turn.OriginRunID, OriginCallID: turn.OriginCallID}
 			if _, err := sessionlog.Append(root, sessionID, sessionlog.EventRunStarted, work); err != nil {
@@ -223,7 +224,12 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 			return err
 		}
 		member = projection.Members[member.ID]
-		if turn.Status == string(agent.DelegationSucceeded) {
+		if member.Status == teams.MemberStopping && hadDurableChildTerminal {
+			// The child may have durably exited just before the process stopped,
+			// while its watcher had not yet applied the already accepted stop.
+			// Preserve that decision when reconciling the terminal turn.
+			member.Status = teams.MemberStopped
+		} else if turn.Status == string(agent.DelegationSucceeded) {
 			member.Status = teams.MemberIdle
 		} else {
 			member.Status = teams.MemberInterrupted
