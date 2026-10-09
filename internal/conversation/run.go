@@ -111,10 +111,19 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 			_, _ = leadManager.ReleaseCompletedWriter(context.Background(), *leadLease)
 		}
 	}()
-	if request.Work.Kind == agent.WorkSession && s.deps.WorkspaceStateRoot != "" {
-		projectRoot, scope, scopeErr := s.workspaceScope(ctx, msg)
+	if (request.Work.Kind == agent.WorkSession || request.Work.Kind == agent.WorkGoal) && s.deps.WorkspaceStateRoot != "" {
+		// Derive workspace ownership from the validated run WorkRef, not from
+		// optional client routing fields. Bindings are exact to that WorkRef.
+		workspaceMsg := ClientMsg{
+			SessionID: request.Work.SessionID, WorkKind: string(request.Work.Kind),
+			GoalID: request.Work.GoalID, WorkItemID: request.Work.WorkItemID,
+		}
+		projectRoot, scope, scopeErr := s.workspaceScope(ctx, workspaceMsg)
 		if scopeErr != nil {
 			return scopeErr
+		}
+		if scope.Work != request.Work {
+			return workspace.ErrOwnership
 		}
 		leadManager, err = s.workspaceService(projectRoot)
 		if err != nil {
@@ -220,6 +229,12 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	}
 	if request.Work.Kind != agent.WorkSession {
 		request.Messages = append(taskPrefix, request.Messages...)
+	}
+	if request.Work.Kind == agent.WorkGoal && leadLease != nil {
+		request.Messages = append([]llm.Message{{
+			Role:    "system",
+			Content: "你是 Stable 的受控工作区 agent。读、搜、列只能访问本次绑定工作区的只读基线；写、编辑和命令只能影响本次绑定工作区。正式工程保持不变，变更需稍后单独导出为候选并经用户审核。工具路径使用工作区相对路径。",
+		}}, request.Messages...)
 	}
 	if request.Work.Kind == agent.WorkSession {
 		history := sessionConversationMessages(s.deps.ProjectRoot, msg.SessionID)

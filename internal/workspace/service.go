@@ -546,10 +546,10 @@ func (s *LifecycleService) AcquireWriter(ctx context.Context, scope Scope, id, r
 }
 
 // AcquireLeadWriter is restricted to a service-authenticated ordinary session
-// lead run whose workspace binding is already held under binding admission.
+// or goal lead run whose exact workspace binding is held under binding admission.
 // The lead authority and writer run ID are intentionally identical.
 func (s *LifecycleService) AcquireLeadWriter(ctx context.Context, scope Scope, id, runID string) (WriterLease, error) {
-	if scope.Work.Kind != agent.WorkSession || scope.OriginRunID != runID || scope.OriginTaskID != "" {
+	if (scope.Work.Kind != agent.WorkSession && scope.Work.Kind != agent.WorkGoal) || scope.OriginRunID != runID || scope.OriginTaskID != "" {
 		return WriterLease{}, ErrOwnership
 	}
 	return s.acquireWriter(ctx, scope, id, runID, true)
