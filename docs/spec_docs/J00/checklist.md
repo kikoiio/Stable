@@ -19,14 +19,14 @@
 
 - [ ] **C11 阶段调用链完整**：环境准备、夹具校验、隔离、发现、读写、重开、检查、导出、清理和报告按固定顺序执行；关键失败会停止后续写入假设（验证：fake backend 事件序列）。
 - [ ] **C12 证据绑定完整**：每个能力结论引用当前客户端/探针/夹具/工程摘要及相应日志或产物（验证：报告引用解析与摘要重算）。
-- [ ] **C13 数据边界符合约束**：workflow 使用 `contents: read`、不读取 secrets；公开 artifact 不含真实工程、profile、token 或 provider 密钥（验证：workflow 配置审查和脱敏扫描）。
+- [x] **C13 数据边界符合约束**：workflow 使用 `contents: read`、不读取 secrets；公开 artifact 不含真实工程、profile、token 或 provider 密钥（证据：Run 38071508148 配置与 artifact sensitivity scan）。
 - [ ] **C14 旧系统无回归**：J00 只增加独立脚本/夹具/工作流，不改变 Stable 运行时；现有定向 Go/Python 检查继续通过（验证：受影响测试与 `git diff` 审查）。
 
 ## 编译与测试
 
-- [ ] **C15 Python 契约测试通过**：`python3 -m unittest discover -s tests/lceda/j00 -p 'test_*.py'` 全部通过。
-- [ ] **C16 静态检查通过**：`python3 -m py_compile scripts/lceda/*.py`、`bash -n scripts/lceda/j00_env.sh` 和 workflow YAML 静态检查通过。
-- [ ] **C17 资源与临时目录合规**：本地/CI fake 测试不访问凭据、不写大文件到 `/tmp`，运行目录和进程在结束后清理（验证：测试日志、`df`/进程查询）。
+- [x] **C15 Python 契约测试通过**：`python3 -m unittest discover -s tests/lceda/j00 -p 'test_*.py'` 共 17 项通过；Run 38071508148 也通过云端契约测试。
+- [x] **C16 静态检查通过**：`python3 -m py_compile scripts/lceda/*.py`、`bash -n scripts/lceda/j00_env.sh` 和 workflow YAML 静态检查通过。
+- [x] **C17 资源与临时目录合规**：本地/CI fake 测试不访问凭据、不写大文件到 `/tmp`，运行目录和进程在结束后清理（证据：本地 prepare/sanitize/cleanup smoke、Run 38071508148 environment artifact）。
 - [ ] **C18 规格覆盖完整**：`spec.md` 每条 F/N/AC 都能在实现、报告或明确未验证结论中找到对应证据（验证：人工矩阵审查）。
 
 ## 端到端场景
