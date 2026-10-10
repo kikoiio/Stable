@@ -31,6 +31,10 @@ func BoundedWorkspaceVolume(root string, paths ...string) error {
 	if unix.Lstat(root, &rootStat) != nil {
 		return ErrUnavailable
 	}
+	rootMountID, err := workspaceMountID(root)
+	if err != nil {
+		return fmt.Errorf("%w: workspace mount identity is unavailable", ErrUnavailable)
+	}
 	for _, path := range append([]string{root}, paths...) {
 		canonical, err := filepath.EvalSymlinks(path)
 		if err != nil || canonical != filepath.Clean(path) || !pathContains(root, path) {
@@ -38,7 +42,8 @@ func BoundedWorkspaceVolume(root string, paths ...string) error {
 		}
 		info, err := os.Lstat(path)
 		var stat unix.Stat_t
-		if err != nil || !info.IsDir() || unix.Lstat(path, &stat) != nil || stat.Dev != rootStat.Dev {
+		mountID, mountErr := workspaceMountID(path)
+		if err != nil || !info.IsDir() || unix.Lstat(path, &stat) != nil || stat.Dev != rootStat.Dev || mountErr != nil || mountID != rootMountID {
 			return ErrUnavailable
 		}
 	}
@@ -54,7 +59,8 @@ func BoundedWorkspaceVolume(root string, paths ...string) error {
 			return ErrUnavailable
 		}
 		var stat unix.Stat_t
-		if unix.Lstat(path, &stat) != nil || stat.Dev != rootStat.Dev {
+		mountID, mountErr := workspaceMountID(path)
+		if unix.Lstat(path, &stat) != nil || stat.Dev != rootStat.Dev || mountErr != nil || mountID != rootMountID {
 			return ErrUnavailable
 		}
 		mode := stat.Mode & unix.S_IFMT
@@ -63,4 +69,18 @@ func BoundedWorkspaceVolume(root string, paths ...string) error {
 		}
 		return nil
 	})
+}
+
+// workspaceMountID uses statx's mount ID because st_dev alone cannot detect
+// bind mounts made from another directory on the same filesystem. If the
+// kernel cannot provide a mount ID, workspace isolation fails closed.
+func workspaceMountID(path string) (uint64, error) {
+	var stat unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_NO_AUTOMOUNT|unix.AT_SYMLINK_NOFOLLOW, unix.STATX_MNT_ID, &stat); err != nil {
+		return 0, err
+	}
+	if stat.Mask&unix.STATX_MNT_ID == 0 {
+		return 0, fmt.Errorf("statx did not return mount ID for %s", path)
+	}
+	return stat.Mnt_id, nil
 }

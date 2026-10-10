@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestWorkspaceRealVolumeQuotaAndMetadataAttacks(t *testing.T) {
@@ -194,7 +196,18 @@ func TestWorkspaceVolumeRejectsUnsafeEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(root)
+	var mountedTarget string
+	t.Cleanup(func() {
+		if mountedTarget != "" {
+			if err := unix.Unmount(mountedTarget, 0); err != nil {
+				t.Errorf("unmount disposable bind-mount fixture %s: %v", mountedTarget, err)
+				return
+			}
+		}
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove disposable volume fixture %s: %v", root, err)
+		}
+	})
 
 	regular := filepath.Join(root, "regular")
 	if err := os.WriteFile(regular, []byte("private"), 0600); err != nil {
@@ -257,6 +270,34 @@ func TestWorkspaceVolumeRejectsUnsafeEntries(t *testing.T) {
 	}
 	if err := BoundedWorkspaceVolume(root, checkoutLink); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("symlink workspace root was accepted: %v", err)
+	}
+	if err := os.Remove(checkoutLink); err != nil {
+		t.Fatal(err)
+	}
+
+	// A same-filesystem bind mount retains st_dev. Keep it inside this
+	// disposable volume and require mount-ID validation to reject it.
+	bindCheckout := filepath.Join(root, "bind-checkout")
+	if err := os.MkdirAll(filepath.Join(bindCheckout, "nested"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(root, "bind-sibling")
+	if err := os.Mkdir(sibling, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sibling, "sentinel"), []byte("fixture sibling"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := BoundedWorkspaceVolume(root, bindCheckout); err != nil {
+		t.Fatalf("clean checkout on disposable volume rejected: %v", err)
+	}
+	target := filepath.Join(bindCheckout, "nested")
+	if err := unix.Mount(sibling, target, "", unix.MS_BIND, ""); err != nil {
+		t.Fatalf("bind-mount sibling inside disposable checkout fixture: %v", err)
+	}
+	mountedTarget = target
+	if err := BoundedWorkspaceVolume(root, bindCheckout); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("same-filesystem sibling bind mount inside checkout was accepted: %v", err)
 	}
 }
 

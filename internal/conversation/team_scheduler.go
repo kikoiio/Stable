@@ -1580,7 +1580,13 @@ func (s *Service) compensateUnpublishedTeamAdmission(root, sessionID, teamID, me
 		}
 		return nil
 	}
-	if turn.Status == "aborted" || turnTerminalTeamStatus(turn.Status) {
+	if turn.Status == "aborted" {
+		// The abort fact can be durable while the first-spawn member state is
+		// still Created (for example, if the process failed between these two
+		// appends). Repair that exact gap on retries as startup recovery does.
+		return interruptCreatedTeamMember(root, sessionID, teamID, memberID, turn.OriginRunID)
+	}
+	if turnTerminalTeamStatus(turn.Status) {
 		return nil
 	}
 	if turn.Status == "intent" {
@@ -1588,7 +1594,7 @@ func (s *Service) compensateUnpublishedTeamAdmission(root, sessionID, teamID, me
 		if err := appendTeamFactLocked(root, sessionID, teamID, sessionlog.TeamEvent{Kind: sessionlog.TeamTurnAborted, ActorID: "service", ActorRunID: turn.OriginRunID, Turn: &turn}); err != nil {
 			return err
 		}
-		return nil
+		return interruptCreatedTeamMember(root, sessionID, teamID, memberID, turn.OriginRunID)
 	}
 	if turn.Status != "queued" || turn.RunID != child.ChildRunID {
 		return teams.ErrPermission
@@ -1633,6 +1639,20 @@ func (s *Service) compensateUnpublishedTeamAdmission(root, sessionID, teamID, me
 		_, err = s.closeTeamIfIdleLocked(root, sessionID, teamID)
 	}
 	return err
+}
+
+func interruptCreatedTeamMember(root, sessionID, teamID, memberID, originRunID string) error {
+	projection, err := sessionlog.ReplayTeams(root, sessionID, teamID)
+	if err != nil {
+		return err
+	}
+	member, exists := projection.Members[memberID]
+	if !exists || member.TeamID != teamID || member.Status != teams.MemberCreated {
+		return nil
+	}
+	member.Status = teams.MemberInterrupted
+	member.Revision++
+	return appendTeamFactLocked(root, sessionID, teamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: originRunID, Member: &member})
 }
 
 func (s *Service) markMemberWaitingCapacity(root, sessionID, teamID string, expected teams.Member) (teams.Member, error) {

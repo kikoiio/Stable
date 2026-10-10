@@ -36,6 +36,7 @@
 - [ ] `run_agent`同步、后台、definition isolation三入口分别验证真实workspace/lease；缺省D、explore/plan和A/B/C仍只读，角色工具规则与父权限交集生效。
 - [ ] file tools只写本checkout；正式/兄弟/state/privateGit/受保护路径与generation伪造被拒绝，snapshot与tool call/result配对。
 - [ ] command的真实Linux隔离覆盖子进程、根替换/软链接/硬链接/`.git/.stable`mask攻击，无formal/state/bare挂载，无凭据/网络/递归分派。增量证据：`TestWorkspaceWriterCommandUsesBoundedLeaseProfile` 验证 executeCommand 生成 profile 时 root 绑定 lease 的 baseline/checkout/run/workspace volume、启用 isolation、禁用 network grants，并提供进程身份字段及 durable callbacks；fixture 不满足真实受限volume前提。SHA `1ca0506b07d817dcf620883629b11dda485cd1a1` 的 [M09 Workspace Linux run 37978878762](https://github.com/kikoiio/Stable/actions/runs/37978878762) `writer-sandbox-volume` job 通过，执行真实 writer isolation、磁盘耗尽及 bounded-contract/stop-settlement 检查；command完整攻击矩阵与AC3其余入口仍未整体验收。
+- 同文件系统 nested bind mount 增量回归：`BoundedWorkspaceVolume` 现用 `statx(STATX_MNT_ID)` 对根、授权路径和递归条目做 fail-closed mount identity 比较；`TestWorkspaceVolumeRejectsUnsafeEntries` 在 disposable ext4 workflow fixture 中把 sibling bind mount 到 checkout 内并要求拒绝，cleanup 先卸载再删测试自身 fixture。`TestWorkspaceMountIDIdentifiesOrdinaryDirectories` 本地定向测试通过；真实 bind mount 仅由 M09 Workspace Linux workflow 执行，当前 SHA 云端验证待完成。该项补充同设备 bind mount 切口，不表示 AC3 隔离矩阵完成。
 - [ ] 无sandbox失败关闭；hard磁盘quota无能力时command unavailable而不是裸执行/仅监控假上限；未擅改本机quota/mount/tmpfs。
 - [ ] plan模式和权限deny仍先于写执行；definition permissionMode/remote/工具参数扩权拒绝。
 
