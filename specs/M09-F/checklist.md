@@ -1,6 +1,6 @@
 # M09-F 受控工作树与并行写入 Checklist
 
-> 状态：规格已批准，实施代码已提交；AC1–9 仍需逐项验收。SHA `0f32bd26e44909d9416cd4513d05af9faf425712` 的 Go `build-and-test`、`test-package`、真实 Linux writer/sandbox/quota workflow 和全部六个 E2E jobs 均通过。F AC1–9 仍未整体验收；A/B/C/D旧CI不作为F实现证据（2026-10-09）。
+> 状态：M09 用户批准的最小验收集已单独记录于 [minimum-acceptance.md](../M09/minimum-acceptance.md)。本 checklist 保留更宽的 AC1–9 交叉矩阵；未勾选扩展组合不代表最小验收未完成，也不应据此声称这些组合已验证。
 
 ## 审批与追溯
 
@@ -162,6 +162,8 @@ AC4 合并矩阵审计通过：五项行为由逐项和纵向 focused regression
 
 ## AC7 有界资源
 
+- [x] Pool child 默认 budget 固定，request 只能收窄且 parent deadline 继续收窄：`TestChildBudgetDefaultDurationIsBounded`、`TestPoolDelegatorTaskBudgetCanOnlyNarrow`、`TestPoolDelegatorClampsChildBudgetToParentDeadline`。SHA `7324fbcad46d87507b17325905fb4934cbac56c4` Go run `38016172145` 的 `build-and-test` 与 `test-package` 通过；不覆盖每种 protocol/definition 输入或 workspace create/materialize 生命周期时限。
+- [x] workspace writer lease 与 AgentTaskCoordinator named child 共用容量屏障：`TestWorktreeTeamMemberFlowsThroughExportReviewAndAcceptance` 在 writer 持有 lease 时把 named child durable-queue 且不启动，writer 释放后 named child 才执行并 settle。上述 SHA Go 两 jobs通过；只关闭此 writer↔named-child 顺序，不代表 D/A/B/C 共池矩阵全闭。
 - [ ] 3 workers/32 queue与D/A/B/C共池，单materializer/8 pending、20,000 files/128 MiB snapshot/16 MiB file真实边界和拒绝路径有屏障证据。增量证据：`TestMaterializerSingleWorkerAndEightPendingSlots` 以channel-gated callback验证单 materializer 同时仅运行一个任务、容纳8个pending、第9个返回 `ErrQueueFull` 且不持久化；定向测试本地通过（2026-10-10）。代码审阅确认 supervisor 只创建一个 `PoolDelegator`，并将同一实例注入 `AgentTaskCoordinator`、team scheduler 与 workspace child dispatch；`TestTeamCapacityUsesSharedPoolAndResumesWaitingMessagesFairly` 和 `TestWorktreeTeamMemberFlowsThroughExportReviewAndAcceptance` 分别覆盖共池排队与真实workspace成员路径。后者现新增屏障：worktree writer 持有 lease 时 D named task 保持queued，释放 writer 后 named child 才启动，两个任务均成功settle；focused conversation test passed 2026-10-10。`TestPoolDelegatorUsesDefaultWorkerAndQueueCapacity` 使用生产默认值并实际验证3 worker同时运行、32项排队、第33项拒绝、35个已接纳任务全部只执行一次；本地定向测试通过（2026-10-10）。`TestManifestDefaultSnapshotLimitAtBoundary` 用 sparse fixtures 验证生产默认128 MiB快照精确上限通过、超1 byte返回 `ErrQuota` 且不创建目标；`TestManifestDefaultFileCountLimitAtBoundary` 验证默认20,000个空文件通过、第20,001个返回 `ErrQuota`。两项 workspace 定向测试本地通过（2026-10-10）。16 MiB 已有直接证据；其他跨入口容量组合与全量矩阵仍未整体验收，当前实现 SHA 云端复验待完成。
 
 - [x] 生产共享池 `PoolDelegator` 数值边界：`TestPoolDelegatorUsesDefaultWorkerAndQueueCapacity` 实测默认3 worker并发、32 queued、第33拒绝、35个已接受任务 exactly-once。只关闭数值边界子项，不代表 D/A/B/C/workspace 跨入口共池矩阵完成。
@@ -174,6 +176,7 @@ AC4 合并矩阵审计通过：五项行为由逐项和纵向 focused regression
 - [x] child输出/摘要数值边界：`TestStreamingChildRunnerEnforcesProductionDefaultAggregateOutputLimit` 验证 50,000 bytes 聚合输出边界及 8 KiB summary 限制；child turn/时长/输入联合边界仍开放。
 - [ ] create/materialize3分钟、command90秒并受childdeadline、query最多30秒、stop清理10秒边界生效；等待不占额外childworker、不产生未接受无界goroutine。增量证据：`TestWorkspaceCommandDeadlineIsCappedAndInheritsParentDeadline` 通过真实 workspace writer executor 检查 command 即使请求600秒也将 profile 限制为90秒，并验证 sandbox 有效 deadline 不超过90秒；上游30秒 context deadline 原样收窄有效期限。测试中的 recording sandbox 按 profile timeout 对传入 context 应用 `context.WithTimeout`；Linux `RunIsolated` 使用同一规则。本机 execution 定向测试通过（2026-10-10）。`TestWorkspaceStopUsesBoundedDeadlineAndRetainsLeaseOnFailure` 用 recording stopper 验证默认 stop context 不超过10秒、父期限较短时保留原期限，且 stop 失败仍持久保留 blocked lease 的 RunID/generation。`TestWorkspaceQueriesUseThirtySecondBoundAndPreserveParentDeadline` 覆盖服务端 list/get/preview query 入口的默认30秒 deadline、较短父期限、超时错误透传，且 exit 等生命周期操作不受 query cap；服务层在解析 scope/manager 前建立 deadline，query 错误通过既有 socket error 响应可见。conversation 定向测试本地通过（2026-10-10）；create/materialize 与其余等待/worker矩阵仍开放。
 - [x] command/query/stop deadline 子项：`TestWorkspaceCommandDeadlineIsCappedAndInheritsParentDeadline`、`TestWorkspaceQueriesUseThirtySecondBoundAndPreserveParentDeadline`、`TestWorkspaceStopUsesBoundedDeadlineAndRetainsLeaseOnFailure` 验证默认90s/30s/10s deadline、父 context 收窄和失败时 lease 保留。create/materialize 3 分钟及等待/worker资源矩阵仍开放。
+- [x] create/materialize 三分钟期限子项：`TestMaterializerProductionDeadlineAndParentDeadline` 验证生产默认值为3分钟、创建 materializer 继承更短 parent deadline；`TestPrivateGitMaterializeUsesConfiguredDeadline` 验证 Git materialize 回调实际受配置期限取消；`TestMaterializerDeadline` 验证 materializer 期限触发 deadline error。定向 workspace 测试本地通过（2026-10-10）；云端证据记录在 [minimum acceptance](../M09/minimum-acceptance.md)。
 - [ ] 配额/持久化/取消/队列失败可见，临时资源只清理自身；构建/全量/容器/大数据走已授权云端，未完成检查如实保留。
 
 ## AC8 入口、恢复、隐私与目标事实

@@ -1,8 +1,12 @@
 # M09-E 团队、消息与只读协调器 Checklist
 
+> 状态：M09 用户批准的最小验收集已单独记录于 [minimum-acceptance.md](../M09/minimum-acceptance.md)。本 checklist 保留更宽的 AC1–9 交叉矩阵；未勾选扩展组合不代表最小验收未完成，也不应据此声称这些组合已验证。
+
 > 状态：规格已批准，实施代码已提交；AC1–9 与完整场景仍按实际证据逐项验收。SHA `0f32bd26e44909d9416cd4513d05af9faf425712` 的 Go `build-and-test`、`test-package`、Workspace Linux `writer-sandbox-volume` 与全部六个 E2E jobs 均通过（2026-10-09）。该组合只验证此 SHA 的回归，不替代 E AC1–9 整体验收。
 
 ## 功能验收
+
+- [x] 最小集中的 E-AC8 消息失败恢复与投影隐私：`TestTeamMessageWriteFailureDoesNotReportSuccess` 在写盘失败后恢复权限，以相同 token 重试并断言恰好一条 message fact；`TestTeamMessageTextCannotCreateControlAndCredentialIsRedacted` 验证 credential 不进入原始日志且 ReplayTeams projection 保留安全正文与 `[credential redacted]`。定向 conversation 测试本地通过（2026-10-10）；云端验证见 [minimum acceptance](../M09/minimum-acceptance.md)。
 
 - [x] [spec](spec.md)、[plan](plan.md)、[task](task.md)、本checklist获用户批准；批准日期：2026-10-07；范围：按四份规格实现 M09-E。
 

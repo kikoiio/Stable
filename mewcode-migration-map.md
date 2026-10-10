@@ -49,7 +49,7 @@ mewcode 的 TUI 主文件直接引用二十多个内部模块，涵盖模型、�
 
 ### M09 当前进度（2026-10-09）
 
-M09-A（同步只读协作）、M09-B（fork skill）、M09-C（hook agent）和 M09-D（agent 定义与后台任务 AC1–9）已完成实现与验收；M09-E/F 已实现并提交，但仍有逐项验收缺口，**M09 整体仍未完成**。最新代码验证 SHA `1ca6e0e` 的 Go build/unit、package、全量 E2E 与 M09 Workspace Linux 全部通过：[Go run 37886754199](https://github.com/kikoiio/Stable/actions/runs/37886754199)、[E2E run 37886754201](https://github.com/kikoiio/Stable/actions/runs/37886754201)、[Workspace Linux run 37886754300](https://github.com/kikoiio/Stable/actions/runs/37886754300)。本 SHA 增加真实 TUI→service 冲突处理和候选接受闭环；E/F 未关闭的逐项缺口见 [M09 总览](specs/M09/README.md)。
+M09-A（同步只读协作）、M09-B（fork skill）、M09-C（hook agent）、M09-D（agent 定义与后台任务）、以及 M09-E/F 的用户批准最小验收集均已完成实现与验收。M09-E/F checklist 仍保留更宽的扩展交叉矩阵，已验证范围与边界见 [M09 minimum acceptance](specs/M09/minimum-acceptance.md)。
 
 完整源端对照、已通过证据和剩余完成条件见 [M09 范围与进度](specs/M09/README.md)。D/E/F 的规格均已批准；总体验收以各自 checklist 中的证据和未完成项为准。
 

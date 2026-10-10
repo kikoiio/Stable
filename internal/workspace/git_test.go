@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func privateGitFixture(t *testing.T) (*PrivateGit, *Layout, *OwnershipStore, Scope, string) {
@@ -80,6 +81,26 @@ func gitObjectFiles(t *testing.T, root string) []os.FileInfo {
 		t.Fatal(err)
 	}
 	return files
+}
+
+func TestPrivateGitMaterializeUsesConfiguredDeadline(t *testing.T) {
+	g, _, _, scope, id := privateGitFixture(t)
+	g.limits.MaxDuration = 20 * time.Millisecond
+	started := make(chan struct{}, 1)
+	g.runGit = func(ctx context.Context, _ gitInvocation) ([]byte, error) {
+		started <- struct{}{}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	_, err := g.Materialize(context.Background(), scope, id)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("materialization did not enforce configured deadline: %v", err)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("materialization deadline test did not reach Git operation")
+	}
 }
 
 func TestPrivateGitMaterializePreservesActualFormalRepository(t *testing.T) {

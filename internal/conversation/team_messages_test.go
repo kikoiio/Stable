@@ -191,6 +191,10 @@ func TestTeamMessageTextCannotCreateControlAndCredentialIsRedacted(t *testing.T)
 	if len(projection.Requests) != 0 || projection.Members["member-a"].Status != teams.MemberCreated {
 		t.Fatal("ordinary message changed control state")
 	}
+	projectedMessage, ok := projection.Messages[message.ID]
+	if !ok || strings.Contains(projectedMessage.Body, s.deps.ProviderCredential) || !strings.Contains(projectedMessage.Body, "[credential redacted]") {
+		t.Fatalf("team message projection did not preserve safe text and redact credential: %+v", projection.Messages)
+	}
 	path, err := sessionlog.SessionPath(s.deps.ProjectRoot, request.Work.SessionID)
 	if err != nil {
 		t.Fatal(err)
@@ -261,7 +265,8 @@ func TestTeamMessageWriteFailureDoesNotReportSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(path, 0600) })
-	message, err := s.SendTeamMessage(context.Background(), request, TeamSendRequest{TeamID: team.ID, Recipient: "reader", Body: "not committed", Token: "disk-failure"})
+	args := TeamSendRequest{TeamID: team.ID, Recipient: "reader", Body: "not committed", Token: "disk-failure"}
+	message, err := s.SendTeamMessage(context.Background(), request, args)
 	if err == nil || message.ID != "" {
 		t.Fatalf("write failure reported success: %+v, %v", message, err)
 	}
@@ -271,5 +276,15 @@ func TestTeamMessageWriteFailureDoesNotReportSuccess(t *testing.T) {
 	}
 	if string(before) != string(after) {
 		t.Fatal("failed message changed the durable session log")
+	}
+	if err = os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := s.SendTeamMessage(context.Background(), request, args)
+	if err != nil || retried.ID == "" || retried.Body != args.Body {
+		t.Fatalf("retry after write recovery did not commit: %+v, %v", retried, err)
+	}
+	if got := len(teamMessageFacts(t, s, request, team.ID)); got != 1 {
+		t.Fatalf("write recovery retry persisted %d messages for one token", got)
 	}
 }

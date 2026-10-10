@@ -172,3 +172,37 @@ func TestMaterializerDeadline(t *testing.T) {
 		t.Fatalf("materialization deadline absent: %v", err)
 	}
 }
+
+func TestMaterializerProductionDeadlineAndParentDeadline(t *testing.T) {
+	if got := DefaultLimits().MaxDuration; got != 3*time.Minute {
+		t.Fatalf("production create/materialize deadline = %s, want 3m", got)
+	}
+	m := NewMaterializer(Limits{})
+	t.Cleanup(func() { closeMaterializer(t, m) })
+	parent, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := make(chan time.Time, 1)
+	h, err := m.Submit(parent, func(ctx context.Context) error {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return errors.New("materializer context has no deadline")
+		}
+		started <- deadline
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case deadline := <-started:
+		if remaining := time.Until(deadline); remaining > 20*time.Millisecond {
+			t.Fatalf("materializer widened parent deadline: %s remain", remaining)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("materializer did not start")
+	}
+	if err := awaitMaterialization(t, h); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("parent deadline was not enforced: %v", err)
+	}
+}
