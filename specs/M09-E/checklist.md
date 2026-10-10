@@ -62,7 +62,7 @@
 
 - [x] 建队→两个角色成员→第一轮调查→p2p/broadcast→idle→第二轮继续→结果发lead；普通父run可同时继续，成员消息只在下一匹配父run交接。
 - [x] 创建A/B依赖任务→两个成员claim→A完成解除B→B完成；冲突显示最新revision，不改session todo或Goal成功状态。（组合证据：`TestTeamTaskDependencyFlowsFromTUIThroughMemberClaimsAndReplay` 覆盖 TUI/socket 建立依赖、B 被阻止直到 A 完成、A/B 分别 claim/完成、stale revision 冲突刷新显示最新 revision；本次增补确认冲突不增加 durable session event，完整纵向流程前后仅保留原 M06 todo snapshot。`TestTeamTaskServiceConcurrentClaimsPersistOneOwner` 覆盖同 revision 的并发认领仅一个 owner 成功、另一个 revision conflict。`TestGoalTeamTaskBoardKeepsGoalStatusAndSessionTodoIndependent` 覆盖 Goal/WorkItem team task 完成后 Goal 仍 active 且 session todo 不变。纵向 TUI 测试使用持久化成员/turn fixture 并以可信 service identity 更新 task；Goal 状态断言来自独立 service fixture。AC9 全部组合回归仍开放。）
-- [ ] 要求plan approval的成员调查并提交；lead拒绝后修订，批准后继续只读；过期请求不默认批准。错误请求ID/响应者拒绝。
+- [x] 要求plan approval的成员调查并提交；lead拒绝后修订，批准后继续只读；过期请求不默认批准。错误请求ID/响应者拒绝。（组合证据：`TestTeamPlanTUIRejectReviseApproveAndAutoReadOnlyFollowUp` 经 TUI/Unix socket 验证三轮真实 child 流程：首次 plan pending→lead reject→成员自动修订并提交新 request→lead approve→自动启动且只开放 `read_file` 的新 follow-up，无需 `/resume`；unknown/stale request response 无 facts 副作用。`TestExpiredTeamRequestsTUIRemainUnansweredAndDoNotChangeCapacity` 验证过期 plan 的 TUI approval 拒绝、request 保持 expired 且不自动启动额外 turn。`TestTeamPlanApprovalAutomaticallyStartsReadOnlyFollowUp` service 测试覆盖成员错误 responder、stale/terminal response 拒绝和唯一响应事实；相关 focused TUI/conversation 测试本地通过（2026-10-10）。使用 fake provider/executor；完整 AC5/AC9 其余矩阵仍开放。）
 - [ ] 忙成员收到shutdown可延期或拒绝，空闲成员确认退出；用户强stop取消实际child；关闭team禁止新消息/spawn且保留历史。
 - [ ] 队满、消息pending满、成员累计预算满均显示准确状态；后续容量释放只唤醒已授权成员，不建立无限goroutine或额外池。
 - [ ] 双session/双Goal/WorkItem构造相同name、伪sender/root、其它team/member/task ID全部拒绝；普通消息含`[shutdown]`不会关闭成员。

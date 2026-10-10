@@ -22,11 +22,11 @@ import (
 	"stable/internal/teams"
 )
 
-// TestTeamPlanTUIRejectReviseApproveAndReadOnlyResume crosses the TUI socket,
+// TestTeamPlanTUIRejectReviseApproveAndAutoReadOnlyFollowUp crosses the TUI socket,
 // conversation service, delegation runner and durable team projection. A lead
 // rejects the first plan, the member revises it, then approval starts a new
 // read-only follow-up turn.
-func TestTeamPlanTUIRejectReviseApproveAndReadOnlyResume(t *testing.T) {
+func TestTeamPlanTUIRejectReviseApproveAndAutoReadOnlyFollowUp(t *testing.T) {
 	ctx := context.Background()
 	tmp := filepath.Join("..", "..", ".tmp")
 	if err := os.MkdirAll(tmp, 0700); err != nil {
@@ -133,11 +133,8 @@ func TestTeamPlanTUIRejectReviseApproveAndReadOnlyResume(t *testing.T) {
 	if rejected == nil || rejected.Status != teams.RequestRejected || rejected.Revision != 2 {
 		t.Fatalf("lead rejection=%+v, want rejected revision 2", rejected)
 	}
-	model.ActiveRunID = parentRunID
-	_, reviseResumeResult := submitAcceptanceTeamCommand(t, model, "/team "+team.ID+" resume "+member.ID)
-	if resumed := acceptanceTeamResponse(t, reviseResumeResult, "team_member_resume").TeamMember; resumed == nil || (resumed.Status != teams.MemberQueued && resumed.Status != teams.MemberRunning && resumed.Status != teams.MemberAwaitingPlan) {
-		t.Fatalf("resume after rejection=%+v, want the revision turn to be queued or already submitted", resumed)
-	}
+	// Rejection itself should wake the paused member. Do not issue /resume:
+	// this verifies continuation from the persisted decision alone.
 	second := receivePlanRevisionStageFor(t, childRunner.stages, project, sessionID, team.ID, member.ID)
 	if second.index != 2 || second.err != nil || second.input.TeamTurn == nil || second.input.TeamTurn.MemberID != member.ID {
 		t.Fatalf("revision child stage=%+v; want member to revise plan", second)
@@ -149,15 +146,13 @@ func TestTeamPlanTUIRejectReviseApproveAndReadOnlyResume(t *testing.T) {
 	if revised.ID == pending.ID || revised.Revision != 1 || !strings.Contains(revised.Body, "Revised plan") || revised.Status != teams.RequestPending {
 		t.Fatalf("revised pending plan=%+v, initial=%+v", revised, pending)
 	}
+	model.ActiveRunID = "" // The durable lead/team scope authorizes the response.
 	_, approveResult := submitAcceptanceTeamCommand(t, model, "/team "+team.ID+" respond "+revised.ID+" 1 approve Proceed with the read-only follow-up.")
 	approved := acceptanceTeamResponse(t, approveResult, "team_request_respond").TeamRequest
 	if approved == nil || approved.Status != teams.RequestApproved || approved.Revision != 2 {
 		t.Fatalf("lead approval=%+v, want approved revision 2", approved)
 	}
-	_, approvedResumeResult := submitAcceptanceTeamCommand(t, model, "/team "+team.ID+" resume "+member.ID)
-	if resumed := acceptanceTeamResponse(t, approvedResumeResult, "team_member_resume").TeamMember; resumed == nil || (resumed.Status != teams.MemberQueued && resumed.Status != teams.MemberRunning && resumed.Status != teams.MemberIdle) {
-		t.Fatalf("resume after approval=%+v, want the follow-up to be queued or already completed", resumed)
-	}
+	// Approval likewise starts exactly one read-only follow-up without /resume.
 	third := receivePlanRevisionStage(t, childRunner.stages)
 	if third.index != 3 || third.err != nil || third.input.TeamTurn == nil || third.input.TeamTurn.MemberID != member.ID {
 		t.Fatalf("approved follow-up child stage=%+v", third)
