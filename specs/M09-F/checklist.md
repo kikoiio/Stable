@@ -57,6 +57,8 @@
 
 新增 preview 绑定证据：`TestWorkspaceResolutionRejectsStaleWorkspaceDigest` 在三方冲突 preview 后仅改变 checkout/W digest，验证旧 preview 的用户 resolution 返回 `ErrSourceChanged`，不写 resolution/ResolvedCount，formal 和 baseline 内容保持不变。定向 workspace 测试本地通过（2026-10-10）；其它 stale/session/generation 组合仍开放。
 
+新增 conflict resolution 分页证据：`TestConflictResolutionPagesAccumulateEveryExactPath` 构造205条冲突路径，验证分页预览不漏路径、同一用户分批选择会累计到完整路径集合，并拒绝伪造路径且不更改已保存的决策。定向 workspace 测试本地通过（2026-10-10）；尚未覆盖该选择经完整 export→candidate review/accept 闭环或分页时源变化，AC4 仍开放。
+
 - [ ] B/F/W相等/仅一方变/双方相同/双方不同表覆盖bytes、mode、创建、删除；rename按delete/add，冲突有绑定digest的路径摘要，无自动文本merge/force旁路。
 - [ ] 两工作树不同文件依次导出并接受不会回退先前正式改动；相同文件冲突阻断，用户手工合并W后，逐路径user resolution可继续导出，不要求W等于旧B/F；生成候选有新真实版本。
 - [ ] conflict preview/resolution绑定真实user/session/workspace/generation、完整B/F/W digests及所有精确冲突路径的W/F选择；缺失/额外路径、源变化、过期或模型决策拒绝；resolution不改正式根或baseline，导出后仍须新候选review/用户accept。

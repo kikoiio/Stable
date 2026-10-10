@@ -327,7 +327,7 @@ func recoverTeamSession(root, sessionID string, events []sessionlog.Event, proje
 			member.Status = teams.MemberBudgetExhausted
 		}
 		member.Revision++
-		if err := appendTeamFactLocked(root, sessionID, member.TeamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: turn.OriginRunID, Member: &member}); err != nil {
+		if err := appendTeamFactLocked(root, sessionID, member.TeamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: turn.OriginRunID, Member: &member, Recovery: true}); err != nil {
 			return err
 		}
 	}
