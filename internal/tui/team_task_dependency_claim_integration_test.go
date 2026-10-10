@@ -2,8 +2,10 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -66,6 +68,10 @@ func TestTeamTaskDependencyFlowsFromTUIThroughMemberClaimsAndReplay(t *testing.T
 		t.Fatalf("create session: messages=%+v err=%v", created, err)
 	}
 	sessionID := created[0].Session.ID
+	todo := sessionlog.TodoUpdate{Revision: 1, Tasks: []sessionlog.TaskSnapshot{{ID: "m06-session-task", Subject: "separate session todo", Status: "pending"}}}
+	if _, err := sessionlog.Append(project, sessionID, sessionlog.EventTodo, todo); err != nil {
+		t.Fatal(err)
+	}
 	teamID := mustTeamID(t)
 	appendTeamFact := func(kind, actor string, revision uint64, team *teams.Team, member *teams.Member, turn *sessionlog.TurnFact) {
 		t.Helper()
@@ -172,6 +178,10 @@ func TestTeamTaskDependencyFlowsFromTUIThroughMemberClaimsAndReplay(t *testing.T
 	}
 	// A lead edit with the now stale pre-claim revision must surface the
 	// service error instead of presenting an apparently successful mutation.
+	beforeConflict, err := sessionlog.Replay(project, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	staleModel := model
 	staleModel.Composer.SetValue("/team " + teamID + " tasks update " + claimedB.ID + " " + strconv.FormatUint(readyB.Revision, 10) + " blocked_by none")
 	staleUpdated, staleCmd := staleModel.submitComposer()
@@ -211,6 +221,14 @@ func TestTeamTaskDependencyFlowsFromTUIThroughMemberClaimsAndReplay(t *testing.T
 	if !visibleCurrentRevision {
 		t.Fatalf("stale conflict did not show current revision %d in TUI events: %+v", durableTask.Revision, staleModel.Events)
 	}
+	afterConflict, err := sessionlog.Replay(project, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterConflict.Events) != len(beforeConflict.Events) {
+		t.Fatalf("stale task conflict appended durable session events: before=%d after=%d", len(beforeConflict.Events), len(afterConflict.Events))
+	}
+	assertTeamDependencyTodoSnapshot(t, project, sessionID, todo)
 	completedB, err := svc.UpdateTeamTask(ctx, requests[1], teamID, readyB.ID, claimedB.Revision, teams.TaskPatch{Status: &statusCompleted})
 	if err != nil || completedB.Status != teams.TaskCompleted {
 		t.Fatalf("member B complete=%+v err=%v", completedB, err)
@@ -227,6 +245,33 @@ func TestTeamTaskDependencyFlowsFromTUIThroughMemberClaimsAndReplay(t *testing.T
 	}
 	if projection.Tasks[finalA.ID].Status != teams.TaskCompleted || projection.Tasks[finalB.ID].Status != teams.TaskCompleted || len(projection.Tasks[finalB.ID].BlockedBy) != 1 || projection.Tasks[finalB.ID].BlockedBy[0] != finalA.ID {
 		t.Fatalf("final ReplayTeams task facts A=%+v B=%+v", projection.Tasks[finalA.ID], projection.Tasks[finalB.ID])
+	}
+	assertTeamDependencyTodoSnapshot(t, project, sessionID, todo)
+}
+
+func assertTeamDependencyTodoSnapshot(t *testing.T, root, sessionID string, expected sessionlog.TodoUpdate) {
+	t.Helper()
+	transcript, err := sessionlog.Replay(root, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates := make([]sessionlog.TodoUpdate, 0, 1)
+	for _, event := range transcript.Events {
+		if event.Type != sessionlog.EventTodo {
+			continue
+		}
+		data, err := json.Marshal(event.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var update sessionlog.TodoUpdate
+		if err := json.Unmarshal(data, &update); err != nil {
+			t.Fatal(err)
+		}
+		updates = append(updates, update)
+	}
+	if len(updates) != 1 || !reflect.DeepEqual(updates[0], expected) {
+		t.Fatalf("team task workflow mutated M06 todo: got=%+v want=%+v", updates, expected)
 	}
 }
 

@@ -79,7 +79,11 @@ func TestRemoveRootReplacementAfterIntentIsRetained(t *testing.T) {
 				t.Fatalf("replacement intent was not retained: record=%+v err=%v", stored, err)
 			}
 			quarantine := filepath.Join(filepath.Dir(paths.Root), stored.Operation.Quarantine)
-			for _, retainedPath := range []string{quarantine, paths.Root + ".original"} {
+			replacementPath := quarantine
+			if stage == "after intent" {
+				replacementPath = paths.Root
+			}
+			for _, retainedPath := range []string{replacementPath, paths.Root + ".original"} {
 				content, err := os.ReadFile(filepath.Join(retainedPath, "replacement-sentinel.txt"))
 				if retainedPath == paths.Root+".original" {
 					content, err = os.ReadFile(filepath.Join(retainedPath, "preserved.txt"))

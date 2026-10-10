@@ -122,11 +122,8 @@ func (s *Service) StopTeamMember(ctx context.Context, sessionID, teamID, memberI
 		s.eventMu.Unlock()
 		return teams.Member{}, teams.ErrNotFound
 	}
-	if member.Status == teams.MemberStopping {
-		s.eventMu.Unlock()
-		return member, nil
-	}
-	if !member.Status.HasTurn() {
+	alreadyStopping := member.Status == teams.MemberStopping
+	if !alreadyStopping && !member.Status.HasTurn() {
 		s.eventMu.Unlock()
 		return teams.Member{}, teams.ErrNotFound
 	}
@@ -135,21 +132,67 @@ func (s *Service) StopTeamMember(ctx context.Context, sessionID, teamID, memberI
 	s.teamScheduler.mu.Unlock()
 	if cancel == nil {
 		s.eventMu.Unlock()
+		if alreadyStopping {
+			return member, nil
+		}
 		return teams.Member{}, errors.New("team child stop handle is unavailable")
 	}
-	shutdown, err := s.createTeamRequest(root, team, "", teams.Lead, member.ID, teams.RequestShutdown, "")
-	if err != nil {
+	if alreadyStopping {
 		s.eventMu.Unlock()
-		return teams.Member{}, err
+		if invalidated := s.teamScheduler.invalidateMember(memberID); invalidated != nil {
+			cancel = invalidated
+		}
+		cancel()
+		return member, nil
 	}
-	team.Revision++
-	shutdown.Status = teams.RequestApproved
-	shutdown.Revision++
-	if err := s.appendTeamRequest(root, team, "", "service", sessionlog.TeamRequestResponded, shutdown); err != nil {
-		s.eventMu.Unlock()
-		return teams.Member{}, err
+	var shutdown teams.Request
+	for _, pending := range projection.Requests {
+		if pending.TeamID != teamID || pending.MemberID != member.ID || pending.Type != teams.RequestShutdown ||
+			pending.Status != teams.RequestApproved || pending.Feedback != "User force-stopped this member." {
+			continue
+		}
+		// The approved decision is durable even if the following MemberState
+		// append failed. Reuse it on retry instead of adding duplicate history.
+		shutdown = pending
+		break
 	}
-	team.Revision++
+	if shutdown.ID == "" {
+		for _, pending := range projection.Requests {
+			if pending.TeamID != teamID || pending.MemberID != member.ID || pending.Type != teams.RequestShutdown ||
+				(pending.Status != teams.RequestPending && pending.Status != teams.RequestDeferred) {
+				continue
+			}
+			if !time.Now().UTC().Before(pending.ExpiresAt) {
+				var expireErr error
+				team, _, expireErr = s.expireTeamRequest(root, team, pending)
+				if expireErr != nil {
+					s.eventMu.Unlock()
+					return teams.Member{}, expireErr
+				}
+				continue
+			}
+			shutdown = pending
+			break
+		}
+	}
+	if shutdown.ID == "" {
+		shutdown, err = s.createTeamRequest(root, team, "", teams.Lead, member.ID, teams.RequestShutdown, "")
+		if err != nil {
+			s.eventMu.Unlock()
+			return teams.Member{}, err
+		}
+		team.Revision++
+	}
+	if shutdown.Status != teams.RequestApproved || shutdown.Feedback != "User force-stopped this member." {
+		shutdown.Status = teams.RequestApproved
+		shutdown.Feedback = "User force-stopped this member."
+		shutdown.Revision++
+		if err := s.appendTeamRequest(root, team, "", "service", sessionlog.TeamRequestResponded, shutdown); err != nil {
+			s.eventMu.Unlock()
+			return teams.Member{}, err
+		}
+		team.Revision++
+	}
 	member.Status = teams.MemberStopping
 	member.Revision++
 	if err := s.appendTeamMemberState(root, team, "", "service", member); err != nil {
@@ -509,7 +552,7 @@ func (s *Service) reconcileExpiredPlanMembers(root, sessionID, teamID string) er
 			if planExpired && !pendingPlan {
 				member.Status = teams.MemberIdle
 				member.Revision++
-				if err := appendTeamFactLocked(root, team.Scope.SessionID, teamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: member.OriginRunID, Member: &member}); err != nil {
+				if err := s.appendTeamMemberState(root, team, member.OriginRunID, "service", member); err != nil {
 					return err
 				}
 				projection.Members[member.ID] = member
@@ -535,7 +578,7 @@ func (s *Service) reconcileExpiredPlanMembers(root, sessionID, teamID string) er
 		}
 		member.Status = target
 		member.Revision++
-		if err := appendTeamFactLocked(root, team.Scope.SessionID, teamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: member.OriginRunID, Member: &member}); err != nil {
+		if err := s.appendTeamMemberState(root, team, member.OriginRunID, "service", member); err != nil {
 			return err
 		}
 		projection.Members[member.ID] = member

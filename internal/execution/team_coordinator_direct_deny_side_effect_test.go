@@ -56,7 +56,13 @@ func TestCoordinatorRejectsForgedDirectCallsBeforeExecutionSideEffects(t *testin
 		m06Call("task_output", `{"task_id":"task-1"}`),
 		m06Call("task_stop", `{"task_id":"task-1"}`),
 		m06Call("delegate_tasks", `{"tasks":[{"id":"nested","name":"nested","instruction":"recurse"}]}`),
-		m06Call("task_update", `{"taskId":"todo-1"}`),
+		// The complete session todo family must be denied even for valid
+		// provider-shaped requests; otherwise a coordinator can mutate or read
+		// the parent's session task list outside its team board.
+		m06Call("task_create", `{"subject":"forged todo","description":"must not be created"}`),
+		m06Call("task_get", `{"taskId":"todo-1"}`),
+		m06Call("task_list", `{}`),
+		m06Call("task_update", `{"taskId":"todo-1","status":"completed"}`),
 		m06Call("http_request", `{"url":"https://example.invalid"}`),
 		m06Call("enter_worktree", `{"label":"forged"}`),
 		m06Call("exit_worktree", `{}`),

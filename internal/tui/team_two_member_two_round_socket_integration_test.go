@@ -119,10 +119,13 @@ func TestTeamTUITwoMembersTwoTurnsRoutePrivateHandoffAndKeepParentRun(t *testing
 	}
 	model, spawnAResult := submitAcceptanceTeamCommand(t, model, "/team "+team.ID+" spawn parser-reader explore inspect parser recovery")
 	memberA := acceptanceTeamResponse(t, spawnAResult, "team_member_spawn").TeamMember
-	model, spawnBResult := submitAcceptanceTeamCommand(t, model, "/team "+team.ID+" spawn recovery-reviewer explore inspect recovery boundaries")
+	model, spawnBResult := submitAcceptanceTeamCommand(t, model, "/team "+team.ID+" spawn recovery-reviewer general-purpose inspect recovery boundaries")
 	memberB := acceptanceTeamResponse(t, spawnBResult, "team_member_spawn").TeamMember
 	if memberA == nil || memberB == nil || memberA.ID == memberB.ID {
 		t.Fatalf("spawn results A=%+v B=%+v", memberA, memberB)
+	}
+	if memberA.AgentName != "explore" || memberB.AgentName != "general-purpose" {
+		t.Fatalf("expected two distinct role members, got A=%q B=%q", memberA.AgentName, memberB.AgentName)
 	}
 
 	firstByMember := make(map[string]agent.ChildRunInput, 2)
@@ -146,6 +149,12 @@ func TestTeamTUITwoMembersTwoTurnsRoutePrivateHandoffAndKeepParentRun(t *testing
 	handoff := acceptanceTeamResponse(t, handoffResult, "team_send").TeamMessage
 	if handoff == nil || handoff.SenderID != teams.Lead || len(handoff.Recipients) != 1 || handoff.Recipients[0] != memberB.ID {
 		t.Fatalf("private handoff=%+v, want only member B", handoff)
+	}
+	model, broadcastResult := submitAcceptanceTeamCommand(t, model, "/team "+team.ID+" send all first-round broadcast for both investigators")
+	broadcast := acceptanceTeamResponse(t, broadcastResult, "team_send").TeamMessage
+	if broadcast == nil || broadcast.SenderID != teams.Lead || len(broadcast.Recipients) != 2 ||
+		!containsString(broadcast.Recipients, memberA.ID) || !containsString(broadcast.Recipients, memberB.ID) {
+		t.Fatalf("broadcast=%+v, want a fixed snapshot containing both members", broadcast)
 	}
 
 	parentRun.events <- agent.ExecutionEvent{
@@ -188,6 +197,9 @@ func TestTeamTUITwoMembersTwoTurnsRoutePrivateHandoffAndKeepParentRun(t *testing
 	if strings.Contains(secondA.Task.Instruction, handoff.Body) || !strings.Contains(secondB.Task.Instruction, handoff.Body) {
 		t.Fatalf("private handoff routing leaked or disappeared: A=%q B=%q", secondA.Task.Instruction, secondB.Task.Instruction)
 	}
+	if !strings.Contains(secondA.Task.Instruction, broadcast.Body) || !strings.Contains(secondB.Task.Instruction, broadcast.Body) {
+		t.Fatalf("broadcast was not delivered to both second turns: A=%q B=%q", secondA.Task.Instruction, secondB.Task.Instruction)
+	}
 	if strings.Contains(secondA.Task.Instruction, parentOnly) || strings.Contains(secondB.Task.Instruction, parentOnly) {
 		t.Fatal("parent transcript content leaked into a second-round child instruction")
 	}
@@ -213,6 +225,8 @@ func TestTeamTUITwoMembersTwoTurnsRoutePrivateHandoffAndKeepParentRun(t *testing
 		t.Fatal(err)
 	}
 	var parentMarkerFound, durableMessageFound, durableHandoffFound bool
+	var durableBroadcastFound bool
+	broadcastHandoffs := make(map[string]bool, 2)
 	for _, event := range transcript.Events {
 		switch event.Type {
 		case sessionlog.EventMessage:
@@ -245,13 +259,19 @@ func TestTeamTUITwoMembersTwoTurnsRoutePrivateHandoffAndKeepParentRun(t *testing
 			if fact.Kind == sessionlog.TeamMessageHandoff && fact.Handoff != nil && fact.Handoff.MessageID == handoff.ID && fact.Handoff.RecipientID == memberB.ID && fact.Handoff.DestinationTurnID == secondB.TeamTurn.TurnID {
 				durableHandoffFound = true
 			}
+			if fact.Kind == sessionlog.TeamMessageSent && fact.Message != nil && fact.Message.ID == broadcast.ID && len(fact.Message.Recipients) == 2 && containsString(fact.Message.Recipients, memberA.ID) && containsString(fact.Message.Recipients, memberB.ID) {
+				durableBroadcastFound = true
+			}
+			if fact.Kind == sessionlog.TeamMessageHandoff && fact.Handoff != nil && fact.Handoff.MessageID == broadcast.ID {
+				broadcastHandoffs[fact.Handoff.RecipientID] = fact.Handoff.DestinationTurnID == map[string]string{memberA.ID: secondA.TeamTurn.TurnID, memberB.ID: secondB.TeamTurn.TurnID}[fact.Handoff.RecipientID]
+			}
 		}
 	}
 	if !parentMarkerFound {
 		t.Fatal("parent-only marker was not retained in the parent transcript")
 	}
-	if !durableMessageFound || !durableHandoffFound {
-		t.Fatalf("durable private message/handoff facts missing: message=%v handoff=%v", durableMessageFound, durableHandoffFound)
+	if !durableMessageFound || !durableHandoffFound || !durableBroadcastFound || !broadcastHandoffs[memberA.ID] || !broadcastHandoffs[memberB.ID] {
+		t.Fatalf("durable message/handoff facts missing: private_message=%v private_handoff=%v broadcast=%v broadcast_handoffs=%v", durableMessageFound, durableHandoffFound, durableBroadcastFound, broadcastHandoffs)
 	}
 
 	// A member report must be visible in the lead's team history and enter
@@ -290,6 +310,24 @@ func TestTeamTUITwoMembersTwoTurnsRoutePrivateHandoffAndKeepParentRun(t *testing
 		t.Fatalf("TUI team history omitted member-to-lead report: %+v", messages)
 	}
 	waitTwoMemberTwoRoundStatus(t, project, sessionID, team.ID, memberB.ID, teams.MemberIdle)
+	projection, err = sessionlog.ReplayTeams(project, sessionID, team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reportMessageID string
+	for _, message := range projection.Messages {
+		if message.Body == memberReport && message.SenderID == memberB.ID && len(message.Recipients) == 1 && message.Recipients[0] == teams.Lead {
+			reportMessageID = message.ID
+		}
+	}
+	if reportMessageID == "" {
+		t.Fatal("member report must remain pending until a matching parent run starts")
+	}
+	for _, fact := range projection.Handoffs {
+		if fact.MessageID == reportMessageID {
+			t.Fatalf("member report was handed off before the next matching parent run: %+v", fact)
+		}
+	}
 
 	parentRun.finish(agent.RunCompleted)
 	for {
@@ -330,7 +368,37 @@ func TestTeamTUITwoMembersTwoTurnsRoutePrivateHandoffAndKeepParentRun(t *testing
 	if !noticeFound {
 		t.Fatalf("next matching parent run omitted member report: %+v", matchingParent.request.Messages)
 	}
+	history, err := sessionlog.TeamHistory(project, sessionID, team.ID, 0, teams.MaxPageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reportHandoffs []sessionlog.HandoffFact
+	for _, event := range history {
+		raw, err := json.Marshal(event.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fact sessionlog.TeamEvent
+		if err := json.Unmarshal(raw, &fact); err != nil {
+			t.Fatal(err)
+		}
+		if fact.Kind == sessionlog.TeamLeadHandoff && fact.Handoff != nil && fact.Handoff.MessageID == reportMessageID {
+			reportHandoffs = append(reportHandoffs, *fact.Handoff)
+		}
+	}
+	if len(reportHandoffs) != 1 || reportHandoffs[0].RecipientID != teams.Lead || reportHandoffs[0].DestinationRunID != matchingParentID {
+		t.Fatalf("member report handoffs=%+v, want exactly one to lead on matching parent run %q", reportHandoffs, matchingParentID)
+	}
 	matchingParent.finish(agent.RunCompleted)
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 type twoMemberTwoRoundChildRunner struct {

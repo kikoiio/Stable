@@ -84,4 +84,4 @@ SHA `ad14e4f` 的 Go run [38005341959](https://github.com/kikoiio/Stable/actions
 
 SHA `56a5111` 的 Go run [38006389753](https://github.com/kikoiio/Stable/actions/runs/38006389753) 与 M09 Workspace Linux run [38006389754](https://github.com/kikoiio/Stable/actions/runs/38006389754) 通过；E2E run [38006389755](https://github.com/kikoiio/Stable/actions/runs/38006389755) 仍在运行。该 SHA 修复 workspace list/get/preview 服务端 30 秒上限，并补 stop/close 与 child terminal 持久故障恢复交叉测试。
 
-当前本地下一批包含 E coordinator 活跃期间的 TUI/socket 用户 stop 权限与 sibling 隔离，以及 F quarantine rename 后同 inode 内容改写/新增的 fail-closed 删除恢复修复；两项定向测试通过，待提交及云端复验。M09-E/F checklist 与 M09 总体仍保持未整体验收状态。
+本地最新一批继续收敛 M09-E/F：修复 plan approval 未唤醒首轮成员、deferred shutdown 阻断用户强 stop、force-stop 持久化重试重复请求；补齐两个已勾选的 E 纵向场景（两成员多轮消息路由、依赖任务/TUI/todo 隔离）、F 同 workspace 单 writer 和父 run 完成/断线后的 writer 生命周期证据，以及 coordinator 直接 todo 调用拒绝。另修正 workspace 根替换回归测试的错误断言。改动相关定向 Go 测试、格式和 diff 检查均通过；最新代码的 GitHub Actions 复验待提交。M09-E/F 的 AC1–9 与 M09 总体仍未完成。

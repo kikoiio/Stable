@@ -770,6 +770,11 @@ func (s *Service) SpawnTeamMember(ctx context.Context, request agent.ExecutionRe
 	s.teamScheduler.mu.Lock()
 	s.teamScheduler.roles[member.ID] = definition
 	s.teamScheduler.mu.Unlock()
+	// Keep the already-authorized lead run available as the member's scheduler
+	// grant. A later user approval arrives through the TeamUser socket path and
+	// has no parent RunID of its own; the grant lets that durable approval wake
+	// this member without requiring a second explicit resume command.
+	s.teamScheduler.rememberParent(request, scope, team.ID, member.ID, spawn.OriginCallID)
 	return accepted, nil
 }
 
