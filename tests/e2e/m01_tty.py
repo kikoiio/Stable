@@ -232,11 +232,13 @@ def main() -> int:
         with provider.requests_lock:
             if not any(value == "M01_MULTI_FIRST\nM01_MULTI_SECOND" for value in provider.requests):
                 raise AssertionError("fake provider did not receive the two-line TTY message")
+        tui.wait_for(b"completed", 30, offset)
 
         # Long streaming response, page navigation, terminal resize, and reflow.
         offset = len(tui.output)
         tui.send(b"M01_LONG_RESPONSE\r")
         tui.wait_for(b"M01_LONG_039", 30, offset)
+        tui.wait_for(b"completed", 30, offset)
         offset = len(tui.output)
         tui.send(b"\x1b[5~")  # Page Up
         tui.wait_for(b"M01_LONG_000", start=offset)
