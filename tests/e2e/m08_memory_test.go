@@ -422,7 +422,7 @@ func TestM08MemorySurvivesCompactionRestoreAndCandidateRewind(t *testing.T) {
 	ctx := context.Background()
 	userConfig := filepath.Join(t.TempDir(), "config")
 	stateDir := filepath.Join(t.TempDir(), "memory-state")
-	deferCloseManager := func(manager memory.Manager) { _ = manager.Close(context.Background()) }
+	deferCloseManager := func(manager memory.Manager) { _ = closeM08MemoryManager(context.Background(), manager) }
 
 	// A real agent run first emits a large tool exchange, then crosses the context
 	// threshold before its next provider call. The resulting run boundary and
@@ -489,8 +489,8 @@ func TestM08MemorySurvivesCompactionRestoreAndCandidateRewind(t *testing.T) {
 		if event.Type != sessionlog.EventBoundary {
 			continue
 		}
-		var boundary sessionlog.Boundary
-		if json.Unmarshal(event.Data, &boundary) == nil && boundary.Scope == sessionlog.BoundaryScopeRun && boundary.RunID == request.RunID && boundary.FromSeq > 0 && boundary.ToSeq > 0 {
+		boundary, ok := event.Data.(sessionlog.Boundary)
+		if ok && boundary.Scope == sessionlog.BoundaryScopeRun && boundary.RunID == request.RunID && boundary.FromSeq > 0 && boundary.ToSeq > 0 {
 			boundarySeen = true
 			if !strings.Contains(boundary.Summary, "好的，已记录。") {
 				t.Fatalf("unexpected real-run compaction summary: %+v", boundary)
@@ -510,7 +510,7 @@ func TestM08MemorySurvivesCompactionRestoreAndCandidateRewind(t *testing.T) {
 		t.Fatal(err)
 	}
 	server.stop()
-	if err = manager.Close(ctx); err != nil {
+	if err = closeM08MemoryManager(ctx, manager); err != nil {
 		t.Fatal(err)
 	}
 	manager, err = memory.NewManager(memory.Options{ProjectRoot: root, UserConfigDir: userConfig, StateDir: stateDir, Selector: m08Selector{refs: []memory.MemoryRef{{Scope: memory.ScopeUser, Filename: compactionHeader.Filename}}}})
@@ -559,7 +559,7 @@ func TestM08MemorySurvivesCompactionRestoreAndCandidateRewind(t *testing.T) {
 		t.Fatal(err)
 	}
 	restarted.stop()
-	if err = manager.Close(ctx); err != nil {
+	if err = closeM08MemoryManager(ctx, manager); err != nil {
 		t.Fatal(err)
 	}
 
@@ -624,4 +624,12 @@ func m08RoundContains(messages []llm.Message, text string) bool {
 		}
 	}
 	return false
+}
+
+func closeM08MemoryManager(ctx context.Context, manager memory.Manager) error {
+	closer, ok := manager.(interface{ Close(context.Context) error })
+	if !ok {
+		return nil
+	}
+	return closer.Close(ctx)
 }
