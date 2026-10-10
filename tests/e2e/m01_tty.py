@@ -50,7 +50,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
         elif "M01_LONG_RESPONSE" in user_text:
             frames = [
                 {"choices": [{"delta": {"content": f"M01_LONG_{index:03d}\n"}, "finish_reason": None}]}
-                for index in range(40)
+                for index in range(120)
             ]
             frames.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
         else:
@@ -237,17 +237,17 @@ def main() -> int:
         # Long streaming response, page navigation, terminal resize, and reflow.
         offset = len(tui.output)
         tui.send(b"M01_LONG_RESPONSE\r")
-        tui.wait_for(b"M01_LONG_039", 30, offset, "long reply stream")
+        tui.wait_for(b"M01_LONG_119", 30, offset, "long reply stream")
         tui.wait_for(b"completed", 30, offset, "long run completion")
         offset = len(tui.output)
         tui.send(b"\x1b[5~")  # Page Up
         tui.wait_for(b"M01_LONG_000", start=offset, label="Page Up transcript view")
         offset = len(tui.output)
         tui.send(b"\x1b[6~")  # Page Down
-        tui.wait_for(b"M01_LONG_039", start=offset, label="Page Down transcript view")
+        tui.wait_for(b"M01_LONG_119", start=offset, label="Page Down transcript view")
         offset = len(tui.output)
         tui.resize(58, 16)
-        tui.wait_for(b"M01_LONG_039", start=offset, label="resized transcript view")
+        tui.wait_for(b"M01_LONG_119", start=offset, label="resized transcript view")
 
         # A provider error must be visible in the TUI instead of looking like success.
         offset = len(tui.output)
