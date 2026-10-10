@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"stable/internal/agent"
 	"stable/internal/memory"
@@ -61,15 +62,19 @@ func appendBoundedSection(b *strings.Builder, title, content string) {
 		return
 	}
 	b.WriteString(prefix)
-	remaining = memoryContextLimit - b.Len()
+	suffix := "\n</" + title + ">\n"
+	remaining = memoryContextLimit - b.Len() - len(suffix)
+	if remaining <= 0 {
+		return
+	}
 	if len(content) > remaining {
-		runes := []rune(content)
-		if len(runes) > remaining {
-			content = string(runes[:remaining])
+		content = content[:remaining]
+		for !utf8.ValidString(content) {
+			content = content[:len(content)-1]
 		}
 	}
 	b.WriteString(content)
-	b.WriteString("\n</" + title + ">\n")
+	b.WriteString(suffix)
 }
 
 func (s *Service) completeMemoryRun(request agent.ExecutionRequest, cursor uint64) {

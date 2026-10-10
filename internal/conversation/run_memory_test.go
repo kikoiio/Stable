@@ -54,8 +54,15 @@ func TestRenderMemoryContextIsBoundedAndContainsSelectedText(t *testing.T) {
 		t.Fatalf("memory prefix exceeded cap: %d bytes", len(got))
 	}
 	large := renderMemoryContext(memory.RunMemoryContext{InstructionText: strings.Repeat("x", memoryContextLimit*2)})
-	if len(large) > memoryContextLimit+512 {
+	if len(large) > memoryContextLimit {
 		t.Fatalf("large memory prefix exceeded cap: %d bytes", len(large))
+	}
+	largeUTF8 := renderMemoryContext(memory.RunMemoryContext{InstructionText: strings.Repeat("记忆规则", memoryContextLimit)})
+	if len(largeUTF8) > memoryContextLimit {
+		t.Fatalf("UTF-8 memory prefix exceeded cap: %d bytes", len(largeUTF8))
+	}
+	if !strings.Contains(largeUTF8, "<Stable instructions>") || !strings.HasSuffix(largeUTF8, "</Stable instructions>") {
+		t.Fatal("UTF-8 truncation broke the memory context section")
 	}
 }
 

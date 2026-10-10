@@ -27,6 +27,8 @@ jobs:
           cache-dependency-path: go.sum
       - name: Verify dependencies
         run: go mod verify
+      - name: Test remote browser UI behavior
+        run: node --test tests/remote-ui.test.cjs
       - name: Build CLI and workers
         run: go build ./cmd/...
       - name: Run unit tests

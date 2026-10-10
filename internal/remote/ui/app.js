@@ -26,8 +26,11 @@ $("message-form").addEventListener("submit", (event) => {
   event.preventDefault(); const text = $("message").value.trim();
   if (!text || !state.session) return;
   $("message").value = ""; addBubble("user", text);
-  const id = request("run_start", { session_id: state.session, run: { work: { kind: "session", session_id: state.session }, intent: text, messages: [{ role: "user", content: text }] } });
-  state.runRequestID = id; state.pending.set(id, { op: "run_start", run: true }); $("run-status").textContent = "Starting…";
+  const session = state.session;
+  const id = request("run_start", { session_id: session, run: { work: { kind: "session", session_id: session }, intent: text, messages: [{ role: "user", content: text }] } });
+  state.runRequestID = id;
+  if (id) state.pending.set(id, { op: "run_start", session, run: true });
+  $("run-status").textContent = "Starting…";
 });
 $("cancel-run").addEventListener("click", () => {
   if (!state.session || !state.runID) return;
