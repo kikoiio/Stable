@@ -1550,11 +1550,28 @@ func cleanupTeamMemberWorkspaceUnlessReferenced(root, sessionID, teamID, memberI
 	}
 	if created {
 		projection, err := sessionlog.ReplayTeams(root, sessionID, teamID)
-		if err == nil {
-			if member, ok := projection.Members[memberID]; ok && member.WorkspaceID == lease.WorkspaceID {
+		if err != nil {
+			// A failed replay cannot prove that no durable team fact references
+			// this newly-created workspace. Release only if the completed writer
+			// can be safely settled; never delete its root on uncertain ownership.
+			_, _ = manager.ReleaseCompletedWriter(context.Background(), lease)
+			return
+		}
+		if _, ok := projection.Teams[teamID]; !ok {
+			// The requested team was not present in the projection, so absence of
+			// a member is not reliable evidence that the workspace is unreferenced.
+			_, _ = manager.ReleaseCompletedWriter(context.Background(), lease)
+			return
+		}
+		if member, ok := projection.Members[memberID]; ok {
+			if member.WorkspaceID != lease.WorkspaceID {
+				// A member fact exists, but its workspace link does not identify
+				// this lease. Preserve the resource until the mismatch is resolved.
 				_, _ = manager.ReleaseCompletedWriter(context.Background(), lease)
 				return
 			}
+			_, _ = manager.ReleaseCompletedWriter(context.Background(), lease)
+			return
 		}
 	}
 	cleanupTeamMemberWorkspace(manager, lease, created)

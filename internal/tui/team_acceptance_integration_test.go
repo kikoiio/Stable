@@ -45,7 +45,12 @@ func TestTeamTUIAcceptanceCreateSpawnSendListAndGetOverConversationSocket(t *tes
 	}
 	t.Cleanup(pool.Close)
 	parentRunner := &acceptanceTeamParentRunner{started: make(chan *acceptanceTeamParentRun, 1)}
-	socket := filepath.Join(root, "conversation.sock")
+	socketDir, err := os.MkdirTemp(os.TempDir(), "m09-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socket := filepath.Join(socketDir, "conversation.sock")
 	svc, err := conversation.Serve(ctx, conversation.Deps{
 		Store: db, ProjectRoot: project, SocketPath: socket, PollEvery: time.Hour,
 		Runner: parentRunner, Delegator: pool, Agents: agentcatalog.New("", ""),

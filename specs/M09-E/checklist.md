@@ -16,6 +16,8 @@
 
 增量证据：`TestTeamMemberStopRejectsForgedWorkItemActorBeforeDispatch` 从协议解码入口提交目标 team 的 sibling WorkItem/RunID 停止请求，验证请求在 handler dispatch 前拒绝，cancel callback 为零，member 仍 queued，team history 与 session journal 不变。定向 conversation 测试本地通过（2026-10-10）；完整 AC1 身份和 stop 矩阵仍开放。
 
+边界说明与补充验证：上项由 protocol 先拒绝用户 stop 不允许携带的 RunID/WorkItemID 字段，不能单独证明有效 sibling owner run 被当作 stop actor 后再拒绝。真实接口的 stop 是 session-scoped user 动作，handler 从目标 team 的持久事实派生 WorkRef；新增 `TestTeamStopSocketUsesSessionUserAndPersistedTeamScope` 以有效同 Goal sibling WorkItem parent runs 和第二 session 验证该行为：session A 的 stop 作用于 A-owned team；外 session 携 team/member ID 被拒，facts/history/state 与 cancel callback 均不变。定向 conversation 测试通过（2026-10-10）；其它 owner/root/actor/stop 矩阵仍开放，当前 SHA 云端验证待完成。
+
 增量证据：`TestTeamUserProofEnforcesExpiryAndFutureClockSkew` 验证内部 socket user HMAC proof 新鲜时可用、超出 30 秒 TTL 或未来时间偏差超过 5 秒时拒绝，proof 与完整 WorkRef 校验测试均本地通过（2026-10-10）。
 - [x] **AC2 多轮：** 同一member连续两个有界turn，输入仅角色/身份/上一摘要/明确批次；没有父历史或兄弟transcript；idle不占worker，一member不并行；首spawn队满拒绝，后续消息waiting_capacity公平重试。（定向多轮/容量矩阵覆盖；SHA `5997ef511486af5911406bc04cfacbc428d48c2f` Go `build-and-test`通过。）
 - [x] **AC3 消息：** p2p/lead/broadcast持久有序、固定接收者、全或无投递；额满和写盘失败不误成功；批次handoff/restart destination gap、并发新消息和重连不丢失/重复；lead消息不自动起模型run。（定向投递/容量/恢复矩阵和 handoff 竞态用例均通过；SHA `42ebd90ace8e1b3bab4755a24d501d62aba237b4` Go `build-and-test` 通过。）
@@ -28,6 +30,8 @@
 新增计划请求重启恢复证据：`TestTeamTUIApprovalUsesSameRecoveredPlanRequestAfterRestart` 通过真实 Service 关闭/重启和新 Unix socket/TUI 重连，确认 pending request 的 ID/revision 保持不变、重启与单独审批均不触发 provider；显式 resume 后同一 member/request 关联新 turn/task，follow-up 只读且唯一。定向 TUI 测试本地通过（2026-10-10）；其它恢复 cut 与预算矩阵仍开放，当前 SHA 云端复验待完成。
 
 新增首次 spawn 持久化失败恢复证据：`TestCompensateUnpublishedInitialIntentMarksMemberInterruptedAndResumable` 验证 admission 写入 intent 后失败，补偿会 abort turn 并将仍为 Created 的 member 置为 Interrupted；abort 已 durable 而 member-state 写入中断时重复补偿可修复且不重复事件/provider 调用，显式 resume 后才启动新 turn。定向 conversation 测试本地通过（2026-10-10）；其他 crash cuts 仍开放，当前 SHA 云端复验待完成。
+
+新增 idle team close 同进程重试证据：`TestCloseTeamRetriesIdleMemberStateAppendInProcess` 注入首次 member-state append 故障，在 `TeamClosing` 已 durable 后确认错误显式返回；第二次 CloseTeam 同进程重试写入唯一 stopped member 和 TeamClosed facts，状态收敛 closed。定向 conversation 测试本地通过（2026-10-10）；closing/active-turn 与其他持久故障组合仍开放，当前 SHA 云端复验待完成。
 - 增量证据：`TestRecoveryStopsCapacityWaiterWhenTeamClosingAndIsIdempotent` 覆盖持久化 `TeamClosing` 后、容量等待成员停止前中断；恢复将 waiter 置为 stopped、team 置为 closed，不创建 child turn，第二次恢复不追加事实。定向 conversation 测试本地通过（2026-10-10）；E AC6 其余 crash cuts 仍开放。
 - 增量证据：`TestTeamRecoveryRepairsMemberAfterAbortedIntentGapIdempotently` 模拟 `TeamTurnAborted` 已持久而 member 仍为 Created 的中断点；两次恢复后 turn 为 aborted、member 为 interrupted、不写 child RunStarted，第二次不追加 session event。定向 conversation 测试本地通过（2026-10-10）；其它 AC6 crash cuts 仍开放。
 - 增量证据：`TestStoppedChildTerminalAppendFailureRecoversClosingTeamIdempotently` 覆盖真实 `StopTeamMember` 批准 shutdown、member 进入 stopping 后 team 关闭中断；child run terminal 已持久但恢复首次写 `TeamTurnTerminal` 失败时，投影保持 closing/stopping/queued 且无重复 terminal。后续恢复保留 approved shutdown，将 member 收敛为 stopped、team 收敛为 closed；run/team terminal 各唯一，第二次恢复不追加 facts，也不重复 cancel。定向 conversation 测试本地通过（2026-10-10）；其余 AC6 crash cuts 与当前 SHA 云端验证仍开放。

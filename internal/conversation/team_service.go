@@ -486,8 +486,14 @@ func (s *Service) closeTeamForSession(ctx context.Context, root string, request 
 	if err != nil {
 		return teams.Team{}, err
 	}
-	if team.Status == teams.TeamClosed || team.Status == teams.TeamClosing {
+	if team.Status == teams.TeamClosed {
 		return team, nil
+	}
+	if team.Status == teams.TeamClosing {
+		// A previous close attempt may have durably entered closing and then
+		// failed while stopping idle members or appending TeamClosed. Retrying
+		// CloseTeam must resume that work in this process as well as on restart.
+		return s.closeTeamIfIdleLocked(root, request.Work.SessionID, teamID)
 	}
 	next := team
 	next.Status = teams.TeamClosing
@@ -534,9 +540,10 @@ func (s *Service) closeTeamIfIdleLocked(root, sessionID, teamID string) (teams.T
 		}
 		member.Status = teams.MemberStopped
 		member.Revision++
-		if err := appendTeamFactLocked(root, sessionID, teamID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: "service", ActorRunID: member.OriginRunID, Member: &member}); err != nil {
+		if err := s.appendTeamMemberState(root, team, member.OriginRunID, "service", member); err != nil {
 			return team, err
 		}
+		team.Revision++
 	}
 	projection, err = sessionlog.ReplayTeams(root, sessionID, teamID)
 	if err != nil {

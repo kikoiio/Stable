@@ -31,7 +31,7 @@ func TestGoalTeamSendSocketRejectsSiblingWorkItemRunWithoutFacts(t *testing.T) {
 	})
 	serviceCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	socketDir, err := os.MkdirTemp(".tmp", "m09-goal-team-message-socket-")
+	socketDir, err := os.MkdirTemp(os.TempDir(), "m09-")
 	if err != nil {
 		t.Fatal(err)
 	}
