@@ -36,7 +36,7 @@
 
 ## 验收记录
 
-T1–T22 已实现并通过既有 TUI 与全仓测试。自动化组件/模型验收 20 项已勾选；三个真实终端场景现有 PTY/fake-provider 自动验收脚本并接入 Go workflow，但此提交尚未执行该云端 workflow，因此仍保留未勾选。M01 交付不包含后续 agent 流、权限或工具循环。
+T1–T22 已实现并通过既有 TUI 与全仓测试。自动化组件/模型验收与三个真实 Linux 终端场景均已通过；PTY/fake-provider 验收已接入 Go workflow，并在最终 Linux 验收 run 中执行成功，证据见下方“Linux 收尾复核（M11）”。M01 交付不包含后续 agent 流、权限或工具循环。
 
 ## Linux 收尾复核（M11）
 
