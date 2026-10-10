@@ -26,12 +26,13 @@ func (r *goalSpawnScopeChildRunner) Run(_ context.Context, input agent.ChildRunI
 	return agent.ChildRunResult{Status: agent.DelegationSucceeded, Summary: "authorized owner spawn completed"}
 }
 
-// A sibling WorkItem may be a valid lead run for the same Goal and project
-// root, but it cannot create a member under the owner's team identity.
-func TestGoalTeamSpawnRejectsSiblingWorkItemRunWithoutFacts(t *testing.T) {
+// Sibling WorkItems and other Goals may each have a valid lead run, but
+// neither can create a member under the owner's team identity.
+func TestGoalTeamSpawnRejectsSiblingWorkItemAndGoalOwnerWithoutFacts(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "project")
 	goalRoot := filepath.Join(root, "goal-root")
-	for _, dir := range []string{root, goalRoot} {
+	otherGoalRoot := filepath.Join(root, "other-goal-root")
+	for _, dir := range []string{root, goalRoot, otherGoalRoot} {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -53,13 +54,22 @@ func TestGoalTeamSpawnRejectsSiblingWorkItemRunWithoutFacts(t *testing.T) {
 	if _, err := state.CreateGoal(t.Context(), coreGoal(goalID, goalRoot, session.ID)); err != nil {
 		t.Fatal(err)
 	}
+	const otherGoalID = "goal-spawn-other-scope"
+	if _, err := state.CreateGoal(t.Context(), coreGoal(otherGoalID, otherGoalRoot, session.ID)); err != nil {
+		t.Fatal(err)
+	}
 	workA := agent.WorkRef{Kind: agent.WorkGoal, SessionID: session.ID, GoalID: goalID, WorkItemID: "item-owner"}
 	workB := agent.WorkRef{Kind: agent.WorkGoal, SessionID: session.ID, GoalID: goalID, WorkItemID: "item-sibling"}
+	workC := agent.WorkRef{Kind: agent.WorkGoal, SessionID: session.ID, GoalID: otherGoalID, WorkItemID: "item-other-goal"}
 	makeRequest := func(runID string, work agent.WorkRef) agent.ExecutionRequest {
 		t.Helper()
+		allowedRoot := goalRoot
+		if work.GoalID == otherGoalID {
+			allowedRoot = otherGoalRoot
+		}
 		request := appendGoalScopeRun(t, root, runID, work)
 		request.PermissionBounds, err = json.Marshal(permission.Authority{
-			RunID: runID, SessionID: session.ID, GoalID: goalID, WorkItemID: work.WorkItemID, AllowedRoot: goalRoot,
+			RunID: runID, SessionID: session.ID, GoalID: work.GoalID, WorkItemID: work.WorkItemID, AllowedRoot: allowedRoot,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -69,9 +79,10 @@ func TestGoalTeamSpawnRejectsSiblingWorkItemRunWithoutFacts(t *testing.T) {
 	}
 	requestA := makeRequest("goal-spawn-owner-run", workA)
 	requestB := makeRequest("goal-spawn-sibling-run", workB)
+	requestC := makeRequest("goal-spawn-other-owner-run", workC)
 	service := &Service{
 		deps:       Deps{ProjectRoot: root, Store: state, ProviderName: "fixture", Model: "model-v1"},
-		activeRuns: map[string]string{requestA.RunID: session.ID, requestB.RunID: session.ID},
+		activeRuns: map[string]string{requestA.RunID: session.ID, requestB.RunID: session.ID, requestC.RunID: session.ID},
 	}
 	team, err := service.CreateTeam(t.Context(), requestA, "spawn-owner-team")
 	if err != nil {
@@ -80,6 +91,10 @@ func TestGoalTeamSpawnRejectsSiblingWorkItemRunWithoutFacts(t *testing.T) {
 	_, siblingScope, siblingActor, err := service.teamOperationScope(t.Context(), requestB)
 	if err != nil || !siblingActor.Lead || siblingScope.WorkItemID != workB.WorkItemID || siblingScope.ProjectRoot != team.Scope.ProjectRoot {
 		t.Fatalf("fixture sibling run is not a valid lead for its own WorkItem/root: scope=%+v actor=%+v err=%v", siblingScope, siblingActor, err)
+	}
+	_, otherGoalScope, otherGoalActor, err := service.teamOperationScope(t.Context(), requestC)
+	if err != nil || !otherGoalActor.Lead || otherGoalScope.GoalID != otherGoalID || otherGoalScope.WorkItemID != workC.WorkItemID || otherGoalScope.ProjectRoot != otherGoalRoot {
+		t.Fatalf("fixture other-Goal run is not a valid lead for its own WorkItem/root: scope=%+v actor=%+v err=%v", otherGoalScope, otherGoalActor, err)
 	}
 	role := agentcatalog.Definition{Name: "explore", Instruction: "Inspect the assigned area.", Model: "inherit", Tools: []string{"read_file"}, MaxTurns: 1}
 	runner := &goalSpawnScopeChildRunner{started: make(chan agent.ChildRunInput, 1)}
@@ -117,6 +132,12 @@ func TestGoalTeamSpawnRejectsSiblingWorkItemRunWithoutFacts(t *testing.T) {
 	}); !errors.Is(err, teams.ErrPermission) {
 		t.Fatalf("sibling WorkItem member spawn error=%v, want ErrPermission", err)
 	}
+	if _, err := service.SpawnTeamMember(t.Context(), requestC, TeamMemberSpawnRequest{
+		TeamID: team.ID, Name: "other-goal-reader", AgentName: role.Name,
+		Instruction: "Try to join a different Goal's team.", OriginCallID: "other-goal-spawn",
+	}); !errors.Is(err, teams.ErrPermission) {
+		t.Fatalf("other Goal member spawn error=%v, want ErrPermission", err)
+	}
 	afterProjection, err := sessionlog.ReplayTeams(root, session.ID, team.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +151,7 @@ func TestGoalTeamSpawnRejectsSiblingWorkItemRunWithoutFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(beforeProjection, afterProjection) || !reflect.DeepEqual(beforeHistory, afterHistory) || !reflect.DeepEqual(beforeSession.Events, afterSession.Events) {
-		t.Fatal("rejected sibling WorkItem spawn changed team projection, history, or session events")
+		t.Fatal("rejected sibling WorkItem or other Goal spawn changed team projection, history, or session events")
 	}
 	service.teamScheduler.mu.Lock()
 	if len(service.teamScheduler.active) != 0 || len(service.teamScheduler.ready) != 0 || len(service.teamScheduler.waiting) != 0 || len(service.teamScheduler.grants) != 0 {
