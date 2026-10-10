@@ -74,7 +74,7 @@ func TestTeamChildThinkingStaysPrivateAcrossSocketReplayAndParentStream(t *testi
 		Name: "thinking-private-role", Description: "Read-only private role", Model: "inherit",
 		Instruction: "private team instructions stay with the child", Tools: []string{"read_file"}, MaxTurns: 1,
 	}
-	socketDir, err := os.MkdirTemp(filepath.Join("..", "..", ".tmp"), "team-thinking-privacy-")
+	socketDir, err := os.MkdirTemp("", "tp-")
 	if err != nil {
 		t.Fatal(err)
 	}

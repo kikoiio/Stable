@@ -33,7 +33,7 @@ func TestTeamStopRejectsValidSiblingRunIdentityThenAllowsSessionUser(t *testing.
 	})
 	serviceCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	socketDir, err := os.MkdirTemp(filepath.Join("..", "..", ".tmp"), "valid-sibling-stop-")
+	socketDir, err := os.MkdirTemp("", "vs-stop-")
 	if err != nil {
 		t.Fatal(err)
 	}
