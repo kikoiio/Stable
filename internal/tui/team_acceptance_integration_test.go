@@ -13,6 +13,7 @@ import (
 	"stable/internal/llm"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
+	"stable/internal/teams"
 )
 
 // This test deliberately crosses the same slash-command, Unix-socket and
@@ -36,7 +37,7 @@ func TestTeamTUIAcceptanceCreateSpawnSendListAndGetOverConversationSocket(t *tes
 		}
 	})
 
-	childRunner := &acceptanceTeamChildRunner{started: make(chan agent.ChildRunInput, 2)}
+	childRunner := &acceptanceTeamChildRunner{started: make(chan agent.ChildRunInput, 2), release: make(chan struct{}, 2)}
 	limits := agent.DefaultDelegationLimits()
 	limits.Workers, limits.QueueCapacity = 1, 1
 	pool, err := agent.NewPoolDelegator(limits, childRunner, nil)
@@ -63,6 +64,12 @@ func TestTeamTUIAcceptanceCreateSpawnSendListAndGetOverConversationSocket(t *tes
 	t.Cleanup(func() {
 		if err := svc.Close(); err != nil {
 			t.Errorf("close conversation service: %v", err)
+		}
+	})
+	t.Cleanup(func() {
+		select {
+		case childRunner.release <- struct{}{}:
+		default:
 		}
 	})
 
@@ -135,6 +142,27 @@ func TestTeamTUIAcceptanceCreateSpawnSendListAndGetOverConversationSocket(t *tes
 	if getResponse.Team == nil || getResponse.Team.ID != teamID || getResponse.Team.Name != "acceptance" {
 		t.Fatalf("TUI get result=%+v, want created team", getResponse)
 	}
+	childRunner.release <- struct{}{}
+	waitAcceptanceTeamMemberIdle(t, project, sessionID, teamID, memberID)
+}
+
+func waitAcceptanceTeamMemberIdle(t *testing.T, project, sessionID, teamID, memberID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		projection, err := sessionlog.ReplayTeams(project, sessionID, teamID)
+		if err == nil {
+			if member, ok := projection.Members[memberID]; ok && member.Status == teams.MemberIdle {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	projection, err := sessionlog.ReplayTeams(project, sessionID, teamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Fatalf("team member status=%s, want idle before closing the fixture", projection.Members[memberID].Status)
 }
 
 func submitAcceptanceTeamCommand(t *testing.T, model Model, text string) (Model, resultMsg) {
@@ -210,7 +238,10 @@ func receiveAcceptanceParentRun(t *testing.T, started <-chan *acceptanceTeamPare
 	}
 }
 
-type acceptanceTeamChildRunner struct{ started chan agent.ChildRunInput }
+type acceptanceTeamChildRunner struct {
+	started chan agent.ChildRunInput
+	release chan struct{}
+}
 
 func (r *acceptanceTeamChildRunner) Run(ctx context.Context, input agent.ChildRunInput) agent.ChildRunResult {
 	select {
@@ -218,7 +249,12 @@ func (r *acceptanceTeamChildRunner) Run(ctx context.Context, input agent.ChildRu
 	case <-ctx.Done():
 		return agent.ChildRunResult{Status: agent.DelegationInterrupted, Error: ctx.Err().Error()}
 	}
-	return agent.ChildRunResult{Status: agent.DelegationSucceeded, Summary: "fake child completed"}
+	select {
+	case <-r.release:
+		return agent.ChildRunResult{Status: agent.DelegationSucceeded, Summary: "fake child completed"}
+	case <-ctx.Done():
+		return agent.ChildRunResult{Status: agent.DelegationInterrupted, Error: ctx.Err().Error()}
+	}
 }
 
 type acceptanceTeamProvider struct{}
