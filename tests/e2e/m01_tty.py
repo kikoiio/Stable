@@ -253,6 +253,7 @@ def main() -> int:
         offset = len(tui.output)
         tui.send(b"M01_PROVIDER_ERROR\r")
         tui.wait_for("模型错误".encode(), 30, offset)
+        tui.wait_for(b"failed", 30, offset, "provider error run completion")
 
         # File completion accepts a trusted-share file and excludes an outward symlink.
         offset = len(tui.output)
