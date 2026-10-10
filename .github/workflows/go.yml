@@ -57,7 +57,7 @@ jobs:
           echo "archive=dist/stable-${version}-linux-amd64.tar.gz" >> "$GITHUB_OUTPUT"
           echo "checksum=dist/stable-${version}-linux-amd64.tar.gz.sha256" >> "$GITHUB_OUTPUT"
       - name: Upload verified Linux package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stable-linux-amd64-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
