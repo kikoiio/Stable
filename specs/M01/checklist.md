@@ -30,9 +30,9 @@
 
 ## 端到端场景
 
-- [ ] **打开会话、编辑、切换目标并返回**：`bash tests/e2e/m01_tty.sh` 通过 Python PTY 启动正式 `stable` 无参数入口，以临时 runtime 和 loopback fake provider 完成 `/sess` Tab 补全、会话加载、多行输入/回复及 Ctrl+G 目标导航往返；当前代码已接入 Go workflow，等待该 SHA 的云端结果。
-- [ ] **长回复、resize 与错误提示**：同一 PTY 验收发送多段 fake-provider 长回复，执行 Page Up/Page Down 和终端 resize，并注入受控 provider 错误；断言长回复仍可见且错误状态可见。等待该 SHA 的云端结果。
-- [ ] **补全不越界且不冒充功能**：同一 PTY 验收覆盖命令补全、runtime trusted project root 内文件补全和指向其外的 symlink 不进入候选；组件测试仍作为补充证据。等待该 SHA 的云端结果。
+- [x] **打开会话、编辑、切换目标并返回**：Go run [38034332103](https://github.com/kikoiio/Stable/actions/runs/38034332103) 的 `M01 production TTY acceptance` 通过 Python PTY 启动正式 `stable` 无参数入口，以隔离 runtime 和 loopback fake provider 完成 `/sess` Tab 补全、会话加载、多行输入/回复及 Ctrl+G 目标导航往返。
+- [x] **长回复、resize 与错误提示**：同一 PTY 验收以 360 条 fake-provider 输出验证超视口 Page Up/Page Down、终端 resize 和受控 provider 错误状态；Go run [38034332103](https://github.com/kikoiio/Stable/actions/runs/38034332103) 通过。
+- [x] **补全不越界且不冒充功能**：同一 PTY 验收覆盖命令补全、runtime trusted project root 内文件补全和指向其外的 symlink 不进入候选；Go run [38034332103](https://github.com/kikoiio/Stable/actions/runs/38034332103) 通过。
 
 ## 验收记录
 
@@ -40,4 +40,4 @@ T1–T22 已实现并通过既有 TUI 与全仓测试。自动化组件/模型�
 
 ## Linux 收尾复核（M11）
 
-- [ ] 真实 Linux PTY 的三个端到端场景由 `bash tests/e2e/m01_tty.sh` 自动执行并记录可观察输出；脚本使用隔离 HOME/state、loopback fake provider 和正式 `stable` 无参数入口。Go workflow 首次通过后再勾选；组件测试继续作为补充证据。
+- [x] 真实 Linux PTY 的三个端到端场景由 `bash tests/e2e/m01_tty.sh` 自动执行并记录可观察输出；脚本使用隔离 HOME/state、loopback fake provider 和正式 `stable` 无参数入口。验证：Go run [38034332103](https://github.com/kikoiio/Stable/actions/runs/38034332103)，job `build-and-test` 通过；组件测试作为补充证据。
