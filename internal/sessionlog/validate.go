@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 )
 
 // scanState summarizes validated history so a newly observed event can be
@@ -305,15 +306,51 @@ func checkSkillInvoked(i SkillInvoked) error {
 	default:
 		return fmt.Errorf("skill invocation has invalid entry %q", i.Entry)
 	}
+	switch i.Mode {
+	case "": // legacy inline skill invocation
+	case SkillModeFork:
+		if i.RunID == "" {
+			return errors.New("fork skill invocation requires run_id")
+		}
+	default:
+		return fmt.Errorf("skill invocation has invalid mode %q", i.Mode)
+	}
+	if i.Mode == "" && i.RunID != "" {
+		return errors.New("run_id requires fork mode")
+	}
 	return nil
 }
 
 // validateOwnedAppend checks boundary, snapshot, rewind, question, reply,
 // plan mode, plan approval, todo, and skill events before they are appended.
 // selfSeq is the sequence number the new event will occupy.
-func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSeq uint64) error {
+func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSeq uint64, appendTimes ...time.Time) error {
 	st := scanEvents(events)
 	switch typ {
+	case EventTeam:
+		teams, err := scanTeams(sessionID, events)
+		if err != nil {
+			return err
+		}
+		var fact TeamEvent
+		if err := decodeTeamData(data, &fact); err != nil {
+			return err
+		}
+		at := time.Now().UTC()
+		if len(appendTimes) > 0 {
+			at = appendTimes[0]
+		}
+		return teams.checkEvent(sessionID, fact, at)
+	case EventAgentTaskNotification:
+		tasks, err := scanAgentTasks(sessionID, events)
+		if err != nil {
+			return err
+		}
+		var notification AgentTaskNotification
+		if err := decodeData(data, &notification); err != nil {
+			return errors.New("agent task notification has invalid shape")
+		}
+		return tasks.checkNotification(notification)
 	case EventBoundary:
 		var b Boundary
 		if err := decodeData(data, &b); err != nil {
@@ -416,6 +453,213 @@ func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSe
 			return errors.New("memory background event has invalid shape")
 		}
 		return checkMemoryBackground(background)
+	case EventWorkspaceToolTransition:
+		var transition WorkspaceToolTransition
+		if err := decodeData(data, &transition); err != nil {
+			return errors.New("workspace tool transition has invalid shape")
+		}
+		return checkWorkspaceToolTransition(sessionID, transition, events)
+	case EventCoordinatorMode:
+		var mode CoordinatorMode
+		raw, err := json.Marshal(data)
+		if err != nil {
+			return errors.New("coordinator mode event has invalid shape")
+		}
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&mode); err != nil {
+			return errors.New("coordinator mode event has invalid shape")
+		}
+		if err := decoder.Decode(new(any)); err != io.EOF {
+			return errors.New("coordinator mode event has trailing data")
+		}
+		return nil
+	}
+	return nil
+}
+
+func checkWorkspaceToolTransition(sessionID string, next WorkspaceToolTransition, events []Event) error {
+	if next.ID == "" || next.SessionID != sessionID || ValidateID(next.SessionID) != nil || next.RunID == "" || next.CallID == "" || len(next.CallID) > 256 || next.CreatedAt.IsZero() || next.UpdatedAt.IsZero() || next.UpdatedAt.Before(next.CreatedAt) {
+		return errors.New("workspace tool transition is missing identity or timestamps")
+	}
+	if err := ValidateID(next.ID); err != nil {
+		return errors.New("workspace tool transition has invalid ID")
+	}
+	if next.WorkKind != "session" && next.WorkKind != "goal" || next.WorkKind == "session" && (next.GoalID != "" || next.WorkItemID != "") || next.WorkKind == "goal" && (ValidateID(next.GoalID) != nil || ValidateID(next.WorkItemID) != nil) {
+		return errors.New("workspace tool transition has invalid work scope")
+	}
+	switch next.Action {
+	case "enter":
+		if ValidateID(next.WorkspaceID) != nil || next.CandidateID != "" {
+			return errors.New("workspace enter transition has invalid target")
+		}
+	case "exit":
+		if next.WorkspaceID != "" || next.Label != "" || next.CandidateID != "" {
+			return errors.New("workspace exit transition has unexpected target")
+		}
+	case "export":
+		if ValidateID(next.WorkspaceID) != nil || next.Label != "" {
+			return errors.New("workspace export transition has invalid target")
+		}
+	default:
+		return errors.New("workspace tool transition has invalid action")
+	}
+	if next.Label != "" && len(next.Label) > 64 {
+		return errors.New("workspace tool transition label is too long")
+	}
+	toolName := ""
+	switch next.Action {
+	case "enter":
+		toolName = "enter_worktree"
+	case "exit":
+		toolName = "exit_worktree"
+	case "export":
+		toolName = "worktree_export"
+	}
+	priorIndex := -1
+	for index, event := range events {
+		if event.Type != EventWorkspaceToolTransition {
+			continue
+		}
+		var old WorkspaceToolTransition
+		if decodeData(event.Data, &old) == nil && old.ID == next.ID {
+			priorIndex = index
+		}
+	}
+	searchBefore := len(events)
+	if priorIndex >= 0 {
+		searchBefore = priorIndex
+	}
+	callIndex := -1
+	var matchedCall ToolCall
+	for index := 0; index < searchBefore; index++ {
+		event := events[index]
+		if event.Type != EventToolCall {
+			continue
+		}
+		var call ToolCall
+		if decodeData(event.Data, &call) == nil && call.CallID == next.CallID {
+			callIndex, matchedCall = index, call
+		}
+	}
+	if callIndex < 0 {
+		return errors.New("workspace transition has no preceding tool call")
+	}
+	if matchedCall.RunID != next.RunID {
+		return errors.New("workspace transition call belongs to another run")
+	}
+	if matchedCall.Name != toolName {
+		return errors.New("workspace transition action does not match tool call name")
+	}
+	resultCount, successfulResult := 0, false
+	for index := callIndex + 1; index < len(events); index++ {
+		event := events[index]
+		if event.Type == EventToolCall {
+			var call ToolCall
+			if decodeData(event.Data, &call) == nil && call.CallID == next.CallID {
+				break
+			}
+		}
+		if event.Type != EventToolResult {
+			continue
+		}
+		var result ToolResult
+		if decodeData(event.Data, &result) == nil && result.CallID == next.CallID {
+			resultCount++
+			successfulResult = result.Error == ""
+		}
+	}
+	if resultCount > 1 {
+		return errors.New("workspace transition has duplicate tool results")
+	}
+	hasTerminal := false
+	for _, event := range events {
+		if event.Type != EventRunEvent {
+			continue
+		}
+		var runEvent RunEvent
+		if decodeData(event.Data, &runEvent) == nil && runEvent.RunID == next.RunID && runEvent.Kind == "terminal" {
+			hasTerminal = true
+		}
+	}
+	switch next.Status {
+	case WorkspaceToolTransitionPending:
+		if next.Error != "" || next.CandidateID != "" {
+			return errors.New("pending workspace transition has terminal data")
+		}
+		if hasTerminal || resultCount != 0 {
+			return errors.New("pending workspace transition must precede its tool result and run terminal")
+		}
+	case WorkspaceToolTransitionApplied:
+		if next.Error != "" || next.Action == "export" && next.CandidateID == "" || next.Action != "export" && next.CandidateID != "" {
+			return errors.New("applied workspace transition has invalid result")
+		}
+		if !hasTerminal || resultCount != 1 || !successfulResult {
+			return errors.New("applied workspace transition requires its successful tool result and run terminal")
+		}
+	case WorkspaceToolTransitionFailed, WorkspaceToolTransitionInterrupted:
+		if next.Error == "" || len(next.Error) > 1024 {
+			return errors.New("failed workspace transition lacks bounded reason")
+		}
+		if next.Status == WorkspaceToolTransitionFailed && (hasTerminal && (!successfulResult || resultCount != 1) || !hasTerminal && resultCount == 1 && successfulResult) {
+			return errors.New("failed workspace transition has incompatible tool result or run terminal")
+		}
+		if next.Status == WorkspaceToolTransitionInterrupted && hasTerminal && resultCount == 1 && successfulResult {
+			return errors.New("interrupted workspace transition has a successful terminal tool result")
+		}
+	default:
+		return errors.New("workspace tool transition has invalid status")
+	}
+	var prior *WorkspaceToolTransition
+	for _, event := range events {
+		if event.Type != EventWorkspaceToolTransition {
+			continue
+		}
+		var old WorkspaceToolTransition
+		if decodeData(event.Data, &old) == nil && old.ID == next.ID {
+			copy := old
+			prior = &copy
+		}
+	}
+	if prior == nil {
+		if next.Status != WorkspaceToolTransitionPending {
+			return errors.New("workspace transition must start pending")
+		}
+		latestTransitions := map[string]WorkspaceToolTransition{}
+		for _, event := range events {
+			if event.Type != EventWorkspaceToolTransition {
+				continue
+			}
+			var old WorkspaceToolTransition
+			if decodeData(event.Data, &old) == nil && old.ID != "" {
+				latestTransitions[old.ID] = old
+			}
+		}
+		for _, old := range latestTransitions {
+			if old.Status == WorkspaceToolTransitionPending && old.SessionID == next.SessionID {
+				return errors.New("session already has a pending workspace transition")
+			}
+		}
+		foundRun := false
+		for _, event := range events {
+			if event.Type != EventRunStarted {
+				continue
+			}
+			var run RunStarted
+			if decodeData(event.Data, &run) == nil && run.RunID == next.RunID {
+				foundRun = true
+				if run.TeamID != "" || run.AgentTaskID != "" || run.OriginRunID != "" || run.WorkKind != next.WorkKind || run.GoalID != next.GoalID || run.WorkItemID != next.WorkItemID {
+					return errors.New("workspace transition must belong to an ordinary matching lead run")
+				}
+			}
+		}
+		if !foundRun {
+			return errors.New("workspace transition lead run is missing")
+		}
+		return nil
+	}
+	if prior.Status != WorkspaceToolTransitionPending || next.Status == WorkspaceToolTransitionPending || prior.ID != next.ID || prior.SessionID != next.SessionID || prior.RunID != next.RunID || prior.CallID != next.CallID || prior.WorkKind != next.WorkKind || prior.GoalID != next.GoalID || prior.WorkItemID != next.WorkItemID || prior.Action != next.Action || prior.WorkspaceID != next.WorkspaceID || prior.Label != next.Label || !prior.CreatedAt.Equal(next.CreatedAt) {
+		return errors.New("workspace transition terminal update does not match pending intent")
 	}
 	return nil
 }
@@ -423,6 +667,9 @@ func validateOwnedAppend(sessionID, typ string, data any, events []Event, selfSe
 func checkHookFired(h HookFired) error {
 	if h.HookID == "" || h.Event == "" || h.Action == "" {
 		return errors.New("hook fired event is missing hook_id, event, or action")
+	}
+	if len(h.ChildRunID) > 128 {
+		return errors.New("hook fired child_run_id is too long")
 	}
 	if len(h.Output) > MaxHookOutput {
 		return fmt.Errorf("hook output exceeds %d bytes", MaxHookOutput)

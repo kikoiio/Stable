@@ -24,7 +24,9 @@ func secureOpen(root, rel string) (*os.File, error) {
 		return nil, mapLinuxPathError(err)
 	}
 	defer unix.Close(rootFD)
-	fd, err := unix.Openat2(rootFD, rel, &unix.OpenHow{Flags: unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW, Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS})
+	// A regular file may be replaced by a FIFO between directory inspection
+	// and open. Nonblocking open lets the subsequent type check reject it.
+	fd, err := unix.Openat2(rootFD, rel, &unix.OpenHow{Flags: unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK, Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS})
 	if err != nil {
 		return nil, mapLinuxPathError(err)
 	}

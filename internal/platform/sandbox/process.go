@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"stable/internal/permission"
+	"stable/internal/platform/proc"
 )
 
 var (
@@ -26,21 +28,26 @@ var (
 )
 
 type SandboxProfile struct {
-	ProjectRoot       string
-	CandidateRoot     string
-	RunRoot           string
-	ReadOnlyMounts    []ReadOnlyMount
-	ReadOnlyFiles     []ReadOnlyFileMount
-	Timeout           time.Duration
-	OutputLimit       int
-	Environment       []string
-	NetworkGrants     []permission.NetworkGrant
-	ProxyHelperPath   string
-	CandidateID       string
-	SessionID         string
-	SessionArgv       []string
-	sessionControl    bool
-	sessionGeneration uint64
+	ProjectRoot         string
+	CandidateRoot       string
+	RunRoot             string
+	ReadOnlyMounts      []ReadOnlyMount
+	ReadOnlyFiles       []ReadOnlyFileMount
+	WorkspaceIsolation  bool
+	WorkspaceVolumeRoot string
+	WorkspaceProcess    *proc.TrackedProcess
+	OnProcessStart      func(proc.TrackedProcess) error
+	OnProcessExit       func(proc.TrackedProcess) error
+	Timeout             time.Duration
+	OutputLimit         int
+	Environment         []string
+	NetworkGrants       []permission.NetworkGrant
+	ProxyHelperPath     string
+	CandidateID         string
+	SessionID           string
+	SessionArgv         []string
+	sessionControl      bool
+	sessionGeneration   uint64
 }
 
 type ReadOnlyMount struct {
@@ -105,6 +112,16 @@ func networkGrantMessage(format string, args ...any) error {
 }
 
 func ValidateProfile(p SandboxProfile) error {
+	if p.WorkspaceProcess != nil {
+		if !p.WorkspaceIsolation || p.WorkspaceVolumeRoot == "" || p.WorkspaceProcess.PID != 0 || p.WorkspaceProcess.ProcessGroup != 0 || p.WorkspaceProcess.StartTimeTicks != 0 || p.WorkspaceProcess.WorkspaceID == "" || p.WorkspaceProcess.RunID == "" || p.WorkspaceProcess.Generation == 0 || len(p.WorkspaceProcess.Token) != 64 {
+			return profileMessage("invalid workspace process identity")
+		}
+		if _, err := hex.DecodeString(p.WorkspaceProcess.Token); err != nil || p.OnProcessStart == nil || p.OnProcessExit == nil {
+			return profileMessage("workspace process identity tracking is unavailable")
+		}
+	} else if p.OnProcessStart != nil || p.OnProcessExit != nil {
+		return profileMessage("workspace process hooks require an identity")
+	}
 	for _, path := range []string{p.ProjectRoot, p.CandidateRoot, p.RunRoot} {
 		if path == "" {
 			return profileMessage("project, candidate and private run roots are required")
@@ -150,6 +167,17 @@ func ValidateProfile(p SandboxProfile) error {
 				return profileMessage("project, candidate, and private run roots must not overlap")
 			}
 		}
+	}
+	if p.WorkspaceVolumeRoot != "" {
+		if !p.WorkspaceIsolation {
+			return profileMessage("volume boundary requires workspace isolation")
+		}
+		if err := BoundedWorkspaceVolume(p.WorkspaceVolumeRoot, p.ProjectRoot, p.CandidateRoot, p.RunRoot); err != nil {
+			return err
+		}
+	}
+	if p.WorkspaceIsolation && len(p.NetworkGrants) != 0 {
+		return networkGrantMessage("workspace commands cannot access network")
 	}
 	if p.Timeout < 0 {
 		return profileMessage("sandbox timeout cannot be negative")
@@ -202,7 +230,7 @@ func ValidateProfile(p SandboxProfile) error {
 		}
 	}
 	for _, mount := range p.ReadOnlyFiles {
-		if len(p.NetworkGrants) == 0 || !filepath.IsAbs(mount.HostPath) || mount.GuestPath != "/workspace/runtime/agentworker" {
+		if !filepath.IsAbs(mount.HostPath) || mount.GuestPath != "/workspace/runtime/agentworker" {
 			return profileMessage("invalid read-only sandbox file mount")
 		}
 		if _, exists := seenGuest[mount.GuestPath]; exists {

@@ -13,6 +13,7 @@ import (
 
 	"stable/internal/agent"
 	"stable/internal/candidate"
+	"stable/internal/execution"
 	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/planfile"
@@ -20,6 +21,8 @@ import (
 	"stable/internal/redact"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
+	"stable/internal/teams"
+	"stable/internal/workspace"
 )
 
 func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan ServerMsg) error {
@@ -50,6 +53,16 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if request.Work.SessionID != msg.SessionID {
 		return errors.New("run session does not match request session")
 	}
+	// Coordinator authority is derived from the trusted session setting or the
+	// explicit Goal run parameter. Never trust the internal, non-wire fields on
+	// a locally constructed ExecutionRequest.
+	request.TeamCoordinator = false
+	request.TeamCoordinatorTeamID = ""
+	if s.deps.WorkspaceStateRoot != "" {
+		if err := s.reconcileWorkspaceToolTransitions(ctx, msg.SessionID, false); err != nil {
+			return fmt.Errorf("pending workspace lifecycle transition is not yet settled: %w", err)
+		}
+	}
 	if s.mcp != nil && !s.sessionIsEphemeral(msg.SessionID) {
 		if err := s.ensureMCPFresh(msg.SessionID); err != nil {
 			return fmt.Errorf("refresh MCP configuration: %w", err)
@@ -73,12 +86,143 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if _, err := sessionlog.SessionPath(projectRoot, msg.SessionID); err != nil {
 		return err
 	}
+	// Run starts and workspace binding changes share this admission lock. Keep
+	// it through lease acquisition, RunStarted persistence, Runner.Start, and
+	// active-run registration so an Enter/Exit cannot slip into the gap.
+	s.workspaceAdmissionMu.Lock()
+	if err := ctx.Err(); err != nil {
+		s.workspaceAdmissionMu.Unlock()
+		return err
+	}
+	admissionHeld := true
+	defer func() {
+		if admissionHeld {
+			s.workspaceAdmissionMu.Unlock()
+		}
+	}()
+	s.mu.Lock()
+	closing := s.closing
+	s.mu.Unlock()
+	if closing {
+		return workspace.ErrUnavailable
+	}
+	var teamCoordinatorMode bool
+	var teamCoordinatorTeamID string
+	if request.Work.Kind == agent.WorkSession {
+		if msg.CoordinatorTeamID != "" || msg.CoordinatorOn {
+			return errors.New("session coordinator mode must be selected before the run")
+		}
+		coordinator, modeErr := teamCoordinatorModeForSession(s.deps.ProjectRoot, msg.SessionID)
+		err = modeErr
+		if err != nil {
+			return err
+		}
+		teamCoordinatorMode, teamCoordinatorTeamID = coordinator.Enabled, coordinator.TeamID
+		if coordinator.Enabled {
+			if coordinator.TeamID == "" {
+				return errors.New("team coordinator mode has no bound team")
+			}
+			team, teamErr := s.getTeamForSession(ctx, currentProjectRoot(s.deps.ProjectRoot), msg.SessionID, coordinator.TeamID, &request.Work)
+			if teamErr != nil || team.Status != teams.TeamOpen {
+				return errors.New("team coordinator binding is no longer authorized")
+			}
+		}
+		request.TeamCoordinator = coordinator.Enabled
+		request.TeamCoordinatorTeamID = coordinator.TeamID
+	} else if request.Work.Kind == agent.WorkGoal {
+		if msg.CoordinatorOn {
+			return errors.New("Goal coordinator mode requires an explicit team selection")
+		}
+		if msg.CoordinatorTeamID != "" {
+			team, teamErr := s.getTeamForSession(ctx, currentProjectRoot(s.deps.ProjectRoot), msg.SessionID, msg.CoordinatorTeamID, &request.Work)
+			if teamErr != nil || team.Status != teams.TeamOpen {
+				return errors.New("Goal coordinator team is not authorized for this Goal and WorkItem")
+			}
+			request.TeamCoordinator = true
+			request.TeamCoordinatorTeamID = msg.CoordinatorTeamID
+			teamCoordinatorMode = true
+		}
+	} else if msg.CoordinatorTeamID != "" || msg.CoordinatorOn {
+		return errors.New("coordinator mode is unavailable for this work scope")
+	}
+	var leadLease *workspace.WriterLease
+	var leadManager *workspace.LifecycleService
+	var trustedFactory agent.ExecutorFactory
+	leaseTransferred := false
+	defer func() {
+		if leadLease != nil && !leaseTransferred {
+			_, _ = leadManager.ReleaseCompletedWriter(context.Background(), *leadLease)
+		}
+	}()
+	if (request.Work.Kind == agent.WorkSession || request.Work.Kind == agent.WorkGoal) && s.deps.WorkspaceStateRoot != "" {
+		// Derive workspace ownership from the validated run WorkRef, not from
+		// optional client routing fields. Bindings are exact to that WorkRef.
+		workspaceMsg := ClientMsg{
+			SessionID: request.Work.SessionID, WorkKind: string(request.Work.Kind),
+			GoalID: request.Work.GoalID, WorkItemID: request.Work.WorkItemID,
+		}
+		projectRoot, scope, scopeErr := s.workspaceScope(ctx, workspaceMsg)
+		if scopeErr != nil {
+			return scopeErr
+		}
+		if scope.Work != request.Work {
+			return workspace.ErrOwnership
+		}
+		leadManager, err = s.workspaceService(projectRoot)
+		if err != nil {
+			return err
+		}
+		boundID, bindingErr := leadManager.Binding(scope)
+		if bindingErr != nil {
+			return bindingErr
+		}
+		if boundID != "" && !teamCoordinatorMode {
+			if mode == permission.ModePlan || request.TeamTurn != nil || request.TeamUser {
+				return workspace.ErrOwnership
+			}
+			if _, ok := s.deps.Runner.(agent.TrustedExecutorRunner); !ok {
+				return errors.New("workspace-bound runs require trusted per-run executor support")
+			}
+			scope.Authority = authority
+			scope.OriginRunID = request.RunID
+			lease, acquireErr := leadManager.AcquireLeadWriter(ctx, scope, boundID, request.RunID)
+			if acquireErr != nil {
+				return acquireErr
+			}
+			leadLease = &lease
+			base := s.deps.ExecutorFactory
+			if base == nil {
+				return errors.New("workspace-bound runs require a trusted executor factory")
+			}
+			trustedFactory = execution.WorkspaceWriterExecutorFactory(base, lease, leadManager)
+			if s.deps.WorkspaceLifecycleHost != nil {
+				trustedFactory = execution.LeadWorkspaceLifecycleExecutorFactory(trustedFactory, s.deps.WorkspaceLifecycleHost)
+			}
+			writerSchemas := execution.WorkspaceWriterToolSchemas()
+			if trustedFactory == nil || len(writerSchemas) != 6 {
+				return errors.New("workspace writer executor surface is unavailable")
+			}
+			if s.deps.WorkspaceLifecycleHost != nil {
+				writerSchemas = append(writerSchemas, execution.WorkspaceLifecycleToolSchemas()...)
+			}
+			request.ToolSchemas = writerSchemas
+			request.AllowedScope = []string{lease.Authority.AllowedRoot}
+			request.PermissionBounds, err = json.Marshal(lease.Authority)
+			if err != nil {
+				return fmt.Errorf("encode trusted workspace writer authority: %w", err)
+			}
+		}
+	}
 	work := sessionlog.RunStarted{RunID: request.RunID, WorkKind: string(request.Work.Kind), GoalID: request.Work.GoalID, WorkItemID: request.Work.WorkItemID, Intent: request.Intent}
+	if leadLease != nil {
+		work.WorkspaceID = leadLease.WorkspaceID
+		work.WorkspaceGeneration = leadLease.Generation
+	}
 	// The skill inventory is refreshed before the event mutex is taken: the
 	// gate journals its events under the same mutex, so calling it here keeps
 	// the lock order gate → event and avoids a re-entrant acquire.
 	var skillPrefix []llm.Message
-	if request.Work.Kind == agent.WorkSession && s.skills != nil {
+	if request.Work.Kind == agent.WorkSession && s.skills != nil && leadLease == nil {
 		snapshotText, deltaText, invErr := s.skills.SkillInventory(ctx, msg.SessionID)
 		if invErr != nil {
 			return invErr
@@ -104,7 +248,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		}
 	}
 	var mcpPrefix []llm.Message
-	if request.Work.Kind == agent.WorkSession && s.mcp != nil && !s.sessionIsEphemeral(msg.SessionID) {
+	if request.Work.Kind == agent.WorkSession && s.mcp != nil && !s.sessionIsEphemeral(msg.SessionID) && leadLease == nil {
 		if instructions := s.mcp.Instructions(); instructions != "" {
 			s.mcpMu.Lock()
 			if !s.mcpInstructions[msg.SessionID] {
@@ -115,15 +259,76 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		}
 	}
 	var hookPrefix []llm.Message
-	if s.hooks != nil {
+	if s.hooks != nil && leadLease == nil {
 		if notice := s.hooks.DrainNotifications(msg.SessionID); notice != "" {
 			hookPrefix = append(hookPrefix, llm.Message{Role: "user", Content: notice})
 		}
 	}
 	s.eventMu.Lock()
 	if request.Work.Kind == agent.WorkSession {
+		coordinatorMode, modeErr := teamCoordinatorModeForSession(projectRoot, msg.SessionID)
+		if modeErr != nil {
+			s.eventMu.Unlock()
+			return modeErr
+		}
+		if coordinatorMode.Enabled != teamCoordinatorMode || coordinatorMode.TeamID != teamCoordinatorTeamID {
+			s.eventMu.Unlock()
+			return errors.New("session run mode changed during admission")
+		}
+		if coordinatorMode.Enabled {
+			request.TeamCoordinator = true
+			request.TeamCoordinatorTeamID = coordinatorMode.TeamID
+		}
+	}
+	if request.Work.Kind == agent.WorkGoal && request.TeamCoordinator {
+		team, teamErr := s.getTeamForSession(ctx, projectRoot, msg.SessionID, request.TeamCoordinatorTeamID, &request.Work)
+		if teamErr != nil || team.Status != teams.TeamOpen {
+			s.eventMu.Unlock()
+			return errors.New("Goal coordinator binding changed during run admission")
+		}
+	}
+	if request.TeamCoordinator {
+		request.ToolSchemas = execution.TeamCoordinatorToolSchemas(s.deps.ToolSchemas)
+		if len(request.ToolSchemas) == 0 {
+			s.eventMu.Unlock()
+			return errors.New("team coordinator mode has no configured team tools")
+		}
+	}
+	taskPrefix, taskErr := s.agentTaskNotifications(request)
+	if taskErr != nil {
+		s.eventMu.Unlock()
+		return taskErr
+	}
+	teamPrefix, teamErr := s.teamLeadNotifications(request, authority)
+	if teamErr != nil {
+		s.eventMu.Unlock()
+		return teamErr
+	}
+	taskPrefix = append(taskPrefix, teamPrefix...)
+	if request.Work.Kind != agent.WorkSession {
+		request.Messages = append(taskPrefix, request.Messages...)
+	}
+	if request.Work.Kind == agent.WorkGoal && request.TeamCoordinator {
+		request.Messages = append([]llm.Message{{
+			Role:    "system",
+			Content: "当前运行处于团队协调器模式，仅协调已绑定团队 " + request.TeamCoordinatorTeamID + "：仅使用团队消息、请求和任务板工具；不得操作其它团队，不得调用项目文件、命令、MCP、网络、委派、后台任务或 session todo 工具。",
+		}}, request.Messages...)
+	} else if request.Work.Kind == agent.WorkGoal && leadLease != nil {
+		request.Messages = append([]llm.Message{{
+			Role:    "system",
+			Content: "你是 Stable 的受控工作区 agent。读、搜、列只能访问本次绑定工作区的只读基线；写、编辑和命令只能影响本次绑定工作区。正式工程保持不变，变更需稍后单独导出为候选并经用户审核。工具路径使用工作区相对路径。",
+		}}, request.Messages...)
+	}
+	if request.Work.Kind == agent.WorkSession {
 		history := sessionConversationMessages(projectRoot, msg.SessionID)
-		prefix := []llm.Message{{Role: "system", Content: "你是 Stable 的通用 agent。读、搜、列只能访问正式工程只读视图；写、编辑只能写入本次运行的候选区。工具路径使用工作区相对路径。工具结果代表真实受控执行结果。"}}
+		systemPrompt := "你是 Stable 的通用 agent。读、搜、列只能访问正式工程只读视图；写、编辑只能写入本次运行的候选区。工具路径使用工作区相对路径。工具结果代表真实受控执行结果。"
+		if leadLease != nil {
+			systemPrompt = "你是 Stable 的受控工作区 agent。读、搜、列只能访问本次绑定工作区的只读基线；写、编辑和命令只能影响本次绑定工作区。正式工程保持不变，变更需稍后单独导出为候选并经用户审核。工具路径使用工作区相对路径。"
+		}
+		if request.TeamCoordinator {
+			systemPrompt += " 当前运行处于团队协调器模式，仅协调已绑定团队 " + request.TeamCoordinatorTeamID + "：仅使用团队消息、请求和任务板工具；不得操作其它团队，不得调用项目文件、命令、MCP、网络、委派、后台任务或 session todo 工具。"
+		}
+		prefix := []llm.Message{{Role: "system", Content: systemPrompt}}
 		// The skill inventory text is per-run context like the plan reminder:
 		// it rides after the system prefix (before the replayed history, so
 		// the stable snapshot sits at a fixed offset) and is deliberately not
@@ -132,6 +337,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		prefix = append(prefix, memoryPrefix...)
 		prefix = append(prefix, mcpPrefix...)
 		prefix = append(prefix, hookPrefix...)
+		prefix = append(prefix, taskPrefix...)
 		if plan.Mode == sessionlog.PlanModePlan && plan.PlanPath != "" {
 			// The plan workflow reminder is per-turn context, not session
 			// history: it is inserted after the replayed conversation and
@@ -183,11 +389,15 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if request.Work.Kind != agent.WorkSession && len(hookPrefix) > 0 {
 		request.Messages = append(hookPrefix, request.Messages...)
 	}
-	if s.hooks != nil && !s.sessionIsEphemeral(msg.SessionID) {
+	if s.hooks != nil && !s.sessionIsEphemeral(msg.SessionID) && leadLease == nil {
 		s.hooks.RunStart(msg.SessionID, request.RunID, request.Intent)
 	}
-
-	handle, err := s.deps.Runner.Start(ctx, request)
+	var handle *agent.RunHandle
+	if trustedFactory != nil {
+		handle, err = s.deps.Runner.(agent.TrustedExecutorRunner).StartWithExecutorFactory(ctx, request, trustedFactory)
+	} else {
+		handle, err = s.deps.Runner.Start(ctx, request)
+	}
 	if err != nil {
 		eventID, idErr := sessionlog.NewID()
 		if idErr == nil {
@@ -205,10 +415,31 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if s.activeRuns == nil {
 		s.activeRuns = map[string]string{}
 	}
+	if s.activeRequests == nil {
+		s.activeRequests = map[string]agent.ExecutionRequest{}
+	}
 	s.activeRuns[request.RunID] = request.Work.SessionID
+	s.activeRequests[request.RunID] = request
+	runDone := make(chan struct{})
+	if s.runDone == nil {
+		s.runDone = map[string]chan struct{}{}
+	}
+	s.runDone[request.RunID] = runDone
+	if leadLease != nil {
+		s.workspaceRuns[request.RunID] = workspaceLeadRun{lease: *leadLease, manager: leadManager}
+		leaseTransferred = true
+	}
 	s.mu.Unlock()
+	s.workspaceAdmissionMu.Unlock()
+	admissionHeld = false
+	if s.hooks != nil {
+		// Start the runner first so run_start child progress can be published
+		// into its durable parent event stream. The consumer starts after the
+		// synchronous run_start hooks have completed.
+		s.hooks.RunStartRun(ctx, s.hookAgentParent(request), msg.SessionID, request.Intent)
+	}
 	s.broadcastRun(ServerMsg{Type: "run_started", RunID: request.RunID}, msg.SessionID, request.RunID, 0)
-	go s.consumeRun(request, handle, memoryCursor)
+	go s.consumeRun(request, handle, leadLease, leadManager, runDone, memoryCursor)
 	return nil
 }
 
@@ -311,7 +542,8 @@ func sessionConversationMessages(root, sessionID string) []llm.Message {
 	return messages
 }
 
-func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHandle, memoryCursor uint64) {
+func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHandle, lease *workspace.WriterLease, manager *workspace.LifecycleService, runDone chan struct{}, memoryCursor uint64) {
+	defer close(runDone)
 	var textOut strings.Builder
 	for event := range handle.Events {
 		if event.Kind == agent.EventTextDelta {
@@ -404,9 +636,13 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 		if len([]rune(message)) > sessionlog.MaxHookOutput {
 			message = string([]rune(message)[:sessionlog.MaxHookOutput])
 		}
-		s.hooks.RunEnd(request.Work.SessionID, request.RunID, string(outcome.Status), message)
+		s.hooks.RunEndRun(s.hookAgentServiceContext(), s.hookAgentParent(request), request.Work.SessionID, string(outcome.Status), message)
 	}
-	if err := s.finalizeRunCandidate(context.Background(), request); err != nil {
+	if lease != nil {
+		if _, err := manager.ReleaseCompletedWriter(context.Background(), *lease); err != nil {
+			s.broadcastRun(ServerMsg{Type: "error", RunID: request.RunID, Error: "could not settle workspace writer: " + err.Error()}, request.Work.SessionID, request.RunID, 0)
+		}
+	} else if err := s.finalizeRunCandidate(context.Background(), request); err != nil {
 		s.broadcastRun(ServerMsg{Type: "error", RunID: request.RunID, Error: "could not finalize candidate: " + err.Error()}, request.Work.SessionID, request.RunID, 0)
 	}
 	if authority.ReadOnly {
@@ -415,13 +651,26 @@ func (s *Service) consumeRun(request agent.ExecutionRequest, handle *agent.RunHa
 			s.broadcastRun(ServerMsg{Type: "error", RunID: request.RunID, Error: "could not clean temporary run data"}, request.Work.SessionID, request.RunID, 0)
 		}
 	}
+	s.broadcastRun(ServerMsg{Type: "run_outcome", RunID: request.RunID, Outcome: &outcome}, request.Work.SessionID, request.RunID, 0)
+	s.workspaceTransitionMu.Lock()
+	s.eventMu.Lock()
 	s.mu.Lock()
 	delete(s.activeRuns, request.RunID)
+	delete(s.activeRequests, request.RunID)
+	delete(s.runDone, request.RunID)
+	delete(s.workspaceRuns, request.RunID)
 	s.mu.Unlock()
-	s.broadcastRun(ServerMsg{Type: "run_outcome", RunID: request.RunID, Outcome: &outcome}, request.Work.SessionID, request.RunID, 0)
 	if s.memory != nil {
 		s.completeMemoryRun(request, memoryCursor)
 	}
+	s.eventMu.Unlock()
+	if s.deps.AgentTasks != nil {
+		s.deps.AgentTasks.ForgetParent(request.Work.SessionID, request.RunID)
+	}
+	if err := s.reconcileWorkspaceToolTransitionsLocked(context.Background(), request.Work.SessionID, false); err != nil {
+		s.broadcastRun(ServerMsg{Type: "error", RunID: request.RunID, Error: "workspace lifecycle transition remains pending: " + boundedWorkspaceToolError(err)}, request.Work.SessionID, request.RunID, 0)
+	}
+	s.workspaceTransitionMu.Unlock()
 }
 
 func (s *Service) finalizeRunCandidate(ctx context.Context, request agent.ExecutionRequest) error {
@@ -468,7 +717,11 @@ func (s *Service) finalizeRunCandidate(ctx context.Context, request agent.Execut
 		// silently cleaned up.
 		return nil
 	}
-	_, candidateDigest, err := candidate.BuildManifest(candidateRoot)
+	policy := candidate.ManifestPolicyLegacy
+	if record != nil && record.Candidate.ManifestPolicy != "" {
+		policy = record.Candidate.ManifestPolicy
+	}
+	_, candidateDigest, err := candidate.BuildManifestForPolicy(candidateRoot, policy)
 	if err != nil {
 		return err
 	}
@@ -476,7 +729,7 @@ func (s *Service) finalizeRunCandidate(ctx context.Context, request agent.Execut
 	if record != nil {
 		baselineDigest = record.Candidate.BaselineDigest
 	} else {
-		_, baselineDigest, err = candidate.BuildManifest(formalRoot)
+		_, baselineDigest, err = candidate.BuildManifestForPolicy(formalRoot, policy)
 		if err != nil {
 			return err
 		}
@@ -589,9 +842,23 @@ func (s *Service) subscribeRun(ctx context.Context, msg ClientMsg, updates chan 
 }
 
 func (s *Service) cancelRun(msg ClientMsg, updates chan ServerMsg) error {
+	if s.deps.AgentTasks != nil {
+		if task, err := s.findAgentRun(msg.SessionID, msg.RunID); err == nil {
+			_, err = s.deps.AgentTasks.Stop(context.Background(), agent.ParentRun{Work: agent.WorkRef{SessionID: msg.SessionID}}, task.ID)
+			return err
+		}
+	}
 	s.mu.Lock()
 	sessionID, active := s.activeRuns[msg.RunID]
+	forkRun := s.activeForkRuns[msg.RunID]
 	s.mu.Unlock()
+	if forkRun != nil {
+		if forkRun.sessionID != msg.SessionID {
+			return errors.New("run does not belong to requested session")
+		}
+		forkRun.cancel()
+		return nil
+	}
 	if !active {
 		return nil
 	}
@@ -601,6 +868,14 @@ func (s *Service) cancelRun(msg ClientMsg, updates chan ServerMsg) error {
 	if s.deps.Runner == nil {
 		return errors.New("streaming agent is not configured")
 	}
+	if s.deps.AgentTasks != nil {
+		s.deps.AgentTasks.CancelParent(msg.SessionID, msg.RunID)
+	}
+	if s.teamScheduler != nil {
+		for _, cancel := range s.teamScheduler.invalidateParentRun(msg.RunID) {
+			cancel()
+		}
+	}
 	return s.deps.Runner.Cancel(msg.RunID)
 }
 
@@ -608,7 +883,7 @@ func (s *Service) broadcastRun(msg ServerMsg, sessionID, runID string, cursor ui
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, sub := range s.clients {
-		if sub.sessionID != sessionID || (sub.runID != "" && sub.runID != runID) {
+		if sub.sessionID != sessionID || (msg.Type != "agent_task_update" && sub.runID != "" && sub.runID != runID) {
 			continue
 		}
 		if sub.remoteRoot != "" && s.remoteRoots[sessionID] != sub.remoteRoot {

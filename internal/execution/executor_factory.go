@@ -11,10 +11,12 @@ import (
 
 	"stable/internal/agent"
 	"stable/internal/candidate"
+	"stable/internal/llm"
 	"stable/internal/permission"
 	"stable/internal/platform/sandbox"
 	"stable/internal/store"
 	"stable/internal/todo"
+	"stable/internal/workspace"
 )
 
 // CandidateLifecycle is the existing persistence surface needed for lazy run candidates.
@@ -27,13 +29,14 @@ type CandidateLifecycle interface {
 // *candidate.SnapshotStore implements it.
 type SnapshotCreator interface {
 	Create(sessionID, candidateID, runID, label, candidateRoot string) (candidate.FileSnapshot, error)
+	CreateForPolicy(sessionID, candidateID, runID, label, candidateRoot, policy string) (candidate.FileSnapshot, error)
 }
 
 // HookRunner runs lifecycle hooks around individual tool calls. A rejected
 // pre-hook can only block a call; it never alters permission decisions.
 type HookRunner interface {
-	PreToolUse(sessionID, toolName string, args map[string]any) (rejected bool, hookID, message string)
-	PostToolUse(sessionID, toolName string, args map[string]any, result string)
+	PreToolUseRun(ctx context.Context, parent agent.ParentRun, sessionID, toolName string, args map[string]any) (rejected bool, hookID, message string)
+	PostToolUseRun(ctx context.Context, parent agent.ParentRun, sessionID, toolName string, args map[string]any, result string)
 }
 
 type ToolExecutorDeps struct {
@@ -72,7 +75,23 @@ type ToolExecutorDeps struct {
 	MCP MCPCaller
 	// MemoryProvider serves the scoped memory host tools. Nil leaves them
 	// unavailable and preserves the unknown-tool behavior.
-	Memory MemoryProvider
+	Memory    MemoryProvider
+	Delegator agent.Delegator
+	Provider  llm.Provider
+	// AgentTasks serves named-agent launch, output and cancellation to parents.
+	AgentTasks agent.AgentTaskService
+	// TeamTools routes trusted team operations through the conversation service.
+	TeamTools *agent.TeamToolHost
+	// WorkspaceLifecycle is bound by conversation.Service and is removed from
+	// every child executor factory.
+	WorkspaceLifecycle *WorkspaceLifecycleToolHost
+	// WorkspaceLease enables the isolated file-tool surface for a single
+	// service-owned workspace generation. Commands additionally require a verified bounded disk volume.
+	WorkspaceLease      *workspace.WriterLease
+	WorkspaceAccounting workspace.WriterAccounting
+	// ReadOnly restricts dispatch to project read/search/list tools. It is
+	// applied by the executor as a hard allowlist, independently of schemas.
+	ReadOnly bool
 	// HookRunner runs optional pre/post tool-use hooks. A nil runner leaves
 	// existing tool execution behavior unchanged.
 	HookRunner HookRunner
@@ -148,11 +167,10 @@ type TodoProvider interface {
 }
 
 // SkillProvider resolves skill activations and the per-session skill
-// inventory on the host. LoadSkill activates a skill and returns its rendered
-// body; unknown skills, fork-mode skills and unreadable bodies come back as
-// errors. SkillInventory returns the stable inventory text for run-context
-// injection plus, when new skills appeared since the last run, a one-shot
-// delta reminder.
+// inventory on the host. LoadSkill returns a rendered body for inline skills
+// or a fork result for fork-mode skills. SkillInventory returns the stable
+// inventory text for run-context injection plus, when new skills appeared
+// since the last run, a one-shot delta reminder.
 type SkillProvider interface {
 	LoadSkill(ctx context.Context, sessionID, name, args string) (string, error)
 	SkillInventory(ctx context.Context, sessionID string) (snapshotText, deltaReminder string, err error)
@@ -195,12 +213,105 @@ func WithMemoryProvider(provider MemoryProvider) ToolExecutorOption {
 	return func(deps *ToolExecutorDeps) { deps.Memory = provider }
 }
 
+func WithAgentTaskService(service agent.AgentTaskService) ToolExecutorOption {
+	return func(deps *ToolExecutorDeps) { deps.AgentTasks = service }
+}
+
+func WithTeamToolHost(host *agent.TeamToolHost) ToolExecutorOption {
+	return func(deps *ToolExecutorDeps) { deps.TeamTools = host }
+}
+
+func WithWorkspaceLifecycleToolHost(host *WorkspaceLifecycleToolHost) ToolExecutorOption {
+	return func(deps *ToolExecutorDeps) { deps.WorkspaceLifecycle = host }
+}
+
+func WithReadOnlyTools() ToolExecutorOption {
+	return func(deps *ToolExecutorDeps) {
+		deps.ReadOnly = true
+		deps.MCP = nil
+		deps.Memory = nil
+		deps.Candidates = nil
+		deps.Snapshots = nil
+		deps.QuestionSink = nil
+		deps.PlanSink = nil
+		deps.TodoProvider = nil
+		deps.SkillProvider = nil
+		deps.AgentTasks = nil
+		deps.TeamTools = nil
+		deps.WorkspaceLifecycle = nil
+		deps.HookRunner = nil
+	}
+}
+
+func WithDelegator(delegator agent.Delegator, provider llm.Provider) ToolExecutorOption {
+	return func(deps *ToolExecutorDeps) {
+		deps.Delegator = delegator
+		deps.Provider = provider
+	}
+}
+
+// WorkspaceWriterExecutorFactory derives a constrained factory for one
+// already-acquired workspace lease. It carries no lifecycle or export tools.
+func WorkspaceWriterExecutorFactory(factory agent.ExecutorFactory, lease workspace.WriterLease, accounting workspace.WriterAccounting) agent.ExecutorFactory {
+	base, ok := factory.(ToolExecutorFactory)
+	if !ok {
+		return nil
+	}
+	deps := base.deps
+	leaseCopy := lease
+	deps.WorkspaceLease = &leaseCopy
+	deps.WorkspaceAccounting = accounting
+	deps.SessionRoot = ""
+	deps.Candidates = nil
+	deps.Snapshots = nil
+	deps.HookRunner = nil
+	deps.AgentTasks = nil
+	deps.TeamTools = nil
+	deps.WorkspaceLifecycle = nil
+	deps.Delegator = nil
+	deps.MCP = nil
+	deps.Memory = nil
+	deps.QuestionSink = nil
+	deps.PlanSink = nil
+	deps.TodoProvider = nil
+	deps.SkillProvider = nil
+	deps.ReadOnly = false
+	return NewToolExecutorFactory(deps)
+}
+
+// LeadWorkspaceLifecycleExecutorFactory adds lifecycle tools back only to a
+// trusted lead run after the generic workspace writer factory removes child
+// capabilities.
+func LeadWorkspaceLifecycleExecutorFactory(factory agent.ExecutorFactory, host *WorkspaceLifecycleToolHost) agent.ExecutorFactory {
+	base, ok := factory.(ToolExecutorFactory)
+	if !ok || host == nil {
+		return nil
+	}
+	deps := base.deps
+	deps.WorkspaceLifecycle = host
+	return NewToolExecutorFactory(deps)
+}
+
 // WithHookRunner injects the lifecycle hook runner for tool calls.
 func WithHookRunner(runner HookRunner) ToolExecutorOption {
 	return func(deps *ToolExecutorDeps) { deps.HookRunner = runner }
 }
 
 type ToolExecutorFactory struct{ deps ToolExecutorDeps }
+
+// ReadOnlyExecutorFactory derives the child executor factory used by fork
+// skills and delegation. It preserves the existing permission gate and
+// sandbox wiring while applying the executor's hard read-only allowlist.
+func ReadOnlyExecutorFactory(factory agent.ExecutorFactory) agent.ExecutorFactory {
+	base, ok := factory.(ToolExecutorFactory)
+	if !ok {
+		return nil
+	}
+	deps := base.deps
+	deps.SessionRoot = ""
+	deps.HookRunner = nil // child tool calls must not recursively trigger parent hooks
+	return NewToolExecutorFactory(deps, WithReadOnlyTools())
+}
 
 func NewToolExecutorFactory(deps ToolExecutorDeps, options ...ToolExecutorOption) agent.ExecutorFactory {
 	if deps.Now == nil {
@@ -251,6 +362,16 @@ func (f ToolExecutorFactory) ForRun(request agent.ExecutionRequest) (agent.RunEx
 		deps.SessionRoot = authority.AllowedRoot
 	}
 	runRoot := filepath.Join(filepath.Dir(authority.CandidateRoot), ".stable-runs", request.RunID)
+	if f.deps.WorkspaceLease != nil {
+		lease := *f.deps.WorkspaceLease
+		if lease.WorkspaceID == "" || lease.RunID != request.RunID || lease.Generation == 0 || lease.Authority.RunID != request.RunID || lease.Scope.Authority.RunID != request.RunID || lease.Scope.Work.SessionID != request.Work.SessionID || lease.Scope.Work.GoalID != request.Work.GoalID || lease.Scope.Work.WorkItemID != request.Work.WorkItemID || lease.Scope.Authority.SessionID != request.Work.SessionID || lease.Scope.Authority.GoalID != request.Work.GoalID || lease.Scope.Authority.WorkItemID != request.Work.WorkItemID || filepath.Clean(lease.Scope.Authority.FormalRoot) != filepath.Clean(authority.FormalRoot) || filepath.Clean(lease.Scope.Authority.AllowedRoot) != authority.AllowedRoot || filepath.Clean(lease.Paths.Root) == "." || filepath.Dir(lease.Paths.Baseline) != filepath.Clean(lease.Paths.Root) || filepath.Dir(lease.Paths.Repository) != filepath.Clean(lease.Paths.Root) || filepath.Dir(lease.Paths.Checkout) != filepath.Clean(lease.Paths.Root) || filepath.Dir(lease.Paths.Run) != filepath.Clean(lease.Paths.Root) || filepath.Clean(lease.Paths.Baseline) != authority.AllowedRoot || filepath.Clean(lease.Paths.Checkout) != authority.CandidateRoot || filepath.Clean(lease.Authority.FormalRoot) != filepath.Clean(authority.FormalRoot) || filepath.Clean(lease.Authority.AllowedRoot) != authority.AllowedRoot || filepath.Clean(lease.Authority.CandidateRoot) != authority.CandidateRoot || len(authority.Network) != 0 || authority.Mode == permission.ModePlan || f.deps.WorkspaceAccounting == nil {
+			return nil, errors.New("workspace writer lease is invalid")
+		}
+		if lease.Scope.ProjectID == "" || lease.Scope.Validate() != nil {
+			return nil, errors.New("workspace writer scope is invalid")
+		}
+		runRoot = lease.Paths.Run
+	}
 	if err = secfile.MkdirAllPrivate(runRoot, 0700); err != nil {
 		return nil, err
 	}

@@ -29,6 +29,10 @@ const (
 	// OpMCPTool is an invocation of a tool on an MCP server: Name is the MCP
 	// server name and Target the normalized "server__tool" match string.
 	OpMCPTool OperationKind = "mcp_tool"
+	// OpWorkspaceLifecycle is a parent-only request to mutate workspace
+	// bindings or export a workspace candidate. It always requires an exact
+	// saved rule or one-time user approval; permission mode cannot auto-allow it.
+	OpWorkspaceLifecycle OperationKind = "workspace_lifecycle"
 )
 
 type Authority struct {

@@ -191,7 +191,7 @@ func TestContinuousMigrationFromV3(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 12 {
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 14 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	var id, status, reason string

@@ -114,6 +114,10 @@ func chatserve(args []string) error {
 	var toolSchemas []llm.ToolSchema
 	var runnerError string
 	var snapshotStore *candidate.SnapshotStore
+	var forkProvider llm.Provider
+	var forkExecutorFactory agent.ExecutorFactory
+	delegationReporter := conversation.NewDelegationEventReporter()
+	var delegator *agent.PoolDelegator
 	// The interaction sinks need the conversation service, which only exists
 	// once Serve returns, so they are built unbound here and bound right
 	// after Serve — no run can reach a tool call before that.
@@ -132,7 +136,14 @@ func chatserve(args []string) error {
 		log.Printf("MCP startup: %v", err)
 	}
 	defer mcpManager.Shutdown()
+	workspaceLifecycleHost := execution.NewWorkspaceLifecycleToolHost()
 	if streamingProvider, streamErr := llm.NewProvider(c.Model); streamErr == nil {
+		forkProvider = streamingProvider
+		delegator, err = agent.NewPoolDelegator(agent.DefaultDelegationLimits(), agent.StreamingChildRunner{}, delegationReporter)
+		if err != nil {
+			return fmt.Errorf("delegation coordinator: %w", err)
+		}
+		defer delegator.Close()
 		var credentials []string
 		if c.Model.APIKey != "" {
 			credentials = []string{c.Model.APIKey}
@@ -142,11 +153,20 @@ func chatserve(args []string) error {
 			return fmt.Errorf("candidate snapshot store: %w", err)
 		}
 		executorFactory = execution.NewToolExecutorFactory(execution.ToolExecutorDeps{
-			Sandbox: sbx, Gate: execution.StorePermissionGate{Store: s}, Approvals: s, Candidates: s, HelperPath: helperPath,
-			SessionRoot: *projectRoot, ProviderCredential: c.Model.APIKey, Snapshots: snapshotStore, QuestionSink: askSink,
-			TodoProvider: todoProvider,
-		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate), execution.WithMCPCaller(mcpManager), execution.WithMemoryProvider(memoryGate))
-		toolSchemas = chatserveToolSchemas(mcpManager)
+			Sandbox:            sbx,
+			Gate:               execution.StorePermissionGate{Store: s},
+			Approvals:          s,
+			Candidates:         s,
+			HelperPath:         helperPath,
+			SessionRoot:        *projectRoot,
+			ProviderCredential: c.Model.APIKey,
+			Snapshots:          snapshotStore,
+			QuestionSink:       askSink,
+			TodoProvider:       todoProvider,
+			Provider:           streamingProvider,
+		}, execution.WithPlanSink(planSink), execution.WithSkillProvider(skillGate), execution.WithHookRunner(hookGate), execution.WithMCPCaller(mcpManager), execution.WithMemoryProvider(memoryGate), execution.WithDelegator(delegator, streamingProvider), execution.WithWorkspaceLifecycleToolHost(workspaceLifecycleHost))
+		forkExecutorFactory = execution.ReadOnlyExecutorFactory(executorFactory)
+		toolSchemas = chatserveToolSchemasWithDelegation(delegator, mcpManager)
 		contextManager, fellBack := sessioncontext.NewManager(c.Model.ContextWindowTokens, model.(decision.ChatProvider))
 		if fellBack {
 			log.Printf("invalid context_window_tokens %d; using default %d", c.Model.ContextWindowTokens, sessioncontext.DefaultWindowTokens)
@@ -157,7 +177,8 @@ func chatserve(args []string) error {
 	}
 	permissionService := &permission.PermissionService{Repository: s, NewID: func() string { id, _ := sessionlog.NewID(); return id }}
 	svc, err := conversation.Serve(ctx, conversation.Deps{
-		Store: s, Provider: provider, ChatProvider: model.(decision.ChatProvider), Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket,
+		Store: s, Provider: provider, ChatProvider: model.(decision.ChatProvider), Runner: runner, ExecutorFactory: executorFactory, ToolSchemas: toolSchemas, PermissionService: permissionService, RunnerError: runnerError, ProviderCredential: c.Model.APIKey, ProviderName: c.Model.Provider, Model: c.Model.Model, Temporal: *temporal, ProjectRoot: *projectRoot, RunRoot: *runRoot, SocketPath: *socket, WorkspaceStateRoot: filepath.Join(p.State, "workspaces"), WorkspaceLifecycleHost: workspaceLifecycleHost,
+		Delegator: delegator, ForkProvider: forkProvider, ForkExecutorFactory: forkExecutorFactory, ForkToolSchemas: execution.ReadOnlyToolSchemas(),
 		Refresher:           refresher,
 		CandidateCheckers:   chatCandidateCheckers(*runRoot, sbx),
 		ContextWindowTokens: c.Model.ContextWindowTokens,
@@ -173,6 +194,7 @@ func chatserve(args []string) error {
 	askSink.Bind(svc)
 	todoProvider.Bind(svc)
 	planSink.Bind(svc)
+	delegationReporter.Bind(svc)
 	defer svc.Close()
 	<-ctx.Done()
 	return nil
@@ -197,29 +219,39 @@ func userSkillsDir() string {
 }
 
 func chatserveToolSchemas(callers ...execution.MCPCaller) []llm.ToolSchema {
+	return chatserveToolSchemasWithDelegation(nil, callers...)
+}
+
+func chatserveToolSchemasWithDelegation(delegator agent.Delegator, callers ...execution.MCPCaller) []llm.ToolSchema {
 	nameMap := map[string]string{
-		"read_file":      "read_file",
-		"write_file":     "write_file",
-		"edit_file":      "edit_file",
-		"glob":           "glob",
-		"grep":           "grep",
-		"ask_user":       "ask_user",
-		"exit_plan_mode": "exit_plan_mode",
-		"task_create":    "task_create",
-		"task_get":       "task_get",
-		"task_list":      "task_list",
-		"task_update":    "task_update",
-		"load_skill":     "load_skill",
-		"memory_list":    "memory_list",
-		"memory_read":    "memory_read",
-		"memory_save":    "memory_save",
-		"memory_delete":  "memory_delete",
+		"read_file":       "read_file",
+		"write_file":      "write_file",
+		"edit_file":       "edit_file",
+		"glob":            "glob",
+		"grep":            "grep",
+		"ask_user":        "ask_user",
+		"exit_plan_mode":  "exit_plan_mode",
+		"task_create":     "task_create",
+		"task_get":        "task_get",
+		"task_list":       "task_list",
+		"task_update":     "task_update",
+		"load_skill":      "load_skill",
+		"enter_worktree":  "enter_worktree",
+		"exit_worktree":   "exit_worktree",
+		"worktree_export": "worktree_export",
+		"memory_list":     "memory_list",
+		"memory_read":     "memory_read",
+		"memory_save":     "memory_save",
+		"memory_delete":   "memory_delete",
 	}
 	registry := tools.CreateDefaultTools().Registry
 	// M06/M07 tools live outside the default registry; the copy keeps append
 	// from aliasing the registry slice.
 	sources := append(append(append(append([]map[string]any{}, registry.GetAllSchemas()...), execution.M06ToolSchemas()...), execution.SkillToolSchemas()...), execution.MemoryToolSchemas()...)
-	schemas := make([]llm.ToolSchema, 0, len(nameMap)+1)
+	for _, schema := range execution.WorkspaceLifecycleToolSchemas() {
+		sources = append(sources, map[string]any{"name": schema.Name, "description": schema.Description, "input_schema": schema.InputSchema})
+	}
+	schemas := make([]llm.ToolSchema, 0, len(nameMap)+2)
 	for _, schema := range sources {
 		internalName, _ := schema["name"].(string)
 		name, ok := nameMap[internalName]
@@ -235,6 +267,9 @@ func chatserveToolSchemas(callers ...execution.MCPCaller) []llm.ToolSchema {
 		Description: tools.BashDescription,
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"command": map[string]any{"type": "string", "description": "Shell command to execute"}, "timeout": map[string]any{"type": "integer", "minimum": 1, "maximum": 600, "description": "Timeout in seconds"}}, "required": []string{"command"}},
 	})
+	if delegator != nil {
+		schemas = append(schemas, execution.DelegationToolSchemas()...)
+	}
 	if len(callers) > 0 && callers[0] != nil {
 		if manager, ok := callers[0].(interface{ Configured() bool }); ok && manager.Configured() {
 			for _, schema := range execution.MCPToolSchemas() {

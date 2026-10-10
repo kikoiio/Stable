@@ -22,6 +22,16 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 	}
 	var blocks []*block
 	runs := map[string]*block{}
+	delegations := map[string]*block{}
+	backgroundRuns := map[string]bool{}
+	for _, event := range events {
+		if event.Type == sessionlog.EventRunStarted {
+			var started sessionlog.RunStarted
+			if decodeEventData(event.Data, &started) == nil && (started.AgentTaskID != "" || started.TeamID != "") {
+				backgroundRuns[started.RunID] = true
+			}
+		}
+	}
 	// First pass: pair tool calls with their results and questions with
 	// their replies, so recovery display can flag interrupted calls and
 	// already-answered questions instead of leaving both ambiguous.
@@ -313,6 +323,9 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 			if decodeEventData(e.Data, &run) != nil {
 				continue
 			}
+			if backgroundRuns[run.RunID] && run.Kind != "delegation_event" {
+				continue
+			}
 			if run.Kind == "text_delta" || run.Kind == "thinking_delta" {
 				key := run.RunID + ":" + run.Kind
 				part := runs[key]
@@ -332,6 +345,38 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 				if json.Unmarshal(pb, &payload) == nil {
 					part.text.WriteString(payload.Text)
 				}
+			} else if run.Kind == "delegation_event" {
+				var delegation struct {
+					BatchID  string `json:"batch_id"`
+					TaskID   string `json:"task_id"`
+					TaskName string `json:"task_name"`
+					Status   string `json:"status"`
+					Stage    string `json:"stage"`
+					Summary  string `json:"summary"`
+					Error    string `json:"error"`
+				}
+				payload, _ := json.Marshal(run.Payload)
+				if json.Unmarshal(payload, &delegation) != nil {
+					continue
+				}
+				key := delegation.BatchID + ":" + delegation.TaskID
+				part := delegations[key]
+				if part == nil {
+					part = &block{role: "协作任务"}
+					delegations[key] = part
+					blocks = append(blocks, part)
+				}
+				part.text = strings.Builder{}
+				fmt.Fprintf(&part.text, "%s · %s", delegation.TaskName, delegation.Status)
+				if delegation.Stage != "" {
+					fmt.Fprintf(&part.text, " · %s", delegation.Stage)
+				}
+				if delegation.Summary != "" {
+					fmt.Fprintf(&part.text, " · %s", delegation.Summary)
+				}
+				if delegation.Error != "" {
+					fmt.Fprintf(&part.text, " · %s", delegation.Error)
+				}
 			} else if run.Kind == "tool_call_start" || run.Kind == "tool_call_delta" || run.Kind == "tool_call_complete" || run.Kind == "tool_exec_start" || run.Kind == "tool_exec_result" || run.Kind == "awaiting_approval" || run.Kind == "budget_exhausted" || run.Kind == "usage" || run.Kind == "retry" || run.Kind == "error" || run.Kind == "terminal" {
 				label := map[string]string{"tool_call_start": "工具调用", "tool_call_delta": "工具参数", "tool_call_complete": "工具调用完成", "tool_exec_start": "工具执行", "tool_exec_result": "工具结果", "awaiting_approval": "等待授权", "budget_exhausted": "预算耗尽", "usage": "用量", "retry": "重试", "error": "模型错误", "terminal": "运行状态"}[run.Kind]
 				payload, _ := json.Marshal(run.Payload)
@@ -339,13 +384,29 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 					payload = []byte(formatUsage(payload))
 				} else if run.Kind == "terminal" {
 					var terminal struct {
-						Status string `json:"status"`
+						Status  string `json:"status"`
+						Summary string `json:"summary"`
+						Reason  string `json:"reason"`
 					}
 					_ = json.Unmarshal(payload, &terminal)
-					status := map[string]string{"completed": "completed", "cancelled": "cancelled", "failed": "failed", "awaiting_tools": "awaiting tools", "budget_exhausted": "budget exhausted"}[terminal.Status]
+					status := map[string]string{"completed": "completed", "cancelled": "cancelled", "failed": "failed", "awaiting_tools": "awaiting tools", "budget_exhausted": "budget exhausted", "interrupted": "interrupted"}[terminal.Status]
+					var text strings.Builder
 					if status != "" {
-						payload = []byte(status)
+						text.WriteString(status)
 					}
+					if terminal.Summary != "" {
+						if text.Len() > 0 {
+							text.WriteString("\n")
+						}
+						text.WriteString(terminal.Summary)
+					}
+					if terminal.Reason != "" {
+						if text.Len() > 0 {
+							text.WriteString("\n")
+						}
+						text.WriteString(terminal.Reason)
+					}
+					payload = []byte(text.String())
 				}
 				part := &block{role: label}
 				part.text.Write(payload)

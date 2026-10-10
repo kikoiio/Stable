@@ -23,16 +23,24 @@ type WorkRef struct {
 }
 
 type ExecutionRequest struct {
-	RunID            string          `json:"run_id"`
-	Work             WorkRef         `json:"work"`
-	Intent           string          `json:"intent"`
-	Messages         []llm.Message   `json:"messages"`
-	ProviderName     string          `json:"provider_name"`
-	Model            string          `json:"model"`
-	BaselineVersion  string          `json:"baseline_version,omitempty"`
-	AllowedScope     []string        `json:"allowed_scope,omitempty"`
-	ResourceBounds   json.RawMessage `json:"resource_bounds,omitempty"`
-	PermissionBounds json.RawMessage `json:"permission_bounds,omitempty"`
+	RunID                 string            `json:"run_id"`
+	Work                  WorkRef           `json:"work"`
+	TeamTurn              *TeamTurnIdentity `json:"-"`
+	TeamUser              bool              `json:"-"` // trusted local session action; never accepted from wire/model input
+	TeamUserProof         string            `json:"-"` // service signature for a locally reconstructed TeamUser request
+	AcceptTeamRoleChange  bool              `json:"-"` // explicit client resume confirmation; never exposed as a model tool argument
+	TeamCoordinator       bool              `json:"-"` // trusted per-run static team-only tool mode
+	TeamCoordinatorTeamID string            `json:"-"` // trusted team binding for the coordinator mode
+	ToolSchemas           []llm.ToolSchema  `json:"-"` // trusted per-run tool allowlist; nil uses runner defaults
+	Intent                string            `json:"intent"`
+	Messages              []llm.Message     `json:"messages"`
+	ProviderName          string            `json:"provider_name"`
+	Model                 string            `json:"model"`
+	BaselineVersion       string            `json:"baseline_version,omitempty"`
+	AllowedScope          []string          `json:"allowed_scope,omitempty"`
+	ResourceBounds        json.RawMessage   `json:"resource_bounds,omitempty"`
+	PermissionBounds      json.RawMessage   `json:"permission_bounds,omitempty"`
+	RunDeadline           time.Time         `json:"-"`
 }
 
 type EventKind string
@@ -56,6 +64,7 @@ const (
 	// summary replaces the covered run sequence range. The conversation
 	// consumer turns it into a run-scope session log boundary.
 	EventCompactionBoundary EventKind = "compaction_boundary"
+	EventDelegation         EventKind = "delegation_event"
 )
 
 // ContextBoundary is the agent-stream form of a compaction boundary.
@@ -101,6 +110,7 @@ type RunStatus string
 const (
 	RunCompleted       RunStatus = "completed"
 	RunCancelled       RunStatus = "cancelled"
+	RunInterrupted     RunStatus = "interrupted"
 	RunFailed          RunStatus = "failed"
 	RunAwaitingTools   RunStatus = "awaiting_tools"
 	RunBudgetExhausted RunStatus = "budget_exhausted"
@@ -125,3 +135,31 @@ type Runner interface {
 	Start(context.Context, ExecutionRequest) (*RunHandle, error)
 	Cancel(runID string) error
 }
+
+// TrustedExecutorRunner allows a host to select a per-run executor through a
+// trusted in-process call. It must never be populated from an ExecutionRequest
+// decoded from the client protocol.
+type TrustedExecutorRunner interface {
+	StartWithExecutorFactory(context.Context, ExecutionRequest, ExecutorFactory) (*RunHandle, error)
+}
+
+// DelegationEvent is a user-visible lifecycle update. Summary is intended for
+// concise stage text only; model reasoning and raw child transcripts are not
+// represented by this type.
+type DelegationEvent struct {
+	SessionID string           `json:"session_id,omitempty"`
+	BatchID   string           `json:"batch_id"`
+	TaskID    string           `json:"task_id"`
+	TaskName  string           `json:"task_name"`
+	Status    DelegationStatus `json:"status"`
+	Stage     string           `json:"stage,omitempty"`
+	Summary   string           `json:"summary,omitempty"`
+	Error     string           `json:"error,omitempty"`
+	UpdatedAt time.Time        `json:"updated_at"`
+}
+
+type ProgressReporter interface {
+	Publish(parentRunID string, event DelegationEvent) error
+}
+
+type DelegationProgress func(stage, summary string)

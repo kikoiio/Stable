@@ -30,7 +30,48 @@ type RunnerOptions struct {
 	ContextManager ContextPreparer
 }
 
-type runEntry struct{ cancel context.CancelFunc }
+type runEventSink struct {
+	mu      sync.Mutex
+	request ExecutionRequest
+	output  chan<- ExecutionEvent
+	seq     uint64
+	closed  bool
+}
+
+func (s *runEventSink) Publish(event ExecutionEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("run event stream is closed")
+	}
+	s.seq++
+	id, err := newEventID()
+	if err != nil {
+		return err
+	}
+	event.ID, event.RunID = id, s.request.RunID
+	event.SessionID, event.RunSeq = s.request.Work.SessionID, s.seq
+	event.At = time.Now().UTC()
+	s.output <- event
+	return nil
+}
+
+func (s *runEventSink) close() {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+}
+
+func (s *runEventSink) Sequence() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seq
+}
+
+type runEntry struct {
+	cancel context.CancelFunc
+	sink   *runEventSink
+}
 
 type StreamingRunner struct {
 	provider llm.Provider
@@ -59,6 +100,20 @@ func NewRunner(provider llm.Provider, options RunnerOptions) *StreamingRunner {
 }
 
 func (r *StreamingRunner) Start(parent context.Context, request ExecutionRequest) (*RunHandle, error) {
+	return r.start(parent, request, nil)
+}
+
+// StartWithExecutorFactory is the trusted in-process entry point for a
+// per-run executor. The factory is captured in the private runner entry and
+// is not part of ExecutionRequest or the wire protocol.
+func (r *StreamingRunner) StartWithExecutorFactory(parent context.Context, request ExecutionRequest, factory ExecutorFactory) (*RunHandle, error) {
+	if factory == nil {
+		return nil, errors.New("trusted per-run executor factory is required")
+	}
+	return r.start(parent, request, factory)
+}
+
+func (r *StreamingRunner) start(parent context.Context, request ExecutionRequest, factory ExecutorFactory) (*RunHandle, error) {
 	if r.provider == nil {
 		return nil, errors.New("streaming provider is not configured")
 	}
@@ -72,13 +127,15 @@ func (r *StreamingRunner) Start(parent context.Context, request ExecutionRequest
 		cancel()
 		return nil, errors.New("run ID is already active")
 	}
-	r.runs[request.RunID] = runEntry{cancel: cancel}
-	r.mu.Unlock()
 	events := make(chan ExecutionEvent, 128)
 	done := make(chan RunOutcome, 1)
+	sink := &runEventSink{request: request, output: events}
+	r.runs[request.RunID] = runEntry{cancel: cancel, sink: sink}
+	r.mu.Unlock()
 	go func() {
-		outcome := r.execute(ctx, request, events)
+		outcome := r.execute(ctx, request, events, sink, factory)
 		r.mu.Lock()
+		sink.close()
 		delete(r.runs, request.RunID)
 		r.mu.Unlock()
 		cancel()
@@ -87,6 +144,23 @@ func (r *StreamingRunner) Start(parent context.Context, request ExecutionRequest
 		close(events)
 	}()
 	return &RunHandle{Events: events, Done: done}, nil
+}
+
+// PublishDelegation injects a collaboration event into the active parent run
+// stream so it shares sequence numbers and persistence with normal run events.
+func (r *StreamingRunner) PublishDelegation(runID string, event DelegationEvent) error {
+	r.mu.Lock()
+	entry, ok := r.runs[runID]
+	if !ok {
+		r.mu.Unlock()
+		return errors.New("parent run is not active")
+	}
+	payload, err := json.Marshal(event)
+	if err == nil {
+		err = entry.sink.Publish(ExecutionEvent{Kind: EventDelegation, Payload: payload})
+	}
+	r.mu.Unlock()
+	return err
 }
 
 func (r *StreamingRunner) Cancel(runID string) error {
@@ -122,21 +196,23 @@ func ValidateRequest(request ExecutionRequest) error {
 	return nil
 }
 
-func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest, output chan<- ExecutionEvent) RunOutcome {
-	var seq uint64
+func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest, output chan<- ExecutionEvent, sink *runEventSink, trustedFactory ExecutorFactory) RunOutcome {
 	messages := append([]llm.Message(nil), request.Messages...)
 	msgSeqs := make([]uint64, len(messages)) // request history predates this run
 	budget := r.runBudget(request)
 	startedAt := time.Now()
+	if budget.MaxTotalDuration > 0 {
+		request.RunDeadline = startedAt.Add(budget.MaxTotalDuration)
+	}
 	toolRounds := 0
 	var executor RunExecutor
 
 	for {
 		if ctx.Err() != nil {
-			return r.terminal(request, output, &seq, RunCancelled, nil)
+			return r.terminal(request, output, sink, RunCancelled, nil)
 		}
 		if budget.MaxTotalDuration > 0 && time.Since(startedAt) >= budget.MaxTotalDuration {
-			return r.budgetExhausted(request, output, &seq, "max_total_duration")
+			return r.budgetExhausted(request, output, sink, "max_total_duration")
 		}
 
 		if r.options.ContextManager != nil {
@@ -144,18 +220,18 @@ func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest,
 			if err != nil {
 				providerErr := &llm.ProviderError{Class: llm.ErrorProvider, Message: "context preparation failed: " + err.Error()}
 				payload, _ := json.Marshal(providerErr)
-				_ = r.publish(request, output, &seq, ExecutionEvent{Kind: EventError, Payload: payload})
-				return r.terminal(request, output, &seq, RunFailed, providerErr)
+				_ = r.publish(request, output, sink, ExecutionEvent{Kind: EventError, Payload: payload})
+				return r.terminal(request, output, sink, RunFailed, providerErr)
 			}
 			if prepared.Boundary != nil {
 				payload, _ := json.Marshal(prepared.Boundary)
-				if err := r.publish(request, output, &seq, ExecutionEvent{Kind: EventCompactionBoundary, Payload: payload}); err != nil {
+				if err := r.publish(request, output, sink, ExecutionEvent{Kind: EventCompactionBoundary, Payload: payload}); err != nil {
 					providerErr := &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish compaction boundary"}
-					return r.terminal(request, output, &seq, RunFailed, providerErr)
+					return r.terminal(request, output, sink, RunFailed, providerErr)
 				}
 				// The synthetic summary message aligns with the boundary
 				// event so a later boundary can cover it in turn.
-				newSeqs := append(append([]uint64{}, msgSeqs[:prepared.HeadKept]...), seq)
+				newSeqs := append(append([]uint64{}, msgSeqs[:prepared.HeadKept]...), sink.Sequence())
 				msgSeqs = append(newSeqs, msgSeqs[prepared.TailStart:]...)
 				messages = prepared.Messages
 			}
@@ -172,7 +248,7 @@ func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest,
 
 		for attempt := 0; attempt <= r.options.MaxRetries; attempt++ {
 			if ctx.Err() != nil {
-				return r.terminal(request, output, &seq, RunCancelled, nil)
+				return r.terminal(request, output, sink, RunCancelled, nil)
 			}
 			streamErr = nil
 			ended = false
@@ -182,7 +258,11 @@ func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest,
 			completedCalls = map[string]bool{}
 			emittedContent := false
 			usageSeen := false
-			events, errs := r.provider.Stream(ctx, llm.Request{Model: request.Model, Messages: messages, Tools: r.options.ToolSchemas})
+			toolSchemas := r.options.ToolSchemas
+			if request.ToolSchemas != nil {
+				toolSchemas = request.ToolSchemas
+			}
+			events, errs := r.provider.Stream(ctx, llm.Request{Model: request.Model, Messages: messages, Tools: toolSchemas})
 			for events != nil || errs != nil {
 				select {
 				case <-ctx.Done():
@@ -200,8 +280,8 @@ func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest,
 								usage = &llm.UsageInfo{}
 							}
 							payload, _ := json.Marshal(llm.Event{Kind: llm.Usage, Usage: usage})
-							if err := r.publish(request, output, &seq, ExecutionEvent{Kind: EventUsage, Payload: payload}); err != nil {
-								return r.terminal(request, output, &seq, RunFailed, &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish usage event"})
+							if err := r.publish(request, output, sink, ExecutionEvent{Kind: EventUsage, Payload: payload}); err != nil {
+								return r.terminal(request, output, sink, RunFailed, &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish usage event"})
 							}
 						}
 						continue
@@ -232,8 +312,8 @@ func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest,
 					if mapped.Kind == "" {
 						continue
 					}
-					if err := r.publish(request, output, &seq, mapped); err != nil {
-						return r.terminal(request, output, &seq, RunFailed, &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish run event"})
+					if err := r.publish(request, output, sink, mapped); err != nil {
+						return r.terminal(request, output, sink, RunFailed, &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish run event"})
 					}
 				case err, ok := <-errs:
 					if !ok {
@@ -246,7 +326,7 @@ func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest,
 				}
 			}
 			if ctx.Err() != nil {
-				return r.terminal(request, output, &seq, RunCancelled, nil)
+				return r.terminal(request, output, sink, RunCancelled, nil)
 			}
 			if streamErr == nil && !ended {
 				streamErr = &llm.ProviderError{Class: llm.ErrorProvider, Message: "provider stream ended without a terminal event"}
@@ -259,82 +339,86 @@ func (r *StreamingRunner) execute(ctx context.Context, request ExecutionRequest,
 				delay := retryDelay(attempt, providerErr.RetryAfter)
 				if delay <= maxTotalRetryWait {
 					payload, _ := json.Marshal(map[string]any{"attempt": attempt + 1, "delay_ms": delay.Milliseconds(), "class": providerErr.Class})
-					if err := r.publish(request, output, &seq, ExecutionEvent{Kind: EventRetry, Payload: payload}); err != nil {
-						return r.terminal(request, output, &seq, RunFailed, providerErr)
+					if err := r.publish(request, output, sink, ExecutionEvent{Kind: EventRetry, Payload: payload}); err != nil {
+						return r.terminal(request, output, sink, RunFailed, providerErr)
 					}
 					if err := r.options.Sleep(ctx, delay); err != nil {
-						return r.terminal(request, output, &seq, RunCancelled, nil)
+						return r.terminal(request, output, sink, RunCancelled, nil)
 					}
 					continue
 				}
 			}
 			payload, _ := json.Marshal(providerErr)
-			_ = r.publish(request, output, &seq, ExecutionEvent{Kind: EventError, Payload: payload})
-			return r.terminal(request, output, &seq, RunFailed, providerErr)
+			_ = r.publish(request, output, sink, ExecutionEvent{Kind: EventError, Payload: payload})
+			return r.terminal(request, output, sink, RunFailed, providerErr)
 		}
 
 		assistant := llm.Message{Role: "assistant", Content: responseText}
 		if len(toolCalls) == 0 {
 			messages = append(messages, assistant)
-			msgSeqs = append(msgSeqs, seq)
-			return r.terminal(request, output, &seq, RunCompleted, nil)
+			msgSeqs = append(msgSeqs, sink.Sequence())
+			return r.terminal(request, output, sink, RunCompleted, nil)
 		}
 		assistant.ToolUses = toolCalls
 		messages = append(messages, assistant)
-		msgSeqs = append(msgSeqs, seq)
+		msgSeqs = append(msgSeqs, sink.Sequence())
 		toolRounds++
 		if budget.MaxToolRounds > 0 && toolRounds > budget.MaxToolRounds {
-			return r.budgetExhausted(request, output, &seq, "max_tool_rounds")
+			return r.budgetExhausted(request, output, sink, "max_tool_rounds")
 		}
 		if budget.MaxTotalDuration > 0 && time.Since(startedAt) >= budget.MaxTotalDuration {
-			return r.budgetExhausted(request, output, &seq, "max_total_duration")
+			return r.budgetExhausted(request, output, sink, "max_total_duration")
 		}
-		if r.options.ExecutorFactory == nil {
-			return r.terminal(request, output, &seq, RunAwaitingTools, nil)
+		executorFactory := trustedFactory
+		if executorFactory == nil {
+			executorFactory = r.options.ExecutorFactory
+		}
+		if executorFactory == nil {
+			return r.terminal(request, output, sink, RunAwaitingTools, nil)
 		}
 		if executor == nil {
 			var err error
-			executor, err = r.options.ExecutorFactory.ForRun(request)
+			executor, err = executorFactory.ForRun(request)
 			if err != nil || executor == nil {
 				providerErr := &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not initialize tool executor"}
 				payload, _ := json.Marshal(providerErr)
-				_ = r.publish(request, output, &seq, ExecutionEvent{Kind: EventError, Payload: payload})
-				return r.terminal(request, output, &seq, RunFailed, providerErr)
+				_ = r.publish(request, output, sink, ExecutionEvent{Kind: EventError, Payload: payload})
+				return r.terminal(request, output, sink, RunFailed, providerErr)
 			}
 		}
 		if observer, ok := executor.(ApprovalObserver); ok {
 			observer.SetApprovalObserver(func() {
 				payload, _ := json.Marshal(map[string]any{"status": "awaiting_approval"})
-				_ = r.publish(request, output, &seq, ExecutionEvent{Kind: EventAwaitingApproval, Payload: payload})
+				_ = r.publish(request, output, sink, ExecutionEvent{Kind: EventAwaitingApproval, Payload: payload})
 			})
 		}
 		results := make([]llm.ToolResultPart, 0, len(toolCalls))
 		for _, call := range toolCalls {
 			if ctx.Err() != nil {
-				return r.terminal(request, output, &seq, RunCancelled, nil)
+				return r.terminal(request, output, sink, RunCancelled, nil)
 			}
-			startPayload, _ := json.Marshal(map[string]any{"call_id": call.ID, "tool_name": call.Name, "seq": seq + 1})
-			if err := r.publish(request, output, &seq, ExecutionEvent{Kind: EventToolExecStart, Payload: startPayload}); err != nil {
-				return r.terminal(request, output, &seq, RunFailed, &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish tool start event"})
+			startPayload, _ := json.Marshal(map[string]any{"call_id": call.ID, "tool_name": call.Name, "seq": sink.Sequence() + 1})
+			if err := r.publish(request, output, sink, ExecutionEvent{Kind: EventToolExecStart, Payload: startPayload}); err != nil {
+				return r.terminal(request, output, sink, RunFailed, &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish tool start event"})
 			}
 			outcome, err := executor.Execute(ctx, call)
 			if err != nil {
 				if ctx.Err() != nil {
-					return r.terminal(request, output, &seq, RunCancelled, nil)
+					return r.terminal(request, output, sink, RunCancelled, nil)
 				}
 				providerErr := &llm.ProviderError{Class: llm.ErrorProvider, Message: "tool executor failed: " + err.Error()}
 				payload, _ := json.Marshal(providerErr)
-				_ = r.publish(request, output, &seq, ExecutionEvent{Kind: EventError, Payload: payload})
-				return r.terminal(request, output, &seq, RunFailed, providerErr)
+				_ = r.publish(request, output, sink, ExecutionEvent{Kind: EventError, Payload: payload})
+				return r.terminal(request, output, sink, RunFailed, providerErr)
 			}
 			resultPayload, _ := json.Marshal(outcome)
-			if err := r.publish(request, output, &seq, ExecutionEvent{Kind: EventToolExecResult, Payload: resultPayload}); err != nil {
-				return r.terminal(request, output, &seq, RunFailed, &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish tool result event"})
+			if err := r.publish(request, output, sink, ExecutionEvent{Kind: EventToolExecResult, Payload: resultPayload}); err != nil {
+				return r.terminal(request, output, sink, RunFailed, &llm.ProviderError{Class: llm.ErrorProvider, Message: "could not publish tool result event"})
 			}
 			results = append(results, llm.ToolResultPart{ToolUseID: call.ID, Content: outcome.Content, IsError: outcome.IsError})
 		}
 		messages = append(messages, llm.Message{Role: "user", ToolResults: results})
-		msgSeqs = append(msgSeqs, seq)
+		msgSeqs = append(msgSeqs, sink.Sequence())
 	}
 }
 
@@ -342,30 +426,19 @@ func (r *StreamingRunner) runBudget(request ExecutionRequest) ResourceBounds {
 	return parseResourceBounds(request.ResourceBounds, r.options.Budget)
 }
 
-func (r *StreamingRunner) budgetExhausted(request ExecutionRequest, output chan<- ExecutionEvent, seq *uint64, reason string) RunOutcome {
+func (r *StreamingRunner) budgetExhausted(request ExecutionRequest, output chan<- ExecutionEvent, sink *runEventSink, reason string) RunOutcome {
 	payload, _ := json.Marshal(map[string]string{"reason": reason})
-	_ = r.publish(request, output, seq, ExecutionEvent{Kind: EventBudgetExhausted, Payload: payload})
-	return r.terminal(request, output, seq, RunBudgetExhausted, nil)
+	_ = r.publish(request, output, sink, ExecutionEvent{Kind: EventBudgetExhausted, Payload: payload})
+	return r.terminal(request, output, sink, RunBudgetExhausted, nil)
 }
 
-func (r *StreamingRunner) publish(request ExecutionRequest, output chan<- ExecutionEvent, seq *uint64, event ExecutionEvent) error {
-	*seq++
-	id, err := newEventID()
-	if err != nil {
-		return err
-	}
-	event.ID = id
-	event.RunID = request.RunID
-	event.SessionID = request.Work.SessionID
-	event.RunSeq = *seq
-	event.At = time.Now().UTC()
-	output <- event
-	return nil
+func (r *StreamingRunner) publish(_ ExecutionRequest, _ chan<- ExecutionEvent, sink *runEventSink, event ExecutionEvent) error {
+	return sink.Publish(event)
 }
 
-func (r *StreamingRunner) terminal(request ExecutionRequest, output chan<- ExecutionEvent, seq *uint64, status RunStatus, providerErr *llm.ProviderError) RunOutcome {
+func (r *StreamingRunner) terminal(request ExecutionRequest, output chan<- ExecutionEvent, sink *runEventSink, status RunStatus, providerErr *llm.ProviderError) RunOutcome {
 	payload, _ := json.Marshal(map[string]any{"status": status, "error": providerErr})
-	_ = r.publish(request, output, seq, ExecutionEvent{Kind: EventTerminal, Payload: payload})
+	_ = r.publish(request, output, sink, ExecutionEvent{Kind: EventTerminal, Payload: payload})
 	return RunOutcome{RunID: request.RunID, Status: status, Error: providerErr}
 }
 

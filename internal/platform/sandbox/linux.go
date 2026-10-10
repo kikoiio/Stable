@@ -59,7 +59,7 @@ func (m LinuxManager) args(p SandboxProfile, argv []string) ([]string, error) {
 	// /tmp/.X11-unix must exist before Xvfb starts: as a non-root guest Xvfb
 	// will not create the directory itself and exits.
 	args := []string{"--die-with-parent", "--new-session", "--unshare-pid", "--unshare-net", "--clearenv", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", "/tmp/.X11-unix", "--tmpfs", "/home", "--dir", "/workspace", "--dir", "/workspace/project", "--dir", "/workspace/candidate", "--dir", "/workspace/run", "--ro-bind", project, "/workspace/project", "--bind", candidate, "/workspace/candidate", "--bind", run, "/workspace/run"}
-	if len(p.NetworkGrants) > 0 || p.sessionControl {
+	if len(p.NetworkGrants) > 0 || p.sessionControl || len(p.ReadOnlyFiles) > 0 {
 		args = append(args, "--dir", "/run", "--dir", "/workspace/runtime")
 	}
 	for _, path := range []string{"/usr", "/bin", "/lib", "/lib64", "/etc/ssl", "/etc/ld.so.cache"} {
@@ -67,11 +67,43 @@ func (m LinuxManager) args(p SandboxProfile, argv []string) ([]string, error) {
 			args = append(args, "--ro-bind", path, path)
 		}
 	}
+	if p.WorkspaceIsolation {
+		args = append(args, "--cap-drop", "ALL")
+		for _, guestRoot := range []string{"/workspace/project", "/workspace/candidate"} {
+			hostRoot := project
+			if guestRoot == "/workspace/candidate" {
+				hostRoot = candidate
+			}
+			for _, name := range []string{".git", ".stable", ".mewcode"} {
+				info, e := os.Lstat(filepath.Join(hostRoot, name))
+				if os.IsNotExist(e) && guestRoot == "/workspace/project" {
+					continue
+				}
+				if e != nil && !os.IsNotExist(e) {
+					return nil, e
+				}
+				if info != nil && info.Mode()&os.ModeSymlink != 0 {
+					return nil, profileMessage("workspace metadata mask cannot follow symbolic links")
+				}
+				guest := guestRoot + "/" + name
+				if info != nil && !info.IsDir() {
+					args = append(args, "--ro-bind", "/dev/null", guest)
+				} else {
+					args = append(args, "--tmpfs", guest, "--remount-ro", guest)
+				}
+			}
+		}
+	}
 	for _, mount := range p.ReadOnlyMounts {
 		args = append(args, "--dir", mount.GuestPath, "--ro-bind", mount.HostPath, mount.GuestPath)
 	}
 	for _, mount := range p.ReadOnlyFiles {
 		args = append(args, "--ro-bind", mount.HostPath, mount.GuestPath)
+	}
+	if p.WorkspaceVolumeRoot != "" {
+		// All ordinary writable data, including temporary files, stays on the
+		// bounded disk; the root, /home and /dev cannot become memory bypasses.
+		args = append(args, "--bind", run, "/tmp", "--remount-ro", "/home", "--remount-ro", "/dev", "--remount-ro", "/proc", "--remount-ro", "/")
 	}
 	args = append(args, "--chdir", "/workspace/candidate", "--setenv", "HOME", "/tmp", "--setenv", "TMPDIR", "/tmp", "--setenv", "PATH", "/usr/bin:/bin")
 	if p.sessionControl {

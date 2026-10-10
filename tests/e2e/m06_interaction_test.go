@@ -47,11 +47,12 @@ import (
 // the owning test through respond(call, request). Every round's model-visible
 // messages are recorded so tests can assert what the agent actually saw.
 type m06Agent struct {
-	mu      sync.Mutex
-	calls   int
-	seen    [][]llm.Message
-	tools   [][]llm.ToolSchema
-	respond func(call int, req llm.Request) []llm.Event
+	mu        sync.Mutex
+	calls     int
+	seen      [][]llm.Message
+	tools     [][]llm.ToolSchema
+	respond   func(call int, req llm.Request) []llm.Event
+	streamErr func(req llm.Request) error
 }
 
 func (p *m06Agent) Stream(_ context.Context, request llm.Request) (<-chan llm.Event, <-chan error) {
@@ -61,7 +62,18 @@ func (p *m06Agent) Stream(_ context.Context, request llm.Request) (<-chan llm.Ev
 	p.seen = append(p.seen, append([]llm.Message(nil), request.Messages...))
 	p.tools = append(p.tools, append([]llm.ToolSchema(nil), request.Tools...))
 	respond := p.respond
+	streamErr := p.streamErr
 	p.mu.Unlock()
+	if streamErr != nil {
+		if err := streamErr(request); err != nil {
+			out := make(chan llm.Event)
+			close(out)
+			errs := make(chan error, 1)
+			errs <- err
+			close(errs)
+			return out, errs
+		}
+	}
 	events := []llm.Event{
 		{Kind: llm.TextDelta, Text: "M06 script exhausted"},
 		{Kind: llm.StreamEnd},

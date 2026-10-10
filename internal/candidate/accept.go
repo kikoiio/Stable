@@ -48,6 +48,15 @@ type acceptanceTransactionInfo interface {
 	AcceptanceTransaction(context.Context, string) (string, string, error)
 }
 
+type protectedMetadataStore interface {
+	SaveProtectedMetadata(context.Context, string, []ProtectedMetadataFact) error
+	LoadProtectedMetadata(context.Context, string) ([]ProtectedMetadataFact, error)
+}
+
+type acceptanceRootIdentityStore interface {
+	SaveAcceptanceRootIdentities(context.Context, string, string, string) error
+}
+
 type acceptanceJournal struct{ store AcceptanceStore }
 
 func (j acceptanceJournal) Advance(ctx context.Context, id string, from, to TransactionPhase, reason string) error {
@@ -58,6 +67,8 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 	if store == nil {
 		return Receipt{}, errors.New("acceptance journal is unavailable")
 	}
+	unlock := LockProjectTransaction(c.FormalRoot)
+	defer unlock()
 	exists, existingReceipt, hasReceipt, err := store.CheckAcceptance(ctx, decision)
 	if err != nil {
 		return Receipt{}, err
@@ -71,6 +82,31 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 	if err = validateAcceptance(ctx, c, review, decision); err != nil {
 		return Receipt{}, err
 	}
+	var metadataFacts []ProtectedMetadataFact
+	var expectedRootIdentity, targetRootIdentity string
+	if c.ManifestPolicy == ManifestPolicyProject {
+		if err = ValidateProtectedMetadata(c.FormalRoot, c.CandidateRoot); err != nil {
+			return Receipt{}, err
+		}
+		metadataFacts, err = CaptureProtectedMetadata(c.FormalRoot)
+		if err != nil {
+			return Receipt{}, err
+		}
+		expectedRootIdentity, err = CaptureRootIdentity(c.FormalRoot)
+		if err != nil {
+			return Receipt{}, err
+		}
+		targetRootIdentity, err = CaptureRootIdentity(c.CandidateRoot)
+		if err != nil {
+			return Receipt{}, err
+		}
+		if _, ok := store.(acceptanceRootIdentityStore); !ok {
+			return Receipt{}, errors.New("transaction root identity journal is unavailable")
+		}
+		if _, ok := store.(protectedMetadataStore); !ok {
+			return Receipt{}, errors.New("protected metadata journal is unavailable")
+		}
+	}
 	created, err := store.SaveAcceptanceDecision(ctx, decision)
 	if err != nil {
 		return Receipt{}, err
@@ -83,8 +119,19 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 		}
 		return Receipt{}, errors.New("acceptance is pending reconciliation")
 	}
-	_, formalDigest, formalErr := BuildManifest(c.FormalRoot)
-	_, candidateDigest, candidateErr := BuildManifest(c.CandidateRoot)
+	if c.ManifestPolicy == ManifestPolicyProject {
+		if err = store.(acceptanceRootIdentityStore).SaveAcceptanceRootIdentities(ctx, decision.ID, expectedRootIdentity, targetRootIdentity); err != nil {
+			_ = store.SetAcceptancePhase(ctx, decision.ID, "prepared", "blocked", err.Error())
+			return Receipt{}, err
+		}
+		metadataJournal := store.(protectedMetadataStore)
+		if err = metadataJournal.SaveProtectedMetadata(ctx, decision.ID, metadataFacts); err != nil {
+			_ = store.SetAcceptancePhase(ctx, decision.ID, "prepared", "blocked", err.Error())
+			return Receipt{}, fmt.Errorf("protected metadata journal failed: %w", err)
+		}
+	}
+	_, formalDigest, formalErr := BuildManifestForPolicy(c.FormalRoot, c.ManifestPolicy)
+	_, candidateDigest, candidateErr := BuildManifestForPolicy(c.CandidateRoot, c.ManifestPolicy)
 	if formalErr != nil || candidateErr != nil || formalDigest != decision.FormalDigest || candidateDigest != decision.CandidateDigest {
 		reason := "project changed immediately before atomic exchange; review again"
 		if formalErr != nil {
@@ -107,8 +154,8 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 			}
 		}
 	}
-	tx := DirectoryTransaction{ID: decision.ID, Kind: TransactionAcceptance, CurrentRoot: c.FormalRoot, IncomingRoot: c.CandidateRoot, RollbackRoot: rollback, ExpectedDigest: decision.FormalDigest, TargetDigest: decision.CandidateDigest, ServiceRoot: filepath.Join(c.FormalRoot, ".stable"), Mode: mode}
-	if err = NewTransactionCoordinator().Apply(ctx, tx, acceptanceJournal{store: store}); err != nil {
+	tx := DirectoryTransaction{ID: decision.ID, Kind: TransactionAcceptance, ManifestPolicy: c.ManifestPolicy, ProtectedMetadata: metadataFacts, CurrentRoot: c.FormalRoot, IncomingRoot: c.CandidateRoot, RollbackRoot: rollback, ExpectedRootIdentity: expectedRootIdentity, TargetRootIdentity: targetRootIdentity, ExpectedDigest: decision.FormalDigest, TargetDigest: decision.CandidateDigest, ServiceRoot: filepath.Join(c.FormalRoot, ".stable"), Mode: mode}
+	if err = NewTransactionCoordinator().applyLocked(ctx, tx, acceptanceJournal{store: store}); err != nil {
 		_ = store.SetAcceptancePhase(ctx, decision.ID, "prepared", "blocked", err.Error())
 		return Receipt{}, err
 	}
@@ -117,11 +164,24 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 	// directory. Move them back before anyone appends to the transcript. A
 	// crash before this move leaves the logs under the candidate root, where
 	// acceptance recovery can still find them.
-	if moveErr := RestoreServiceRoot(c.FormalRoot, c.CandidateRoot); moveErr != nil {
+	var moveErr error
+	if c.ManifestPolicy == ManifestPolicyProject {
+		moveErr = RestoreProtectedMetadataFacts(c.FormalRoot, c.CandidateRoot, metadataFacts)
+	} else {
+		moveErr = RestoreServiceRoot(c.FormalRoot, c.CandidateRoot)
+	}
+	if moveErr != nil {
 		_ = store.SetAcceptancePhase(ctx, decision.ID, "swapped", "blocked", moveErr.Error())
 		return Receipt{}, fmt.Errorf("project exchanged; session state restore required: %w", moveErr)
 	}
-	_, acceptedDigest, err := BuildManifest(c.FormalRoot)
+	if state, err := NewTransactionCoordinator().Inspect(ctx, tx, PhaseSwapped); err != nil || state != RecoveryNew {
+		if err == nil {
+			err = errors.New("accepted roots changed before finalization")
+		}
+		_ = store.SetAcceptancePhase(ctx, decision.ID, "swapped", "blocked", err.Error())
+		return Receipt{}, err
+	}
+	_, acceptedDigest, err := BuildManifestForPolicy(c.FormalRoot, c.ManifestPolicy)
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -131,6 +191,11 @@ func AcceptCandidate(ctx context.Context, c Candidate, review Review, decision A
 	receipt := Receipt{ID: "receipt-" + decision.ID, DecisionID: decision.ID, CandidateID: c.ID, FormalDigest: acceptedDigest, AcceptedAt: now.UTC()}
 	if err = store.FinalizeAcceptance(ctx, decision, receipt, goalID, actionID); err != nil {
 		return Receipt{}, fmt.Errorf("project exchanged; acceptance recovery required: %w", err)
+	}
+	if c.ManifestPolicy == ManifestPolicyProject && tx.ExpectedRootIdentity != "" {
+		if err = NewTransactionCoordinator().Cleanup(ctx, tx); err != nil {
+			return Receipt{}, fmt.Errorf("acceptance finalized; transaction cleanup required: %w", err)
+		}
 	}
 	return receipt, nil
 }
@@ -142,6 +207,19 @@ func validateAcceptance(ctx context.Context, c Candidate, review Review, decisio
 	if c.Status != "reviewed" && c.Status != "frozen" {
 		return fmt.Errorf("candidate state %q cannot be accepted", c.Status)
 	}
+	candidatePolicy, err := normalizeManifestPolicy(c.ManifestPolicy)
+	if err != nil {
+		return err
+	}
+	if candidatePolicy == ManifestPolicyLegacy {
+		if err := RejectLegacyProtectedMetadata(c.FormalRoot, c.CandidateRoot); err != nil {
+			return err
+		}
+	}
+	reviewPolicy, err := normalizeManifestPolicy(review.ManifestPolicy)
+	if err != nil || reviewPolicy != candidatePolicy {
+		return errors.New("review manifest policy does not match candidate")
+	}
 	if decision.ID == "" || decision.UserID == "" || decision.CandidateID != c.ID {
 		return errors.New("acceptance decision is missing trusted identity or candidate")
 	}
@@ -152,14 +230,14 @@ func validateAcceptance(ctx context.Context, c Candidate, review Review, decisio
 	if err != nil || computedReviewDigest != review.Digest {
 		return errors.New("persisted review content does not match its digest")
 	}
-	_, formalDigest, err := BuildManifest(c.FormalRoot)
+	_, formalDigest, err := BuildManifestForPolicy(c.FormalRoot, c.ManifestPolicy)
 	if err != nil {
 		return err
 	}
 	if formalDigest != review.FormalDigest {
 		return errors.New("formal project changed after preview; review again")
 	}
-	_, candidateDigest, err := BuildManifest(c.CandidateRoot)
+	_, candidateDigest, err := BuildManifestForPolicy(c.CandidateRoot, c.ManifestPolicy)
 	if err != nil {
 		return err
 	}

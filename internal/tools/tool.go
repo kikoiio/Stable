@@ -3,12 +3,17 @@ package tools
 import (
 	"context"
 	"sort"
+	"strings"
 )
 
 // SkipDirs contains directories that are noisy or unsafe to scan recursively.
 var SkipDirs = map[string]bool{
 	".git": true, ".venv": true, "node_modules": true,
 	"__pycache__": true, ".tox": true, ".mypy_cache": true,
+}
+
+func privateMetadataName(name string) bool {
+	return strings.EqualFold(name, ".git") || strings.EqualFold(name, ".stable") || strings.EqualFold(name, ".mewcode")
 }
 
 // MaxOutputChars is the maximum tool-result size passed to callers.

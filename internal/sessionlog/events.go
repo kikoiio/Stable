@@ -58,6 +58,7 @@ func (b Boundary) EffectiveScope() string {
 }
 
 type ToolCall struct {
+	RunID  string `json:"run_id,omitempty"`
 	CallID string `json:"call_id"`
 	Name   string `json:"name"`
 	Input  any    `json:"input,omitempty"`
@@ -69,32 +70,68 @@ type ToolResult struct {
 }
 
 const (
-	EventSessionCreated   = "session_created"
-	EventActivity         = "activity"
-	EventMessage          = "message"
-	EventProposal         = "proposal_reference"
-	EventToolCall         = "tool_call"
-	EventToolResult       = "tool_result"
-	EventBoundary         = "compaction_boundary"
-	EventRunStarted       = "run_started"
-	EventRunEvent         = "run_event"
-	EventSnapshot         = "candidate_snapshot"
-	EventRewind           = "candidate_rewind"
-	EventQuestion         = "pending_question"
-	EventReply            = "question_reply"
-	EventPlanMode         = "plan_mode"
-	EventPlanApproval     = "plan_approval"
-	EventTodo             = "todo_update"
-	EventSkillInventory   = "skill_inventory"
-	EventSkillDelta       = "skill_delta"
-	EventSkillInvoked     = "skill_invoked"
-	EventHookFired        = "hook_fired"
-	EventHookReload       = "hook_reload"
-	EventMCPReload        = "mcp_reload"
-	EventMCPServer        = "mcp_server"
-	EventMemoryAction     = "memory_action"
-	EventMemoryBackground = "memory_background"
+	EventSessionCreated          = "session_created"
+	EventActivity                = "activity"
+	EventMessage                 = "message"
+	EventProposal                = "proposal_reference"
+	EventToolCall                = "tool_call"
+	EventToolResult              = "tool_result"
+	EventBoundary                = "compaction_boundary"
+	EventRunStarted              = "run_started"
+	EventRunEvent                = "run_event"
+	EventSnapshot                = "candidate_snapshot"
+	EventRewind                  = "candidate_rewind"
+	EventQuestion                = "pending_question"
+	EventReply                   = "question_reply"
+	EventPlanMode                = "plan_mode"
+	EventPlanApproval            = "plan_approval"
+	EventTodo                    = "todo_update"
+	EventSkillInventory          = "skill_inventory"
+	EventSkillDelta              = "skill_delta"
+	EventSkillInvoked            = "skill_invoked"
+	EventHookFired               = "hook_fired"
+	EventHookReload              = "hook_reload"
+	EventMCPReload               = "mcp_reload"
+	EventMCPServer               = "mcp_server"
+	EventCoordinatorMode         = "coordinator_mode"
+	EventAgentTaskNotification   = "agent_task_notification"
+	EventWorkspaceToolTransition = "workspace_tool_transition"
+	EventMemoryAction            = "memory_action"
+	EventMemoryBackground        = "memory_background"
 )
+
+const (
+	WorkspaceToolTransitionPending     = "pending"
+	WorkspaceToolTransitionApplied     = "applied"
+	WorkspaceToolTransitionFailed      = "failed"
+	WorkspaceToolTransitionInterrupted = "interrupted"
+)
+
+// WorkspaceToolTransition is a durable request made by a trusted lead tool.
+// It contains only stable IDs and WorkRef data; physical roots and authority
+// are rebuilt by the service when the lead run has terminated.
+type WorkspaceToolTransition struct {
+	ID          string    `json:"id"`
+	SessionID   string    `json:"session_id"`
+	RunID       string    `json:"run_id"`
+	CallID      string    `json:"call_id"`
+	WorkKind    string    `json:"work_kind"`
+	GoalID      string    `json:"goal_id,omitempty"`
+	WorkItemID  string    `json:"work_item_id,omitempty"`
+	Action      string    `json:"action"`
+	WorkspaceID string    `json:"workspace_id,omitempty"`
+	Label       string    `json:"label,omitempty"`
+	CandidateID string    `json:"candidate_id,omitempty"`
+	Status      string    `json:"status"`
+	Error       string    `json:"error,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type CoordinatorMode struct {
+	Enabled bool   `json:"enabled"`
+	TeamID  string `json:"team_id,omitempty"`
+}
 
 // SnapshotRef records a candidate file snapshot owned by this session.
 type SnapshotRef struct {
@@ -222,6 +259,10 @@ const (
 	SkillEntryTool  = "tool"
 )
 
+// SkillModeFork marks an invocation that starts an independent fork run.
+// Empty mode remains the legacy inline-skill representation.
+const SkillModeFork = "fork"
+
 // SkillInfo is the lightweight skill metadata recorded in skill events.
 // Skill bodies never enter the log; they travel through the message or
 // tool-result events that carry the activation.
@@ -249,20 +290,24 @@ type SkillInvoked struct {
 	Source string `json:"source"`
 	Entry  string `json:"entry"`
 	Args   string `json:"args,omitempty"`
+	Mode   string `json:"mode,omitempty"`
+	RunID  string `json:"run_id,omitempty"`
 }
 
 const MaxHookOutput = 8 * 1024
 
 // HookFired records one hook execution that passed its condition.
 type HookFired struct {
-	HookID   string `json:"hook_id"`
-	Event    string `json:"event"`
-	Action   string `json:"action"`
-	Source   string `json:"source,omitempty"`
-	Success  bool   `json:"success"`
-	Rejected bool   `json:"rejected,omitempty"`
-	Output   string `json:"output,omitempty"`
-	RunID    string `json:"run_id,omitempty"`
+	HookID     string `json:"hook_id"`
+	Event      string `json:"event"`
+	Action     string `json:"action"`
+	Source     string `json:"source,omitempty"`
+	Success    bool   `json:"success"`
+	Rejected   bool   `json:"rejected,omitempty"`
+	TimedOut   bool   `json:"timed_out,omitempty"`
+	Output     string `json:"output,omitempty"`
+	RunID      string `json:"run_id,omitempty"`
+	ChildRunID string `json:"child_run_id,omitempty"`
 }
 
 // HookReload records a hooks configuration reload.
@@ -320,11 +365,31 @@ type MemoryBackgroundRecord struct {
 }
 
 type RunStarted struct {
-	RunID      string `json:"run_id"`
-	WorkKind   string `json:"work_kind"`
-	GoalID     string `json:"goal_id,omitempty"`
-	WorkItemID string `json:"work_item_id,omitempty"`
-	Intent     string `json:"intent"`
+	TeamID              string `json:"team_id,omitempty"`
+	TeamMemberID        string `json:"team_member_id,omitempty"`
+	TeamTurnID          string `json:"team_turn_id,omitempty"`
+	RunID               string `json:"run_id"`
+	WorkKind            string `json:"work_kind"`
+	GoalID              string `json:"goal_id,omitempty"`
+	WorkItemID          string `json:"work_item_id,omitempty"`
+	Intent              string `json:"intent"`
+	ForkSkill           string `json:"fork_skill,omitempty"`
+	ForkEntry           string `json:"fork_entry,omitempty"`
+	AgentTaskID         string `json:"agent_task_id,omitempty"`
+	AgentName           string `json:"agent_name,omitempty"`
+	WorkspaceID         string `json:"workspace_id,omitempty"`
+	WorkspaceGeneration uint64 `json:"workspace_generation,omitempty"`
+	OriginRunID         string `json:"origin_run_id,omitempty"`
+	OriginCallID        string `json:"origin_call_id,omitempty"`
+}
+
+// AgentTaskNotification records a terminal summary handed to a later parent
+// run. The destination may not yet have a run_started event; recovery treats
+// such a reference as undelivered until that start has been persisted.
+type AgentTaskNotification struct {
+	TaskID           string `json:"task_id"`
+	TerminalSeq      uint64 `json:"terminal_seq"`
+	DestinationRunID string `json:"destination_run_id"`
 }
 
 type RunEvent struct {

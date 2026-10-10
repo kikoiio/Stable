@@ -283,7 +283,16 @@ func TestProjectionSkillItems(t *testing.T) {
 	if _, err = Append(root, s.ID, EventSkillDelta, SkillDelta{Added: []SkillInfo{{Name: "fresh-skill", Description: "New", WhenToUse: "always", Source: "project"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = Append(root, s.ID, EventSkillInvoked, SkillInvoked{Name: "code-review", Source: "user", Entry: SkillEntrySlash, Args: "focus"}); err != nil {
+	if _, err = Append(root, s.ID, EventRunStarted, RunStarted{
+		RunID: "fork-run-1", WorkKind: "session", Intent: "run skill",
+		ForkSkill: "code-review", ForkEntry: SkillEntrySlash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Append(root, s.ID, EventSkillInvoked, SkillInvoked{
+		Name: "code-review", Source: "user", Entry: SkillEntrySlash, Args: "focus",
+		Mode: SkillModeFork, RunID: "fork-run-1",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	replay, err := Replay(root, s.ID)
@@ -315,7 +324,9 @@ func TestProjectionSkillItems(t *testing.T) {
 	if p.Items[2].SkillInvoked == nil || p.Items[2].SkillInvoked.Name != "code-review" ||
 		p.Items[2].SkillInvoked.Source != "user" ||
 		p.Items[2].SkillInvoked.Entry != SkillEntrySlash ||
-		p.Items[2].SkillInvoked.Args != "focus" {
+		p.Items[2].SkillInvoked.Args != "focus" ||
+		p.Items[2].SkillInvoked.Mode != SkillModeFork ||
+		p.Items[2].SkillInvoked.RunID != "fork-run-1" {
 		t.Fatalf("invoked item = %+v", p.Items[2])
 	}
 }

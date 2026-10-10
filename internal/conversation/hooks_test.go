@@ -45,6 +45,7 @@ func newHookFixture(t *testing.T, userBody, projectBody string) (*Service, *Hook
 	gate := NewHookGate(nil, userPath, projectPath)
 	svc := &Service{deps: Deps{Store: db, ProjectRoot: root}, clients: map[chan ServerMsg]*clientSubscription{}}
 	gate.Bind(svc)
+	t.Cleanup(gate.Close)
 	return svc, gate, root, session.ID, userPath, projectPath
 }
 

@@ -1,0 +1,224 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"stable/internal/llm"
+	"stable/internal/teams"
+)
+
+func validTeamTurnInput() TeamTurnInput {
+	return TeamTurnInput{Identity: TeamTurnIdentity{TeamID: "team-1", MemberID: "member-1", TurnID: "turn-1", MemberName: "researcher"}, Summary: "Previous finding: config.yaml", Messages: []teams.Message{{ID: "message-1", TeamID: "team-1", SenderID: teams.Lead, Recipients: []string{"member-1"}, Body: "Inspect the parser next."}}}
+}
+
+func TestBuildTeamTurnTaskEnforcesEncodedInputAtExactByteLimit(t *testing.T) {
+	input := TeamTurnInput{Identity: TeamTurnIdentity{TeamID: "team-1", MemberID: "member-1", TurnID: "turn-1"}}
+	const taskID = "task-1"
+	probe, err := BuildTeamTurnTask(taskID, "x", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeEncoding, err := json.Marshal([]DelegationTask{probe})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The probe instruction begins with one byte of role text. The JSON task
+	// envelope and the fixed team context contribute the remaining bytes.
+	encodedOverhead := len(probeEncoding) - len(probe.Instruction)
+	instructionBytes := teams.MaxInputBytes - encodedOverhead
+	roleBytes := instructionBytes - (len(probe.Instruction) - 1)
+	if roleBytes <= 0 || roleBytes > teams.MaxInputBytes {
+		t.Fatalf("computed role size %d cannot reach encoded input limit", roleBytes)
+	}
+
+	role := strings.Repeat("x", roleBytes)
+	task, err := BuildTeamTurnTask(taskID, role, input)
+	if err != nil {
+		t.Fatalf("BuildTeamTurnTask at encoded byte limit: %v", err)
+	}
+	if got := len(task.Instruction); got != instructionBytes {
+		t.Fatalf("instruction length=%d, want %d", got, instructionBytes)
+	}
+	encoded, err := json.Marshal([]DelegationTask{task})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) != teams.MaxInputBytes {
+		t.Fatalf("encoded task length=%d, want exact limit %d", len(encoded), teams.MaxInputBytes)
+	}
+
+	tooLongRole := role + "x"
+	if _, err := BuildTeamTurnTask(taskID, tooLongRole, input); err == nil {
+		t.Fatal("BuildTeamTurnTask accepted encoded task one byte over the limit")
+	}
+}
+
+func TestTeamTurnInputIsBoundedReferenceDataAndPreservesFullRole(t *testing.T) {
+	input := validTeamTurnInput()
+	role := "Use concrete file paths and report parser behavior."
+	task, err := BuildTeamTurnTask("task-1", role, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Name != "researcher" || !strings.HasPrefix(task.Instruction, role+"\n") || !strings.Contains(task.Instruction, input.Summary) || !strings.Contains(task.Instruction, input.Messages[0].Body) {
+		t.Fatalf("incorrect team input: %+v", task)
+	}
+	input.PlanFeedback = "Clarify the parser entry point."
+	task, err = BuildTeamTurnTask("task-1", role, input)
+	if err != nil || !strings.Contains(task.Instruction, input.PlanFeedback) {
+		t.Fatalf("plan feedback was not carried as bounded reference data: task=%+v err=%v", task, err)
+	}
+	for _, change := range []func(*TeamTurnInput){
+		func(i *TeamTurnInput) { i.Identity.MemberID = teams.Lead },
+		func(i *TeamTurnInput) { i.Messages[0].TeamID = "team-other" },
+		func(i *TeamTurnInput) { i.Messages[0].Recipients = []string{"member-other"} },
+		func(i *TeamTurnInput) { i.Messages[0].Body = strings.Repeat("x", teams.MaxMessageBytes+1) },
+		func(i *TeamTurnInput) { i.Messages = append(i.Messages, i.Messages[0]) },
+		func(i *TeamTurnInput) { i.Summary = strings.Repeat("x", teams.MaxSummaryBytes+1) },
+		func(i *TeamTurnInput) { i.PlanFeedback = strings.Repeat("x", teams.MaxFeedbackBytes+1) },
+	} {
+		bad := validTeamTurnInput()
+		change(&bad)
+		if _, err := BuildTeamTurnTask("task-1", role, bad); err == nil {
+			t.Fatal("invalid scoped/oversized team reference data accepted")
+		}
+	}
+	if _, err := BuildTeamTurnTask("task-1", strings.Repeat("x", teams.MaxInputBytes), input); err == nil {
+		t.Fatal("encoded role + task exceeds 64 KiB but was accepted")
+	}
+	batch := validTeamTurnInput()
+	batch.Messages = nil
+	for i := 0; i < 5; i++ {
+		message := input.Messages[0]
+		message.ID = "message-" + string(rune('a'+i))
+		message.Body = strings.Repeat("x", teams.MaxMessageBytes)
+		batch.Messages = append(batch.Messages, message)
+	}
+	if _, err := BuildTeamTurnTask("task-1", role, batch); err == nil {
+		t.Fatal("message batch exceeded 32 KiB")
+	}
+}
+
+func TestTeamMemberHardExecutorAllowsOnlyScopedTeamAndRoleInspectionTools(t *testing.T) {
+	inspection := &captureChildExecutor{}
+	var hostCalls []string
+	factory, err := NewTeamMemberExecutorFactory(captureChildFactory{exec: inspection}, []string{"read_file"}, func(_ context.Context, request ExecutionRequest, call llm.ToolUse) (ToolOutcome, error) {
+		if request.RunID != "child-1" {
+			t.Fatal("host tool lost trusted child request")
+		}
+		hostCalls = append(hostCalls, call.Name)
+		return ToolOutcome{CallID: call.ID, ToolName: call.Name, Status: ToolSucceeded}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := factory.ForRun(ExecutionRequest{RunID: "child-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"read_file", "team_send", "team_task_update", "team_plan_submit"} {
+		outcome, err := executor.Execute(context.Background(), llm.ToolUse{ID: "call", Name: name})
+		if err != nil || outcome.Status != ToolSucceeded {
+			t.Fatalf("allowed %s failed: %+v %v", name, outcome, err)
+		}
+	}
+	for _, name := range []string{"grep", "glob", "write_file", "command", "mcp_call", "run_agent", "delegate_tasks", "team_create", "team_member_spawn", "team_member_resume", "team_close", "team_shutdown_request"} {
+		outcome, err := executor.Execute(context.Background(), llm.ToolUse{ID: "call", Name: name})
+		if err != nil || outcome.Status != ToolDenied || !outcome.IsError {
+			t.Fatalf("forbidden %s was dispatched: %+v %v", name, outcome, err)
+		}
+	}
+	if len(inspection.calls) != 1 || inspection.calls[0] != "read_file" || len(hostCalls) != 3 {
+		t.Fatalf("unsafe dispatch: inspection=%v host=%v", inspection.calls, hostCalls)
+	}
+	schemas, err := TeamMemberToolSchemas([]llm.ToolSchema{{Name: "read_file"}, {Name: "grep"}, {Name: "team_send"}, {Name: "team_member_spawn"}, {Name: "command"}, {Name: "team_send"}}, []string{"read_file"})
+	if err != nil || len(schemas) != 2 || schemas[0].Name != "read_file" || schemas[1].Name != "team_send" {
+		t.Fatalf("member schemas=%v err=%v", schemas, err)
+	}
+	if _, err := TeamMemberToolSchemas(nil, []string{"command"}); err == nil {
+		t.Fatal("inspection role could request command")
+	}
+}
+
+func TestWorktreeTeamMemberRoutesOnlyRoleWriterAndScopedTeamTools(t *testing.T) {
+	writer := &captureChildExecutor{}
+	var hostCalls []string
+	factory, err := NewWorktreeTeamMemberExecutorFactory(captureChildFactory{exec: writer}, []string{"read_file", "write_file", "command"}, func(_ context.Context, request ExecutionRequest, call llm.ToolUse) (ToolOutcome, error) {
+		if request.RunID != "member-run" {
+			t.Fatalf("host tool lost trusted child request: %+v", request)
+		}
+		hostCalls = append(hostCalls, call.Name)
+		return ToolOutcome{CallID: call.ID, ToolName: call.Name, Status: ToolSucceeded}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := factory.ForRun(ExecutionRequest{RunID: "member-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"read_file", "write_file", "command", "team_send", "team_task_update"} {
+		outcome, err := executor.Execute(context.Background(), llm.ToolUse{ID: "call", Name: name})
+		if err != nil || outcome.Status != ToolSucceeded {
+			t.Fatalf("allowed %s failed: %+v %v", name, outcome, err)
+		}
+	}
+	for _, name := range []string{"edit_file", "grep", "mcp_call", "run_agent", "delegate_tasks", "team_create", "team_member_spawn", "team_close", "team_shutdown_request"} {
+		outcome, err := executor.Execute(context.Background(), llm.ToolUse{ID: "call", Name: name})
+		if err != nil || outcome.Status != ToolDenied || !outcome.IsError {
+			t.Fatalf("forbidden %s was dispatched: %+v %v", name, outcome, err)
+		}
+	}
+	if len(writer.calls) != 3 || strings.Join(writer.calls, ",") != "read_file,write_file,command" || strings.Join(hostCalls, ",") != "team_send,team_task_update" {
+		t.Fatalf("unexpected tool dispatch: writer=%v host=%v", writer.calls, hostCalls)
+	}
+	if _, err := NewWorktreeTeamMemberExecutorFactory(captureChildFactory{exec: writer}, []string{"team_member_spawn"}, func(context.Context, ExecutionRequest, llm.ToolUse) (ToolOutcome, error) { return ToolOutcome{}, nil }); err == nil {
+		t.Fatal("worktree role accepted non-workspace tool")
+	}
+	schemas, err := WorktreeTeamMemberToolSchemas([]llm.ToolSchema{{Name: "read_file"}, {Name: "write_file"}, {Name: "edit_file"}, {Name: "command"}, {Name: "mcp_call"}, {Name: "team_send"}, {Name: "team_member_spawn"}, {Name: "team_send"}}, []string{"read_file", "write_file", "command"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, len(schemas))
+	for i, schema := range schemas {
+		got[i] = schema.Name
+	}
+	if strings.Join(got, ",") != "read_file,write_file,command,team_send" {
+		t.Fatalf("worktree member schemas exposed wrong tools: %v", got)
+	}
+	if _, err := WorktreeTeamMemberToolSchemas(nil, []string{"mcp_call"}); err == nil {
+		t.Fatal("worktree schema accepted non-workspace tool")
+	}
+}
+
+func TestStreamingTeamTurnGetsMemberGuidanceAndRetainsRolePrivacy(t *testing.T) {
+	input := validTeamTurnInput()
+	role := "PRIVATE_TEAM_ROLE_MARKER must never appear in public results."
+	task, err := BuildTeamTurnTask("task-1", role, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first llm.Request
+	provider := providerFunc(func(_ context.Context, request llm.Request) (<-chan llm.Event, <-chan error) {
+		first = request
+		events := make(chan llm.Event, 3)
+		events <- llm.Event{Kind: llm.ThinkingDelta, Text: "PRIVATE_THINKING_MARKER"}
+		events <- llm.Event{Kind: llm.TextDelta, Text: "Found parser.go. " + role}
+		events <- llm.Event{Kind: llm.StreamEnd}
+		close(events)
+		errs := make(chan error)
+		close(errs)
+		return events, errs
+	})
+	identity := input.Identity
+	result := (StreamingChildRunner{}).Run(context.Background(), ChildRunInput{TeamTurn: &identity, ChildRunID: "child", Work: WorkRef{Kind: WorkSession, SessionID: "session"}, Task: task, RoleInstruction: role, ProjectRoot: "/project", Provider: provider, Model: "fake", PermissionBounds: json.RawMessage(`{"run_id":"child"}`), Budget: DefaultDelegationLimits(), ExecutorFactory: captureChildFactory{exec: &captureChildExecutor{}}})
+	if result.Status != DelegationSucceeded || strings.Contains(result.Summary, "PRIVATE_") || !strings.Contains(result.Summary, "parser.go") {
+		t.Fatalf("team result privacy: %+v", result)
+	}
+	if len(first.Messages) != 2 || !strings.Contains(first.Messages[0].Content, "scoped team") || !strings.Contains(first.Messages[0].Content, "does not grant write") || first.Messages[1].Content != task.Instruction {
+		t.Fatalf("wrong team provider input: %+v", first.Messages)
+	}
+}

@@ -60,3 +60,7 @@ func cmdline(pid int) (string, error) {
 	}
 	return "", errors.New("proc: Darwin command-line query is unavailable in the portable build")
 }
+
+func processStartTime(int) (uint64, error)                   { return 0, ErrTrackedProcessUnavailable }
+func processGroupActive(int) (bool, error)                   { return false, ErrTrackedProcessUnavailable }
+func stopTrackedProcess(TrackedProcess, time.Duration) error { return ErrTrackedProcessUnavailable }

@@ -75,3 +75,21 @@ func TestGlobPlainPatternStillWorks(t *testing.T) {
 		t.Errorf("plain pattern should still match base names, got:\n%s", res.Output)
 	}
 }
+
+func TestGlobNeverExposesRootMetadataFiles(t *testing.T) {
+	root := setupGlobTree(t)
+	for _, name := range []string{".git", ".stable", ".mewcode"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("private"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := (&GlobTool{}).Execute(context.Background(), map[string]any{"pattern": "**/*", "path": root})
+	if result.IsError {
+		t.Fatal(result.Output)
+	}
+	for _, name := range []string{".git", ".stable", ".mewcode"} {
+		if strings.Contains(result.Output, name) {
+			t.Fatalf("glob exposed private metadata %q: %s", name, result.Output)
+		}
+	}
+}

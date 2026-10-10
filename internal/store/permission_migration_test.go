@@ -28,7 +28,7 @@ func TestPermissionAuthorityMigrationFromV7(t *testing.T) {
 		}
 	}
 	var version int
-	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 12 {
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 14 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 }
@@ -54,7 +54,7 @@ func TestPermissionDecisionUserMigrationFromV9(t *testing.T) {
 		t.Fatal("v10 migration did not restore permission decision user identity")
 	}
 	var version int
-	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 12 {
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 14 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 }

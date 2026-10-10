@@ -78,7 +78,7 @@ func appendBoundedSection(b *strings.Builder, title, content string) {
 }
 
 func (s *Service) completeMemoryRun(request agent.ExecutionRequest, cursor uint64) {
-	replay, err := sessionlog.Replay(s.deps.ProjectRoot, request.Work.SessionID)
+	replay, err := sessionlog.Replay(s.sessionProjectRoot(request.Work.SessionID), request.Work.SessionID)
 	if err != nil {
 		return
 	}

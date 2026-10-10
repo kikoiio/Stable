@@ -9,12 +9,15 @@ import (
 	"time"
 
 	"stable/internal/agent"
+	"stable/internal/agentcatalog"
 	"stable/internal/candidate"
 	"stable/internal/core"
 	"stable/internal/mcp"
 	"stable/internal/memory"
 	"stable/internal/permission"
 	"stable/internal/sessionlog"
+	"stable/internal/teams"
+	"stable/internal/workspace"
 )
 
 // ClientMsg is one line of JSON sent from a chat client to the session service.
@@ -53,10 +56,50 @@ type ClientMsg struct {
 	Limit                 int                     `json:"limit,omitempty"`
 	MemoryScope           string                  `json:"memory_scope,omitempty"`
 	MemoryEntry           string                  `json:"memory_entry,omitempty"`
+	AgentName             string                  `json:"agent_name,omitempty"`
+	TaskID                string                  `json:"task_id,omitempty"`
+	TaskTitle             *string                 `json:"task_title,omitempty"`
+	TaskDescription       *string                 `json:"task_description,omitempty"`
+	TaskStatus            *string                 `json:"task_status,omitempty"`
+	TaskAssignee          *string                 `json:"task_assignee,omitempty"`
+	TaskBlockedBy         *[]string               `json:"task_blocked_by,omitempty"`
+	AfterTaskID           string                  `json:"after_task_id,omitempty"`
+	ExpectedRevision      uint64                  `json:"expected_revision,omitempty"`
+	TeamID                string                  `json:"team_id,omitempty"`
+	AfterTeamID           string                  `json:"after_team_id,omitempty"`
+	TeamName              string                  `json:"team_name,omitempty"`
+	TeamRecipient         string                  `json:"team_recipient,omitempty"`
+	TeamToken             string                  `json:"team_token,omitempty"`
+	TeamBroadcast         bool                    `json:"team_broadcast,omitempty"`
+	TeamRequestID         string                  `json:"team_request_id,omitempty"`
+	AfterTeamRequestID    string                  `json:"after_team_request_id,omitempty"`
+	TeamDecision          string                  `json:"team_decision,omitempty"`
+	TeamFeedback          string                  `json:"team_feedback,omitempty"`
+	TeamMemberID          string                  `json:"team_member_id,omitempty"`
+	TeamMemberName        string                  `json:"team_member_name,omitempty"`
+	TeamPlanRequired      bool                    `json:"team_plan_required,omitempty"`
+	TeamAcceptRoleChange  bool                    `json:"team_accept_role_change,omitempty"`
+	WorktreeGeneration    uint64                  `json:"worktree_generation,omitempty"`
+	WorktreePreviewID     string                  `json:"worktree_preview_id,omitempty"`
+	ConflictChoices       map[string]string       `json:"conflict_choices,omitempty"`
+	ConflictAfter         string                  `json:"conflict_after,omitempty"`
+	Isolation             string                  `json:"isolation,omitempty"`
+	WorkKind              string                  `json:"work_kind,omitempty"`
+	GoalID                string                  `json:"goal_id,omitempty"`
+	WorkItemID            string                  `json:"work_item_id,omitempty"`
+	CoordinatorOn         bool                    `json:"coordinator_on,omitempty"`
+	CoordinatorTeamID     string                  `json:"coordinator_team_id,omitempty"`
+	Background            bool                    `json:"background,omitempty"`
+	WaitMS                int                     `json:"wait_ms,omitempty"`
+	TimeoutMS             int                     `json:"timeout_ms,omitempty"`
+	Model                 string                  `json:"model,omitempty"`
 }
 
 // ServerMsg is one line of JSON pushed from the session service to clients.
 type ServerMsg struct {
+	Agents     *agentcatalog.Snapshot         `json:"agents,omitempty"`
+	AgentTask  *agent.AgentTaskSnapshot       `json:"agent_task,omitempty"`
+	AgentTasks []agent.AgentTaskSnapshot      `json:"agent_tasks,omitempty"`
 	Type       string                         `json:"type"` // message | proposal | goal_update | error | done
 	Message    *core.SessionMessage           `json:"message,omitempty"`
 	Proposal   *core.CriteriaProposal         `json:"proposal,omitempty"`
@@ -110,6 +153,19 @@ type ServerMsg struct {
 	RemoteAccessRequests []RemoteAccessRequest              `json:"remote_access_requests,omitempty"`
 	RemoteGrant          *RemoteGrant                       `json:"remote_grant,omitempty"`
 	GoalEvents           []GoalEventSummary                 `json:"goal_events,omitempty"`
+	Teams                []teams.Team                       `json:"teams,omitempty"`
+	Team                 *teams.Team                        `json:"team,omitempty"`
+	TeamTasks            []teams.Task                       `json:"team_tasks,omitempty"`
+	TeamTask             *teams.Task                        `json:"team_task,omitempty"`
+	TeamMessages         []teams.Message                    `json:"team_messages,omitempty"`
+	TeamMessage          *teams.Message                     `json:"team_message,omitempty"`
+	TeamRequests         []teams.Request                    `json:"team_requests,omitempty"`
+	TeamRequest          *teams.Request                     `json:"team_request,omitempty"`
+	Worktrees            []workspace.Snapshot               `json:"worktrees,omitempty"`
+	Worktree             *workspace.Snapshot                `json:"worktree,omitempty"`
+	TeamMember           *teams.Member                      `json:"team_member,omitempty"`
+	CoordinatorOn        bool                               `json:"coordinator_on,omitempty"`
+	CoordinatorTeamID    string                             `json:"coordinator_team_id,omitempty"`
 }
 
 // GoalEventSummary is the payload-free recent-event projection used by the
@@ -183,6 +239,9 @@ type SkillReport struct {
 func validOp(op string) bool {
 	switch op {
 	case "session_list", "session_create", "session_discard", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list", "hooks_list", "hooks_reload", "mcp_list", "mcp_reload", "memory_list", "memory_delete", "memory_clear", "remote_access_request", "remote_access_list", "remote_access_resolve", "remote_access_release", "remote_access_cancel":
+	case "agent_list", "agent_reload", "agent_task_start", "agent_task_list", "agent_task_get", "agent_task_cancel":
+	case "team_create", "team_list", "team_get", "team_close", "team_coordinator", "team_member_spawn", "team_member_resume", "team_member_stop", "team_send", "team_messages", "team_request_list", "team_request_respond", "team_shutdown_request", "team_task_create", "team_task_get", "team_task_list", "team_task_update":
+	case "worktree_create", "worktree_list", "worktree_get", "worktree_enter", "worktree_exit", "worktree_keep", "worktree_export", "worktree_remove", "worktree_preview", "worktree_resolve", "worktree_discard_preview", "worktree_discard":
 		return true
 	}
 	return false
@@ -223,6 +282,36 @@ func validateClient(m ClientMsg) error {
 	case "remote_access_cancel":
 		if m.RemoteAccessRequestID == "" || len(m.RemoteAccessRequestID) > 128 || m.RemoteConnectionID == "" || len(m.RemoteConnectionID) > 128 {
 			return fmt.Errorf("op remote_access_cancel requires request ID and connection ID")
+		}
+	case "team_coordinator":
+		if sessionlog.ValidateID(m.SessionID) != nil || m.RunID != "" || m.ProjectRoot != "" || m.GoalID != "" || m.WorkItemID != "" {
+			return fmt.Errorf("team coordinator mode requires only a session scope")
+		}
+		if m.CoordinatorOn {
+			if sessionlog.ValidateID(m.CoordinatorTeamID) != nil {
+				return fmt.Errorf("enabling team coordinator requires a valid team ID")
+			}
+		} else if m.CoordinatorTeamID != "" {
+			return fmt.Errorf("disabling team coordinator cannot select a team")
+		}
+	case "agent_list", "agent_reload", "agent_task_start", "agent_task_list", "agent_task_get", "agent_task_cancel":
+		if m.Isolation != "" && (m.Op != "agent_task_start" || (m.Isolation != "none" && m.Isolation != "worktree")) {
+			return fmt.Errorf("isolation is only supported for agent_task_start with none or worktree")
+		}
+		if m.SessionID == "" {
+			return fmt.Errorf("op %s requires session_id", m.Op)
+		}
+		if m.Op == "agent_task_start" && (m.AgentName == "" || strings.TrimSpace(m.Text) == "") {
+			return fmt.Errorf("agent_task_start requires agent_name and text")
+		}
+		if (m.Op == "agent_task_get" || m.Op == "agent_task_cancel") && m.TaskID == "" {
+			return fmt.Errorf("op %s requires task_id", m.Op)
+		}
+		if m.WaitMS < 0 || m.WaitMS > 30000 || m.TimeoutMS < 0 || m.TimeoutMS > 180000 || m.Limit < 0 || m.Limit > 100 {
+			return fmt.Errorf("agent task bounds are invalid")
+		}
+		if m.Run != nil || m.RunID != "" || m.ProjectRoot != "" {
+			return fmt.Errorf("agent operations use server-owned execution scope")
 		}
 	case "session_list", "session_create":
 		if m.ProjectRoot == "" {
@@ -281,6 +370,16 @@ func validateClient(m ClientMsg) error {
 		if m.SessionID == "" || m.Run == nil || m.Run.Work.SessionID != m.SessionID || m.Run.Intent == "" {
 			return fmt.Errorf("op run_start requires matching session_id and run request")
 		}
+		if m.CoordinatorOn {
+			return fmt.Errorf("coordinator_on is only supported by team coordinator settings")
+		}
+		if m.Run.Work.Kind == agent.WorkGoal {
+			if m.CoordinatorTeamID != "" && sessionlog.ValidateID(m.CoordinatorTeamID) != nil {
+				return fmt.Errorf("goal coordinator requires a valid team ID")
+			}
+		} else if m.CoordinatorTeamID != "" {
+			return fmt.Errorf("per-run coordinator selection is only supported for Goal runs")
+		}
 	case "run_subscribe":
 		if m.SessionID == "" {
 			return fmt.Errorf("op run_subscribe requires session_id")
@@ -288,6 +387,143 @@ func validateClient(m ClientMsg) error {
 	case "run_cancel":
 		if m.SessionID == "" || m.RunID == "" {
 			return fmt.Errorf("op run_cancel requires session_id and run_id")
+		}
+	case "worktree_create", "worktree_list", "worktree_get", "worktree_enter", "worktree_exit", "worktree_keep", "worktree_export", "worktree_remove", "worktree_preview", "worktree_resolve", "worktree_discard_preview", "worktree_discard":
+		if sessionlog.ValidateID(m.SessionID) != nil || m.Run != nil || m.ProjectRoot != "" || m.RunID != "" && sessionlog.ValidateID(m.RunID) != nil {
+			return fmt.Errorf("op %s requires a valid session scope and server-owned project root", m.Op)
+		}
+		if m.WorkKind == "" {
+			m.WorkKind = "session"
+		}
+		if m.WorkKind != "session" && m.WorkKind != "goal" || m.WorkKind == "session" && (m.GoalID != "" || m.WorkItemID != "") || m.WorkKind == "goal" && (!validComponent(m.GoalID) || !validComponent(m.WorkItemID)) {
+			return fmt.Errorf("invalid worktree work scope")
+		}
+		if m.Op == "worktree_create" {
+			if m.RunID == "" || strings.TrimSpace(m.Text) == "" || m.ID != "" {
+				return fmt.Errorf("worktree_create requires active run_id and label in text")
+			}
+		} else if m.Op == "worktree_list" || m.Op == "worktree_exit" {
+			if m.ID != "" || m.Text != "" || m.Limit < 0 || m.Limit > 100 {
+				return fmt.Errorf("invalid worktree_list request")
+			}
+		} else if sessionlog.ValidateID(m.ID) != nil || m.Text != "" {
+			return fmt.Errorf("op %s requires worktree id", m.Op)
+		}
+		if m.Op == "worktree_resolve" {
+			if sessionlog.ValidateID(m.WorktreePreviewID) != nil || m.WorktreeGeneration == 0 || len(m.ConflictChoices) == 0 || len(m.ConflictChoices) > 100 {
+				return fmt.Errorf("worktree_resolve requires a current preview, generation and bounded per-path choices")
+			}
+			bytes := 0
+			for path, choice := range m.ConflictChoices {
+				clean, err := workspace.CleanRelative(path)
+				bytes += len(path)
+				if err != nil || clean != path || workspace.ProtectedRoot(path) || len(path) > 4096 || bytes > 64<<10 || (choice != workspace.UseFormal && choice != workspace.UseWorkspace) {
+					return fmt.Errorf("invalid worktree conflict choice")
+				}
+			}
+		} else if len(m.ConflictChoices) != 0 || m.WorktreePreviewID != "" {
+			return fmt.Errorf("conflict decisions are only accepted by worktree_resolve")
+		}
+		if m.Op == "worktree_discard" {
+			if sessionlog.ValidateID(m.DecisionID) != nil || len(m.PreviewDigest) != 64 || m.WorktreeGeneration == 0 {
+				return fmt.Errorf("worktree_discard requires a service-issued decision, digest and generation")
+			}
+		}
+		if m.ConflictAfter != "" && m.Op != "worktree_preview" {
+			return fmt.Errorf("conflict cursor is only accepted by worktree_preview")
+		}
+	case "team_create", "team_list", "team_get", "team_close":
+		if m.SessionID == "" {
+			return fmt.Errorf("op %s requires session_id", m.Op)
+		}
+		if m.Run != nil || m.ProjectRoot != "" {
+			return fmt.Errorf("team operations use the persisted run scope and server-bound project root")
+		}
+		if m.Op == "team_list" && (m.Limit < 0 || m.Limit > teams.MaxPageSize || m.AfterTeamID != "" && teams.ValidateID(m.AfterTeamID) != nil) {
+			return fmt.Errorf("team_list requires a bounded page and valid cursor")
+		}
+		if m.Op != "team_list" && (m.Limit != 0 || m.AfterTeamID != "") {
+			return fmt.Errorf("limit and after_team_id are only accepted by team_list")
+		}
+		if m.Op == "team_create" && (m.TeamName == "" || m.RunID == "") {
+			return fmt.Errorf("op team_create requires team_name and active lead run_id")
+		}
+		if (m.Op == "team_get" || m.Op == "team_close") && m.TeamID == "" {
+			return fmt.Errorf("op %s requires team_id", m.Op)
+		}
+	case "team_member_spawn", "team_member_resume":
+		if sessionlog.ValidateID(m.SessionID) != nil || sessionlog.ValidateID(m.RunID) != nil || teams.ValidateID(m.TeamID) != nil || m.Run != nil || m.ProjectRoot != "" {
+			return fmt.Errorf("op %s requires active lead run and team scope", m.Op)
+		}
+		if m.Op == "team_member_spawn" {
+			if m.TeamAcceptRoleChange {
+				return fmt.Errorf("team role change acceptance is only valid when resuming a member")
+			}
+			_, memberNameErr := teams.NormalizeMemberName(m.TeamMemberName)
+			_, agentNameErr := teams.NormalizeName(m.AgentName)
+			if teams.ValidateText(m.TeamMemberName, teams.MaxNameBytes, true) != nil || memberNameErr != nil || teams.ValidateText(m.AgentName, teams.MaxNameBytes, true) != nil || agentNameErr != nil || teams.ValidateText(m.Text, teams.MaxInputBytes, true) != nil || m.TeamMemberID != "" {
+				return fmt.Errorf("team_member_spawn requires member name, role and bounded instruction")
+			}
+		} else if teams.ValidateID(m.TeamMemberID) != nil || m.TeamMemberName != "" || m.AgentName != "" || m.Text != "" || m.TeamPlanRequired {
+			return fmt.Errorf("team_member_resume requires only member_id")
+		}
+	case "team_member_stop":
+		if sessionlog.ValidateID(m.SessionID) != nil || teams.ValidateID(m.TeamID) != nil || teams.ValidateID(m.TeamMemberID) != nil || m.RunID != "" || m.Run != nil || m.ProjectRoot != "" {
+			return fmt.Errorf("team_member_stop requires session, team and member scope")
+		}
+	case "team_task_create", "team_task_get", "team_task_list", "team_task_update":
+		if sessionlog.ValidateID(m.SessionID) != nil || (m.RunID != "" && sessionlog.ValidateID(m.RunID) != nil) || teams.ValidateID(m.TeamID) != nil || m.Run != nil || m.ProjectRoot != "" {
+			return fmt.Errorf("op %s requires session and team scope", m.Op)
+		}
+		switch m.Op {
+		case "team_task_create":
+			if m.TaskTitle == nil || teams.ValidateText(*m.TaskTitle, teams.MaxTaskTitleBytes, true) != nil || (m.TaskDescription != nil && teams.ValidateText(*m.TaskDescription, teams.MaxTaskDescriptionBytes, false) != nil) || m.TaskStatus != nil || m.TaskID != "" || m.ExpectedRevision != 0 || m.Limit != 0 || m.AfterTaskID != "" {
+				return fmt.Errorf("team_task_create requires a bounded title and valid task data")
+			}
+			if m.TaskAssignee != nil && *m.TaskAssignee != "" && teams.ValidateID(*m.TaskAssignee) != nil {
+				return fmt.Errorf("invalid task assignee")
+			}
+			if m.TaskBlockedBy != nil {
+				if len(*m.TaskBlockedBy) > teams.MaxTaskDependencies {
+					return fmt.Errorf("too many task dependencies")
+				}
+				for _, id := range *m.TaskBlockedBy {
+					if teams.ValidateID(id) != nil {
+						return fmt.Errorf("invalid task dependency ID")
+					}
+				}
+			}
+		case "team_task_get":
+			if teams.ValidateID(m.TaskID) != nil || m.TaskTitle != nil || m.TaskDescription != nil || m.TaskStatus != nil || m.TaskAssignee != nil || m.TaskBlockedBy != nil || m.AfterTaskID != "" || m.ExpectedRevision != 0 || m.Limit != 0 {
+				return fmt.Errorf("team_task_get requires only task_id")
+			}
+		case "team_task_list":
+			if m.TaskID != "" || m.TaskTitle != nil || m.TaskDescription != nil || m.TaskStatus != nil || m.TaskAssignee != nil || m.TaskBlockedBy != nil || m.ExpectedRevision != 0 || m.Limit < 0 || m.Limit > teams.MaxPageSize || m.AfterTaskID != "" && teams.ValidateID(m.AfterTaskID) != nil {
+				return fmt.Errorf("team_task_list requires a bounded page and valid cursor")
+			}
+		case "team_task_update":
+			if teams.ValidateID(m.TaskID) != nil || m.ExpectedRevision == 0 || (m.TaskTitle == nil && m.TaskDescription == nil && m.TaskStatus == nil && m.TaskAssignee == nil && m.TaskBlockedBy == nil) || m.Limit != 0 || m.AfterTaskID != "" {
+				return fmt.Errorf("team_task_update requires task_id, expected_revision and a patch")
+			}
+			if (m.TaskTitle != nil && teams.ValidateText(*m.TaskTitle, teams.MaxTaskTitleBytes, true) != nil) || (m.TaskDescription != nil && teams.ValidateText(*m.TaskDescription, teams.MaxTaskDescriptionBytes, false) != nil) {
+				return fmt.Errorf("team task patch text is invalid")
+			}
+			if m.TaskStatus != nil && *m.TaskStatus != string(teams.TaskPending) && *m.TaskStatus != string(teams.TaskInProgress) && *m.TaskStatus != string(teams.TaskCompleted) {
+				return fmt.Errorf("invalid team task status")
+			}
+			if m.TaskAssignee != nil && *m.TaskAssignee != "" && teams.ValidateID(*m.TaskAssignee) != nil {
+				return fmt.Errorf("invalid task assignee")
+			}
+			if m.TaskBlockedBy != nil {
+				if len(*m.TaskBlockedBy) > teams.MaxTaskDependencies {
+					return fmt.Errorf("too many task dependencies")
+				}
+				for _, id := range *m.TaskBlockedBy {
+					if teams.ValidateID(id) != nil {
+						return fmt.Errorf("invalid task dependency ID")
+					}
+				}
+			}
 		}
 	case "review_get":
 		if m.CandidateID == "" || m.SessionID == "" {
@@ -363,6 +599,41 @@ func validateClient(m ClientMsg) error {
 			}
 		default:
 			return fmt.Errorf("invalid plan approval choice")
+		}
+	case "team_send":
+		if sessionlog.ValidateID(m.SessionID) != nil || (m.RunID != "" && sessionlog.ValidateID(m.RunID) != nil) || teams.ValidateID(m.TeamID) != nil || m.TeamToken == "" || teams.ValidateText(m.Text, teams.MaxMessageBytes, true) != nil || m.Run != nil || m.ProjectRoot != "" {
+			return fmt.Errorf("op team_send requires session, team, token and bounded message text")
+		}
+		if m.TeamBroadcast && m.TeamRecipient != "" {
+			return fmt.Errorf("op team_send broadcast cannot specify a recipient")
+		}
+		if !m.TeamBroadcast && m.TeamRecipient == "" {
+			return fmt.Errorf("op team_send requires a recipient unless broadcasting")
+		}
+		if teams.ValidateText(m.TeamToken, 256, true) != nil {
+			return fmt.Errorf("op team_send token is invalid")
+		}
+	case "team_messages":
+		if sessionlog.ValidateID(m.SessionID) != nil || (m.RunID != "" && sessionlog.ValidateID(m.RunID) != nil) || teams.ValidateID(m.TeamID) != nil || m.Limit < 0 || m.Limit > teams.MaxPageSize || m.Run != nil || m.ProjectRoot != "" {
+			return fmt.Errorf("op team_messages requires session, team and bounded page size")
+		}
+	case "team_request_list", "team_request_respond", "team_shutdown_request":
+		if sessionlog.ValidateID(m.SessionID) != nil || teams.ValidateID(m.TeamID) != nil || m.Run != nil || m.ProjectRoot != "" {
+			return fmt.Errorf("op %s requires session and team scope", m.Op)
+		}
+		switch m.Op {
+		case "team_request_list":
+			if m.Limit < 0 || m.Limit > teams.MaxPageSize || m.AfterTeamRequestID != "" && teams.ValidateID(m.AfterTeamRequestID) != nil {
+				return fmt.Errorf("team_request_list requires a bounded page and valid cursor")
+			}
+		case "team_request_respond":
+			if m.Limit != 0 || m.AfterTeamRequestID != "" || teams.ValidateID(m.TeamRequestID) != nil || m.ExpectedRevision == 0 || (m.TeamDecision != string(teams.RequestApproved) && m.TeamDecision != string(teams.RequestRejected) && m.TeamDecision != string(teams.RequestDeferred)) || teams.ValidateText(m.TeamFeedback, teams.MaxFeedbackBytes, false) != nil {
+				return fmt.Errorf("team_request_respond requires a current request revision and bounded response")
+			}
+		case "team_shutdown_request":
+			if m.Limit != 0 || m.AfterTeamRequestID != "" || teams.ValidateID(m.TeamMemberID) != nil {
+				return fmt.Errorf("team_shutdown_request requires member_id")
+			}
 		}
 	}
 	return nil

@@ -91,6 +91,10 @@ type failingSnapshots struct {
 }
 
 func (f *failingSnapshots) Create(sessionID, candidateID, runID, label, _ string) (candidate.FileSnapshot, error) {
+	return f.CreateForPolicy(sessionID, candidateID, runID, label, "", candidate.ManifestPolicyLegacy)
+}
+
+func (f *failingSnapshots) CreateForPolicy(sessionID, candidateID, runID, label, _, _ string) (candidate.FileSnapshot, error) {
 	f.calls++
 	if f.calls > f.failAfter {
 		return candidate.FileSnapshot{}, errors.New("snapshot quota exhausted")

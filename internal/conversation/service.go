@@ -2,39 +2,55 @@ package conversation
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
 
 	"stable/internal/agent"
+	"stable/internal/agentcatalog"
 	"stable/internal/candidate"
 	"stable/internal/core"
 	"stable/internal/decision"
+	"stable/internal/execution"
 	"stable/internal/llm"
 	"stable/internal/mcp"
 	"stable/internal/permission"
 	"stable/internal/platform/ipc"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
+	"stable/internal/teams"
+	"stable/internal/workspace"
 )
 
 type Deps struct {
-	Store              *store.Store
-	Provider           decision.StructuredProvider
-	ChatProvider       decision.ChatProvider
-	Runner             agent.Runner
-	ExecutorFactory    agent.ExecutorFactory
-	ToolSchemas        []llm.ToolSchema
-	ProviderName       string
-	Model              string
-	RunnerError        string
-	CandidateCheckers  []candidate.Checker
-	PermissionService  *permission.PermissionService
-	ProviderCredential string
-	Temporal           string
-	ProjectRoot        string
-	RunRoot            string
-	SocketPath         string
+	Store               *store.Store
+	Provider            decision.StructuredProvider
+	ChatProvider        decision.ChatProvider
+	Runner              agent.Runner
+	Delegator           agent.Delegator
+	Agents              agentcatalog.Catalog
+	AgentTasks          *AgentTaskCoordinator
+	ForkProvider        llm.Provider
+	ForkExecutorFactory agent.ExecutorFactory
+	ForkToolSchemas     []llm.ToolSchema
+	ExecutorFactory     agent.ExecutorFactory
+	ToolSchemas         []llm.ToolSchema
+	ProviderName        string
+	Model               string
+	RunnerError         string
+	CandidateCheckers   []candidate.Checker
+	PermissionService   *permission.PermissionService
+	ProviderCredential  string
+	Temporal            string
+	ProjectRoot         string
+	RunRoot             string
+	// WorkspaceStateRoot is a service-owned directory outside the project.
+	// Empty disables worktree lifecycle operations.
+	WorkspaceStateRoot     string
+	WorkspaceLifecycleHost *execution.WorkspaceLifecycleToolHost
+	SocketPath             string
 	// ContextWindowTokens overrides the model context window used for
 	// compaction; zero resolves to the sessioncontext default.
 	ContextWindowTokens int
@@ -57,12 +73,17 @@ type Deps struct {
 // events. Client connections are thin terminals; all state lives here and in
 // the store.
 type Service struct {
-	deps       Deps
-	ln         net.Listener
-	mu         sync.Mutex
-	clients    map[chan ServerMsg]*clientSubscription
-	statuses   map[string]core.GoalStatus
-	activeRuns map[string]string
+	deps           Deps
+	lifeCtx        context.Context
+	ln             net.Listener
+	mu             sync.Mutex
+	clients        map[chan ServerMsg]*clientSubscription
+	statuses       map[string]core.GoalStatus
+	activeRuns     map[string]string
+	activeRequests map[string]agent.ExecutionRequest
+	runDone        map[string]chan struct{}
+	activeForkRuns map[string]*forkRunState
+	closing        bool
 	// ephemeralRoots binds short-lived sessions to the project root explicitly
 	// selected by the local print client. The binding is service-only and is
 	// discarded with the session.
@@ -102,6 +123,23 @@ type Service struct {
 	memory          *MemoryGate
 	mcpMu           sync.Mutex
 	mcpInstructions map[string]bool
+	teamScheduler   *teamScheduler
+	teamUserMu      sync.Mutex
+	teamUserSecret  [32]byte
+	teamUserReady   bool
+	// teamMemberStateAppender is an optional per-service persistence seam used
+	// to exercise recovery of a failed state append. Nil uses the session log.
+	teamMemberStateAppender func(root string, team teams.Team, runID, actor string, member teams.Member) error
+	workspaceMu             sync.Mutex
+	workspaceAdmissionMu    sync.Mutex
+	workspaceTransitionMu   sync.Mutex
+	workspaces              map[string]*workspace.LifecycleService
+	workspaceRuns           map[string]workspaceLeadRun
+}
+
+type workspaceLeadRun struct {
+	lease   workspace.WriterLease
+	manager *workspace.LifecycleService
 }
 
 type clientSubscription struct {
@@ -116,11 +154,32 @@ func Serve(ctx context.Context, deps Deps) (*Service, error) {
 	if deps.PollEvery <= 0 {
 		deps.PollEvery = 2 * time.Second
 	}
+	if err := recoverAgentTaskRuns(deps.ProjectRoot); err != nil {
+		return nil, fmt.Errorf("recover agent tasks: %w", err)
+	}
+	if err := recoverDelegationRuns(deps.ProjectRoot); err != nil {
+		return nil, fmt.Errorf("recover interrupted delegations: %w", err)
+	}
+	if err := recoverTeamRuns(deps.ProjectRoot); err != nil {
+		return nil, fmt.Errorf("recover interrupted team turns: %w", err)
+	}
 	ln, err := ipc.ListenPrivate(deps.SocketPath, true)
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{deps: deps, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, ephemeralRoots: map[string]string{}, remoteRoots: map[string]string{}, remoteAccess: NewRemoteAccessRegistry(), notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks, mcp: deps.MCP, memory: deps.Memory, mcpInstructions: map[string]bool{}}
+	s := &Service{deps: deps, lifeCtx: ctx, ln: ln, clients: map[chan ServerMsg]*clientSubscription{}, statuses: map[string]core.GoalStatus{}, activeRuns: map[string]string{}, activeRequests: map[string]agent.ExecutionRequest{}, runDone: map[string]chan struct{}{}, activeForkRuns: map[string]*forkRunState{}, ephemeralRoots: map[string]string{}, remoteRoots: map[string]string{}, remoteAccess: NewRemoteAccessRegistry(), notifiedApprovals: map[string]bool{}, skills: deps.Skills, hooks: deps.Hooks, mcp: deps.MCP, memory: deps.Memory, mcpInstructions: map[string]bool{}, workspaces: map[string]*workspace.LifecycleService{}, workspaceRuns: map[string]workspaceLeadRun{}}
+	if deps.WorkspaceLifecycleHost != nil {
+		deps.WorkspaceLifecycleHost.Bind(s.executeWorkspaceLifecycleTool)
+	}
+	if deps.WorkspaceStateRoot != "" {
+		if err := s.recoverWorkspaceToolTransitions(); err != nil {
+			return nil, fmt.Errorf("recover workspace lifecycle tool transitions: %w", err)
+		}
+	}
+	s.teamScheduler = newTeamScheduler(s)
+	if deps.AgentTasks != nil {
+		deps.AgentTasks.Bind(s)
+	}
 	if deps.Skills != nil {
 		deps.Skills.Bind(s)
 	}
@@ -143,7 +202,10 @@ func (s *Service) acceptLoop(ctx context.Context) {
 	for {
 		conn, err := s.ln.Accept()
 		if err != nil {
-			if ctx.Err() == nil {
+			s.mu.Lock()
+			closing := s.closing
+			s.mu.Unlock()
+			if ctx.Err() == nil && !closing {
 				continue
 			}
 			return
@@ -153,10 +215,68 @@ func (s *Service) acceptLoop(ctx context.Context) {
 }
 
 func (s *Service) Close() error {
+	s.workspaceAdmissionMu.Lock()
+	s.mu.Lock()
+	s.closing = true
+	for _, run := range s.activeForkRuns {
+		run.cancel()
+	}
+	runIDs := make([]string, 0, len(s.activeRuns))
+	done := make([]<-chan struct{}, 0, len(s.runDone))
+	for runID := range s.activeRuns {
+		runIDs = append(runIDs, runID)
+	}
+	for _, finished := range s.runDone {
+		done = append(done, finished)
+	}
+	s.mu.Unlock()
+	s.workspaceAdmissionMu.Unlock()
+	var closeErr error
+	if err := s.ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		closeErr = errors.Join(closeErr, err)
+	}
+	if s.deps.Runner != nil {
+		for _, runID := range runIDs {
+			closeErr = errors.Join(closeErr, s.deps.Runner.Cancel(runID))
+		}
+	}
+	if s.deps.AgentTasks != nil {
+		s.deps.AgentTasks.Close()
+	}
+	if s.teamScheduler != nil {
+		s.teamScheduler.close()
+		s.teamScheduler.mu.Lock()
+		for _, writer := range s.teamScheduler.workspaceRuns {
+			if writer.done != nil {
+				done = append(done, writer.done)
+			}
+		}
+		s.teamScheduler.mu.Unlock()
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, finished := range done {
+		select {
+		case <-finished:
+		case <-waitCtx.Done():
+			// A live run may still own a workspace writer. Leave its manager
+			// and durable lease open so restart recovery can mark it interrupted.
+			return errors.Join(closeErr, fmt.Errorf("wait for active runs before closing workspace managers: %w", waitCtx.Err()))
+		}
+	}
+	if s.hooks != nil {
+		s.hooks.Close()
+	}
 	if s.remoteAccess != nil {
 		s.remoteAccess.Close()
 	}
-	return s.ln.Close()
+	s.workspaceMu.Lock()
+	for key, manager := range s.workspaces {
+		closeErr = errors.Join(closeErr, manager.Close(context.Background()))
+		delete(s.workspaces, key)
+	}
+	s.workspaceMu.Unlock()
+	return closeErr
 }
 
 func (s *Service) serveConn(ctx context.Context, conn net.Conn) {
@@ -226,6 +346,16 @@ func (s *Service) readLoop(ctx context.Context, conn net.Conn, updates chan Serv
 			continue
 		}
 		switch c.Op {
+		case "agent_list", "agent_reload", "agent_task_start", "agent_task_list", "agent_task_get", "agent_task_cancel":
+			msgs, err := s.handleAgentRequest(ctx, c)
+			for _, msg := range msgs {
+				updates <- msg
+			}
+			if err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			}
+			updates <- ServerMsg{Type: "done"}
+			continue
 		case "run_start":
 			if err := s.startRun(ctx, c, updates); err != nil {
 				updates <- ServerMsg{Type: "error", Error: err.Error()}
@@ -261,6 +391,27 @@ func (s *Service) readLoop(ctx context.Context, conn net.Conn, updates chan Serv
 				for _, message := range messages {
 					updates <- message
 				}
+			}
+			updates <- ServerMsg{Type: "done"}
+			continue
+		case "team_create", "team_list", "team_get", "team_close", "team_coordinator", "team_member_spawn", "team_member_resume", "team_member_stop", "team_send", "team_messages", "team_request_list", "team_request_respond", "team_shutdown_request", "team_task_create", "team_task_get", "team_task_list", "team_task_update":
+			msg, err := s.handleTeamRequest(ctx, c)
+			if err != nil {
+				if errors.Is(err, teams.ErrRevisionConflict) && msg.TeamTask != nil {
+					updates <- msg
+				}
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			} else {
+				updates <- msg
+			}
+			updates <- ServerMsg{Type: "done"}
+			continue
+		case "worktree_create", "worktree_list", "worktree_get", "worktree_enter", "worktree_exit", "worktree_preview", "worktree_keep", "worktree_export", "worktree_remove", "worktree_resolve", "worktree_discard_preview", "worktree_discard":
+			msg, err := s.handleWorkspaceRequest(ctx, c)
+			if err != nil {
+				updates <- ServerMsg{Type: "error", Error: err.Error()}
+			} else {
+				updates <- msg
 			}
 			updates <- ServerMsg{Type: "done"}
 			continue

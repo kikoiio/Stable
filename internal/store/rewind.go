@@ -25,18 +25,21 @@ const (
 
 // RewindJournal tracks one candidate rewind attempt.
 type RewindJournal struct {
-	ID              string
-	CandidateID     string
-	SnapshotID      string
-	Phase           string
-	ExpectedDigest  string // candidate digest before the rewind
-	TargetDigest    string // snapshot digest to restore
-	StagingDir      string
-	TransactionMode string
-	RollbackPath    string
-	Reason          string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ExpectedRootIdentity string
+	TargetRootIdentity   string
+	ID                   string
+	CandidateID          string
+	SnapshotID           string
+	Phase                string
+	ExpectedDigest       string // candidate digest before the rewind
+	TargetDigest         string // snapshot digest to restore
+	StagingDir           string
+	TransactionMode      string
+	RollbackPath         string
+	ManifestPolicy       string
+	Reason               string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 // BeginRewind records a prepared rewind. Only one unfinished rewind may
@@ -57,7 +60,28 @@ func (s *Store) BeginRewind(ctx context.Context, j RewindJournal) error {
 	if j.RollbackPath == "" {
 		j.RollbackPath = j.StagingDir + ".rollback"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO rewind_journal(id,candidate_id,snapshot_id,phase,transaction_mode,rollback_path,expected_digest,target_digest,staging_dir,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, j.ID, j.CandidateID, j.SnapshotID, RewindPrepared, j.TransactionMode, j.RollbackPath, j.ExpectedDigest, j.TargetDigest, j.StagingDir, "", j.CreatedAt.UTC().Format(time.RFC3339Nano), j.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	if j.ManifestPolicy == "" {
+		if err := s.db.QueryRowContext(ctx, `SELECT manifest_policy FROM candidates WHERE id=?`, j.CandidateID).Scan(&j.ManifestPolicy); err != nil {
+			return err
+		}
+	}
+	var root string
+	if err := s.db.QueryRowContext(ctx, `SELECT candidate_root FROM candidates WHERE id=?`, j.CandidateID).Scan(&root); err != nil {
+		return err
+	}
+	expected, err := candidate.CaptureRootIdentity(root)
+	if err != nil {
+		return err
+	}
+	target, err := candidate.CaptureRootIdentity(j.StagingDir)
+	if err != nil {
+		return err
+	}
+	if j.ExpectedRootIdentity != "" && j.ExpectedRootIdentity != expected || j.TargetRootIdentity != "" && j.TargetRootIdentity != target {
+		return errors.New("rewind root identity changed")
+	}
+	j.ExpectedRootIdentity, j.TargetRootIdentity = expected, target
+	_, err = s.db.ExecContext(ctx, `INSERT INTO rewind_journal(id,candidate_id,snapshot_id,phase,transaction_mode,rollback_path,manifest_policy,expected_root_identity,target_root_identity,expected_digest,target_digest,staging_dir,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, j.ID, j.CandidateID, j.SnapshotID, RewindPrepared, j.TransactionMode, j.RollbackPath, j.ManifestPolicy, j.ExpectedRootIdentity, j.TargetRootIdentity, j.ExpectedDigest, j.TargetDigest, j.StagingDir, "", j.CreatedAt.UTC().Format(time.RFC3339Nano), j.UpdatedAt.UTC().Format(time.RFC3339Nano))
 	return err
 }
 
@@ -92,7 +116,7 @@ func validRewindTransition(from, to string) bool {
 
 // UnfinishedRewinds lists journals needing recovery, oldest first.
 func (s *Store) UnfinishedRewinds(ctx context.Context) ([]RewindJournal, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,candidate_id,snapshot_id,phase,expected_digest,target_digest,staging_dir,reason,created_at,updated_at,transaction_mode,rollback_path FROM rewind_journal WHERE phase IN ('prepared','old_saved','target_installed','swapped') ORDER BY updated_at,id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,candidate_id,snapshot_id,phase,expected_digest,target_digest,staging_dir,reason,created_at,updated_at,transaction_mode,rollback_path,manifest_policy,expected_root_identity,target_root_identity FROM rewind_journal WHERE phase IN ('prepared','old_saved','target_installed','swapped') ORDER BY updated_at,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +135,7 @@ func (s *Store) UnfinishedRewinds(ctx context.Context) ([]RewindJournal, error) 
 // UnfinishedRewindFor returns the candidate's open rewind, if any. Accept
 // and new rewind requests must refuse while one exists.
 func (s *Store) UnfinishedRewindFor(ctx context.Context, candidateID string) (RewindJournal, bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,candidate_id,snapshot_id,phase,expected_digest,target_digest,staging_dir,reason,created_at,updated_at,transaction_mode,rollback_path FROM rewind_journal WHERE candidate_id=? AND phase IN ('prepared','old_saved','target_installed','swapped') ORDER BY updated_at DESC LIMIT 1`, candidateID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,candidate_id,snapshot_id,phase,expected_digest,target_digest,staging_dir,reason,created_at,updated_at,transaction_mode,rollback_path,manifest_policy,expected_root_identity,target_root_identity FROM rewind_journal WHERE candidate_id=? AND phase IN ('prepared','old_saved','target_installed','swapped') ORDER BY updated_at DESC LIMIT 1`, candidateID)
 	if err != nil {
 		return RewindJournal{}, false, err
 	}
@@ -130,7 +154,7 @@ type rewindScanner interface {
 func scanRewind(rows rewindScanner) (RewindJournal, error) {
 	var j RewindJournal
 	var created, updated string
-	err := rows.Scan(&j.ID, &j.CandidateID, &j.SnapshotID, &j.Phase, &j.ExpectedDigest, &j.TargetDigest, &j.StagingDir, &j.Reason, &created, &updated, &j.TransactionMode, &j.RollbackPath)
+	err := rows.Scan(&j.ID, &j.CandidateID, &j.SnapshotID, &j.Phase, &j.ExpectedDigest, &j.TargetDigest, &j.StagingDir, &j.Reason, &created, &updated, &j.TransactionMode, &j.RollbackPath, &j.ManifestPolicy, &j.ExpectedRootIdentity, &j.TargetRootIdentity)
 	if err != nil {
 		return j, err
 	}
@@ -188,6 +212,55 @@ func (s *Store) ReconcileRewinds(ctx context.Context) error {
 			return err
 		}
 	}
+	// FinalizeRewind commits the database before Cleanup removes the spent
+	// staging root. If the process stops between those operations, the journal
+	// is no longer unfinished, so recover cleanup from finalized
+	// journals whose candidate digest proves that the rewind committed.
+	rows, err := s.db.QueryContext(ctx, `SELECT id,candidate_id,snapshot_id,phase,expected_digest,target_digest,staging_dir,reason,created_at,updated_at,transaction_mode,rollback_path,manifest_policy,expected_root_identity,target_root_identity FROM rewind_journal WHERE phase='finalized' AND expected_root_identity<>'' AND target_root_identity<>'' ORDER BY updated_at,id`)
+	if err != nil {
+		return err
+	}
+	var finalized []RewindJournal
+	for rows.Next() {
+		j, scanErr := scanRewind(rows)
+		if scanErr != nil {
+			rows.Close()
+			return scanErr
+		}
+		finalized = append(finalized, j)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	for _, j := range finalized {
+		rec, getErr := s.GetCandidate(ctx, j.CandidateID)
+		if getErr != nil {
+			return getErr
+		}
+		if rec.Candidate.Status != "ready" || rec.Candidate.CandidateDigest != j.TargetDigest {
+			continue
+		}
+		policy := j.ManifestPolicy
+		if policy == "" {
+			policy = candidate.ManifestPolicyLegacy
+		}
+		if rec.Candidate.ManifestPolicy != policy {
+			return errors.New("finalized rewind candidate and journal manifest policies differ")
+		}
+		tx := candidate.DirectoryTransaction{
+			ID: j.ID, Kind: candidate.TransactionRewind, ManifestPolicy: policy,
+			ExpectedRootIdentity: j.ExpectedRootIdentity, TargetRootIdentity: j.TargetRootIdentity,
+			CurrentRoot: rec.Candidate.CandidateRoot, IncomingRoot: j.StagingDir, RollbackRoot: j.RollbackPath,
+			ExpectedDigest: j.ExpectedDigest, TargetDigest: j.TargetDigest, Mode: j.TransactionMode,
+		}
+		if err = candidate.NewTransactionCoordinator().Cleanup(ctx, tx); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -199,61 +272,94 @@ func (s *Store) reconcileRewind(ctx context.Context, j RewindJournal) error {
 	if rec.Candidate.FormalRoot == rec.Candidate.CandidateRoot {
 		return s.blockRewind(ctx, j, errors.New("rewind target is the formal project"))
 	}
-	_, digest, err := candidate.BuildManifest(rec.Candidate.CandidateRoot)
-	if err != nil {
-		return s.blockRewind(ctx, j, err)
-	}
-	if j.Phase == RewindOldSaved || j.Phase == RewindTargetInstalled {
-		tx := candidate.DirectoryTransaction{ID: j.ID, Kind: candidate.TransactionRewind, CurrentRoot: rec.Candidate.CandidateRoot, IncomingRoot: j.StagingDir, RollbackRoot: j.RollbackPath, ExpectedDigest: j.ExpectedDigest, TargetDigest: j.TargetDigest, Mode: j.TransactionMode}
-		if tx.Mode == "" {
-			tx.Mode = "atomic-exchange"
+	if j.ManifestPolicy == candidate.ManifestPolicyLegacy || j.ManifestPolicy == "" {
+		if j.ExpectedRootIdentity == "" || j.TargetRootIdentity == "" {
+			return s.blockRewind(ctx, j, errors.New("legacy rewind root identities are missing; retain paths for explicit reconciliation"))
 		}
-		if err = candidate.NewTransactionCoordinator().Recover(ctx, tx, candidate.TransactionPhase(j.Phase), rewindJournalAdapter{store: s}); err != nil {
+		if err := candidate.RejectLegacyProtectedMetadata(rec.Candidate.CandidateRoot, j.StagingDir, j.RollbackPath); err != nil {
 			return s.blockRewind(ctx, j, err)
 		}
-		_, digest, err = candidate.BuildManifest(rec.Candidate.CandidateRoot)
+	}
+	if j.ExpectedRootIdentity == "" || j.TargetRootIdentity == "" {
+		return s.blockRewind(ctx, j, errors.New("rewind root identities are missing; retain paths for explicit reconciliation"))
+	}
+	if j.Phase == RewindPrepared {
+		discarded, err := s.discardEmptyPreparedRewind(ctx, j, rec.Candidate)
 		if err != nil {
 			return s.blockRewind(ctx, j, err)
 		}
+		if discarded {
+			return nil
+		}
 	}
-	switch digest {
-	case j.ExpectedDigest:
-		if j.Phase == RewindPrepared {
-			if _, stagedDigest, stagedErr := candidate.BuildManifest(j.StagingDir); stagedErr == nil && stagedDigest == j.TargetDigest {
-				tx := candidate.DirectoryTransaction{ID: j.ID, Kind: candidate.TransactionRewind, CurrentRoot: rec.Candidate.CandidateRoot, IncomingRoot: j.StagingDir, RollbackRoot: j.RollbackPath, ExpectedDigest: j.ExpectedDigest, TargetDigest: j.TargetDigest, Mode: j.TransactionMode}
-				if tx.Mode == "" {
-					tx.Mode = "atomic-exchange"
-				}
-				if err = candidate.NewTransactionCoordinator().Apply(ctx, tx, rewindJournalAdapter{store: s}); err != nil {
-					return s.blockRewind(ctx, j, err)
-				}
-				if err = s.FinalizeRewind(ctx, j); err != nil {
-					return s.blockRewind(ctx, j, err)
-				}
-				_ = os.RemoveAll(j.StagingDir)
-				return nil
-			} else {
-				// The staging directory was never a valid target; discard it.
-				_ = os.RemoveAll(j.StagingDir)
-				return s.SetRewindPhase(ctx, j.ID, j.Phase, RewindFinalized, "interrupted before swap")
-			}
-		}
-		// The exchange never happened (or was rolled back): nothing to
-		// finish, just clean the staging directory.
-		_ = os.RemoveAll(j.StagingDir)
-		return s.SetRewindPhase(ctx, j.ID, j.Phase, RewindFinalized, "interrupted before swap")
-	case j.TargetDigest:
-		if rec.Candidate.Status != "ready" {
-			return s.blockRewind(ctx, j, fmt.Errorf("candidate status %q cannot finalize a rewind", rec.Candidate.Status))
-		}
-		if err = s.FinalizeRewind(ctx, j); err != nil {
-			return s.blockRewind(ctx, j, err)
-		}
-		_ = os.RemoveAll(j.StagingDir)
-		return nil
-	default:
-		return s.blockRewind(ctx, j, fmt.Errorf("candidate digest %s matches neither the expected nor the target digest", digest))
+	tx := candidate.DirectoryTransaction{ID: j.ID, Kind: candidate.TransactionRewind, ManifestPolicy: j.ManifestPolicy, ExpectedRootIdentity: j.ExpectedRootIdentity, TargetRootIdentity: j.TargetRootIdentity, CurrentRoot: rec.Candidate.CandidateRoot, IncomingRoot: j.StagingDir, RollbackRoot: j.RollbackPath, ExpectedDigest: j.ExpectedDigest, TargetDigest: j.TargetDigest, Mode: j.TransactionMode}
+	coordinator := candidate.NewTransactionCoordinator()
+	state, err := coordinator.Inspect(ctx, tx, candidate.TransactionPhase(j.Phase))
+	if err != nil {
+		return s.blockRewind(ctx, j, err)
 	}
+	if state == candidate.RecoveryOld && j.Phase == RewindPrepared {
+		err = coordinator.Apply(ctx, tx, rewindJournalAdapter{store: s})
+	} else {
+		err = coordinator.Recover(ctx, tx, candidate.TransactionPhase(j.Phase), rewindJournalAdapter{store: s})
+	}
+	if err != nil {
+		return s.blockRewind(ctx, j, err)
+	}
+	if rec.Candidate.Status != "ready" {
+		return s.blockRewind(ctx, j, fmt.Errorf("candidate status %q cannot finalize a rewind", rec.Candidate.Status))
+	}
+	if err = s.FinalizeRewind(ctx, j); err != nil {
+		return s.blockRewind(ctx, j, err)
+	}
+	return coordinator.Cleanup(ctx, tx)
+}
+
+// discardEmptyPreparedRewind handles the crash cut where the journal and an
+// empty staging directory were persisted before any snapshot bytes were
+// materialized. Empty owned staging is safe to discard, but incomplete or
+// unknown contents are retained for explicit reconciliation.
+func (s *Store) discardEmptyPreparedRewind(ctx context.Context, j RewindJournal, c candidate.Candidate) (bool, error) {
+	if c.Status != "ready" {
+		return false, nil
+	}
+	currentIdentity, err := candidate.CaptureRootIdentity(c.CandidateRoot)
+	if err != nil || currentIdentity != j.ExpectedRootIdentity {
+		return false, nil
+	}
+	_, currentDigest, err := candidate.BuildManifestForPolicy(c.CandidateRoot, j.ManifestPolicy)
+	if err != nil || currentDigest != j.ExpectedDigest {
+		return false, nil
+	}
+	if _, err := os.Lstat(j.RollbackPath); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	targetIdentity, err := candidate.CaptureRootIdentity(j.StagingDir)
+	if os.IsNotExist(err) {
+		return true, s.SetRewindPhase(ctx, j.ID, RewindPrepared, RewindFinalized, "interrupted before snapshot materialization; staging already absent")
+	}
+	if err != nil || targetIdentity != j.TargetRootIdentity {
+		return false, nil
+	}
+	entries, err := os.ReadDir(j.StagingDir)
+	if err != nil {
+		return false, err
+	}
+	if len(entries) != 0 {
+		return false, nil
+	}
+	_, stagedDigest, err := candidate.BuildManifestForPolicy(j.StagingDir, j.ManifestPolicy)
+	if err != nil || stagedDigest == j.TargetDigest {
+		// An empty snapshot is still a valid rewind target. Let the transaction
+		// coordinator install it; only an empty, incomplete root can be dropped.
+		return false, nil
+	}
+	if err := os.Remove(j.StagingDir); err != nil {
+		return false, err
+	}
+	return true, s.SetRewindPhase(ctx, j.ID, RewindPrepared, RewindFinalized, "interrupted before snapshot materialization; empty staging removed")
 }
 
 type rewindJournalAdapter struct{ store *Store }
@@ -263,8 +369,12 @@ func (j rewindJournalAdapter) Advance(ctx context.Context, id string, from, to c
 }
 
 func (s *Store) blockRewind(ctx context.Context, j RewindJournal, cause error) error {
-	if j.Phase != RewindBlocked {
-		if err := s.SetRewindPhase(ctx, j.ID, j.Phase, RewindBlocked, cause.Error()); err != nil {
+	var currentPhase string
+	if err := s.db.QueryRowContext(ctx, `SELECT phase FROM rewind_journal WHERE id=?`, j.ID).Scan(&currentPhase); err != nil {
+		return err
+	}
+	if currentPhase != RewindBlocked {
+		if err := s.SetRewindPhase(ctx, j.ID, currentPhase, RewindBlocked, cause.Error()); err != nil {
 			return err
 		}
 	}

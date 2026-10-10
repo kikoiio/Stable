@@ -4,9 +4,11 @@ package secfile
 
 import (
 	"errors"
+	"golang.org/x/sys/unix"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLinuxSecureOpenRejectsTraversalAndSymlink(t *testing.T) {
@@ -65,5 +67,28 @@ func TestLinuxExchangeRejectsSymlinkRoot(t *testing.T) {
 	}
 	if err := ExchangeDirectories(a, b); !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("ExchangeDirectories error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestLinuxSecureOpenRejectsFIFOWithoutBlocking(t *testing.T) {
+	root := t.TempDir()
+	if err := unix.Mkfifo(filepath.Join(root, "role.md"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		file, err := SecureOpen(root, "role.md")
+		if file != nil {
+			file.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("FIFO open error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("special-file open blocked waiting for a writer")
 	}
 }

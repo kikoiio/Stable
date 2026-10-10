@@ -83,7 +83,7 @@ func (p Policy) Decide(a Authority, o Operation) PermissionDecision {
 				}
 			}
 		}
-	} else if o.Kind != OpCommand && o.Kind != OpMCPTool {
+	} else if o.Kind != OpCommand && o.Kind != OpMCPTool && o.Kind != OpWorkspaceLifecycle {
 		// MCP tool operations carry no filesystem boundary: they are gated
 		// by exact rules below and default to ask.
 		return deny("unknown operation kind")
@@ -117,7 +117,7 @@ func (p Policy) Decide(a Authority, o Operation) PermissionDecision {
 	}
 	// MCP tool calls are never auto-allowed by bypass mode: absent an exact
 	// rule they always require user approval.
-	if a.Mode == ModeBypass && o.Kind != OpMCPTool {
+	if a.Mode == ModeBypass && o.Kind != OpMCPTool && o.Kind != OpWorkspaceLifecycle {
 		return PermissionDecision{Kind: DecisionAllow, Reason: "bypass mode within hard boundaries", ScopeDigest: scope, OperationDigest: operation}
 	}
 	switch o.Kind {
@@ -132,6 +132,8 @@ func (p Policy) Decide(a Authority, o Operation) PermissionDecision {
 		}
 	case OpMCPTool:
 		return PermissionDecision{Kind: DecisionAsk, Reason: "mcp tool operation requires user approval", ScopeDigest: scope, OperationDigest: operation}
+	case OpWorkspaceLifecycle:
+		return PermissionDecision{Kind: DecisionAsk, Reason: "workspace lifecycle operation requires user approval", ScopeDigest: scope, OperationDigest: operation}
 	}
 	return PermissionDecision{Kind: DecisionAsk, Reason: fmt.Sprintf("%s operation requires user approval", o.Kind), ScopeDigest: scope, OperationDigest: operation}
 }

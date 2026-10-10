@@ -33,12 +33,12 @@ func (s *Service) reviewCandidate(ctx context.Context, id, sessionID string) (ca
 	if c.CandidateDigest == "" || c.BaselineDigest == "" {
 		return candidate.Review{}, errors.New("candidate is missing baseline or candidate digest")
 	}
-	if _, digest, digestErr := candidate.BuildManifest(c.CandidateRoot); digestErr != nil {
+	if _, digest, digestErr := candidate.BuildManifestForPolicy(c.CandidateRoot, c.ManifestPolicy); digestErr != nil {
 		return candidate.Review{}, digestErr
 	} else if digest != c.CandidateDigest {
 		return candidate.Review{}, errors.New("candidate changed since it became ready; review again")
 	}
-	if _, digest, digestErr := candidate.BuildManifest(c.FormalRoot); digestErr != nil {
+	if _, digest, digestErr := candidate.BuildManifestForPolicy(c.FormalRoot, c.ManifestPolicy); digestErr != nil {
 		return candidate.Review{}, digestErr
 	} else if digest != c.BaselineDigest {
 		return candidate.Review{}, errors.New("formal project changed since candidate baseline; review again")

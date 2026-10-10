@@ -154,6 +154,16 @@ func (r Root) Revalidate() error {
 // handle implementation. The current identity wrapper owns no descriptor.
 func (r Root) Close() error { return nil }
 
+// ChmodRoot changes permissions using a directory-scoped os.Root. Keeping the
+// operation behind secfile makes private permission changes auditable at the
+// platform boundary while preserving the root-relative path guarantee.
+func ChmodRoot(root *os.Root, rel string, perm os.FileMode) error {
+	if root == nil || rel == "" || filepath.IsAbs(rel) {
+		return ErrUnsafePath
+	}
+	return root.Chmod(rel, perm)
+}
+
 // SecureOpen opens rel under root with openat2 RESOLVE_BENEATH|NO_SYMLINKS
 // and O_NOFOLLOW, then rejects non-regular files.
 func SecureOpen(root, rel string) (*os.File, error) {

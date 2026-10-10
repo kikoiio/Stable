@@ -3,8 +3,89 @@ package execution
 import (
 	"sort"
 
+	"stable/internal/llm"
 	"stable/internal/todo"
+	"stable/internal/tools"
 )
+
+// DelegationTasksSchema exposes one synchronous batch call to a session parent.
+var DelegationTasksSchema = map[string]any{
+	"name":        "delegate_tasks",
+	"description": "Delegate several independent read-only investigations in parallel and wait for every result.",
+	"input_schema": map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"tasks": map[string]any{
+				"type":        "array",
+				"description": "Independent, clearly scoped read-only tasks.",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"id":          map[string]any{"type": "string"},
+						"name":        map[string]any{"type": "string"},
+						"instruction": map[string]any{"type": "string"},
+					},
+					"required":             []string{"id", "name", "instruction"},
+					"additionalProperties": false,
+				},
+			},
+		},
+		"required":             []string{"tasks"},
+		"additionalProperties": false,
+	},
+}
+
+func DelegationToolSchemas() []llm.ToolSchema {
+	return []llm.ToolSchema{schemaToLLM(DelegationTasksSchema)}
+}
+
+// ReadOnlyToolSchemas returns only the existing project inspection tools. The
+// child executor enforces the same allowlist independently of these schemas.
+func ReadOnlyToolSchemas() []llm.ToolSchema {
+	registry := tools.CreateDefaultTools().Registry
+	wanted := map[string]bool{"read_file": true, "glob": true, "grep": true}
+	var schemas []llm.ToolSchema
+	for _, item := range registry.GetAllSchemas() {
+		name, _ := item["name"].(string)
+		if !wanted[name] {
+			continue
+		}
+		description, _ := item["description"].(string)
+		input, _ := item["input_schema"].(map[string]any)
+		schemas = append(schemas, llm.ToolSchema{Name: name, Description: description, InputSchema: input})
+	}
+	sort.Slice(schemas, func(i, j int) bool { return schemas[i].Name < schemas[j].Name })
+	return schemas
+}
+
+// WorkspaceWriterToolSchemas returns the fixed session workspace surface.
+// The executor independently enforces this same allowlist.
+func WorkspaceWriterToolSchemas() []llm.ToolSchema {
+	registry := tools.CreateDefaultTools().Registry
+	wanted := map[string]bool{"read_file": true, "glob": true, "grep": true, "write_file": true, "edit_file": true, "command": true}
+	var schemas []llm.ToolSchema
+	for _, item := range registry.GetAllSchemas() {
+		name, _ := item["name"].(string)
+		if !wanted[name] {
+			continue
+		}
+		description, _ := item["description"].(string)
+		input, _ := item["input_schema"].(map[string]any)
+		schemas = append(schemas, llm.ToolSchema{Name: name, Description: description, InputSchema: input})
+	}
+	sort.Slice(schemas, func(i, j int) bool { return schemas[i].Name < schemas[j].Name })
+	if len(schemas) != len(wanted) {
+		return nil
+	}
+	return schemas
+}
+
+func schemaToLLM(item map[string]any) llm.ToolSchema {
+	name, _ := item["name"].(string)
+	description, _ := item["description"].(string)
+	input, _ := item["input_schema"].(map[string]any)
+	return llm.ToolSchema{Name: name, Description: description, InputSchema: input}
+}
 
 // AskUserSchema is the provider-facing schema of the ask_user tool. Field
 // names follow the source AskUserQuestion tool; the executor validates the

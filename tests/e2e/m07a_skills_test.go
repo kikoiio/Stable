@@ -239,8 +239,8 @@ func TestM07ASkillActivationHotReloadAndForkRefusal(t *testing.T) {
 	env := m07aNewService(t, root, db, &m06Agent{}, "", "")
 	sessionID := m06SessionCreate(t, ctx, env)
 
-	// Fork refusal through the slash entry: a plain error terminates the
-	// stream and no session message or activation is recorded.
+	// This fixture has no child runner configured, so fork invocation must
+	// report the unavailable service and avoid recording a partial activation.
 	forkStream := m07aInvokeSkill(t, ctx, env, sessionID, "deep-dive", "")
 	deadline := time.Now().Add(15 * time.Second)
 	var forkErr string
@@ -256,7 +256,7 @@ func TestM07ASkillActivationHotReloadAndForkRefusal(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	forkStream.close()
-	if !strings.Contains(forkErr, "子 agent 能力未启用") {
+	if !strings.Contains(forkErr, "fork skill execution is unavailable") {
 		t.Fatalf("fork skill invocation error = %q", forkErr)
 	}
 	if texts := m06MessageTexts(t, root, sessionID); len(texts) != 0 {

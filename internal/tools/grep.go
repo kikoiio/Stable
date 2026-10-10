@@ -69,6 +69,12 @@ func (t *GrepTool) Execute(_ context.Context, args map[string]any) ToolResult {
 		if err != nil {
 			return nil
 		}
+		if privateMetadataName(info.Name()) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if info.IsDir() {
 			if SkipDirs[info.Name()] {
 				return filepath.SkipDir

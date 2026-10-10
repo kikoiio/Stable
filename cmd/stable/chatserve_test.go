@@ -190,16 +190,16 @@ func TestChatserveAssembly(t *testing.T) {
 	}
 }
 
-// The chatserve tool whitelist covers the five file tools, the controlled
-// command executor and the six M06 interaction/task tools, sorted by name
-// without duplicates.
+// The chatserve whitelist covers file and memory tools, the controlled command
+// executor, M06 interaction/task tools and parent-only workspace lifecycle tools.
 func TestChatserveToolSchemas(t *testing.T) {
 	schemas := chatserveToolSchemas()
 	want := []string{
-		"ask_user", "command", "edit_file", "exit_plan_mode", "glob", "grep",
-		"load_skill", "memory_delete", "memory_list", "memory_read", "memory_save",
-		"read_file", "task_create", "task_get", "task_list",
-		"task_update", "write_file",
+		"ask_user", "command", "edit_file", "enter_worktree", "exit_plan_mode",
+		"exit_worktree", "glob", "grep", "load_skill", "memory_delete",
+		"memory_list", "memory_read", "memory_save", "read_file",
+		"task_create", "task_get", "task_list", "task_update", "worktree_export",
+		"write_file",
 	}
 	if len(schemas) != len(want) {
 		t.Fatalf("schema count = %d, want %d", len(schemas), len(want))

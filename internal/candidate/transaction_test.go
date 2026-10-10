@@ -110,3 +110,80 @@ func TestTransactionCoordinatorJournaledRecovery(t *testing.T) {
 		t.Fatal("reused transaction unexpectedly applied")
 	}
 }
+
+func TestTransactionRecoveryRefusesUnrecognizedRollback(t *testing.T) {
+	current, oldDigest := transactionRoot(t, "formal", "old")
+	incoming, newDigest := transactionRoot(t, "incoming", "new")
+	rollback := filepath.Join(filepath.Dir(current), "rollback")
+	if err := os.Rename(current, rollback); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rollback, "file.txt"), []byte("external change"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	tx := DirectoryTransaction{ID: "tx-unknown", Kind: TransactionAcceptance, CurrentRoot: current, IncomingRoot: incoming, RollbackRoot: rollback, ExpectedDigest: oldDigest, TargetDigest: newDigest, Mode: "journaled-move"}
+	if err := NewTransactionCoordinator().Recover(context.Background(), tx, PhaseOldSaved, &transactionJournalRecorder{}); err == nil {
+		t.Fatal("unrecognized rollback was installed")
+	}
+	if _, err := os.Lstat(current); !os.IsNotExist(err) {
+		t.Fatalf("missing formal root was replaced: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(rollback, "file.txt"))
+	if err != nil || string(data) != "external change" {
+		t.Fatalf("unknown rollback changed: %q %v", data, err)
+	}
+}
+
+func TestLegacyGitTransactionRequiresNewExport(t *testing.T) {
+	current, oldDigest := transactionRoot(t, "formal", "old")
+	incoming, newDigest := transactionRoot(t, "incoming", "new")
+	if err := os.WriteFile(filepath.Join(current, ".git"), []byte("gitdir: /external\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	tx := DirectoryTransaction{ID: "legacy-git", Kind: TransactionAcceptance, CurrentRoot: current, IncomingRoot: incoming, ExpectedDigest: oldDigest, TargetDigest: newDigest, Mode: "atomic-exchange"}
+	if err := NewTransactionCoordinator().Apply(context.Background(), tx, &transactionJournalRecorder{}); err == nil {
+		t.Fatal("legacy Git acceptance was permitted")
+	}
+	if err := NewTransactionCoordinator().Recover(context.Background(), tx, PhasePrepared, &transactionJournalRecorder{}); err == nil {
+		t.Fatal("legacy Git recovery was permitted")
+	}
+}
+
+func TestLegacyMewcodeTransactionRequiresNewExport(t *testing.T) {
+	current, oldDigest := transactionRoot(t, "formal", "old")
+	incoming, newDigest := transactionRoot(t, "incoming", "new")
+	metadata := filepath.Join(current, ".mewcode", "history")
+	if err := os.MkdirAll(filepath.Dir(metadata), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadata, []byte("protected formal metadata"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Stat(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx := DirectoryTransaction{ID: "legacy-mewcode", Kind: TransactionAcceptance, CurrentRoot: current, IncomingRoot: incoming, ExpectedDigest: oldDigest, TargetDigest: newDigest, Mode: "atomic-exchange"}
+	coordinator := NewTransactionCoordinator()
+	journal := &transactionJournalRecorder{}
+	if err := coordinator.Apply(context.Background(), tx, journal); err == nil {
+		t.Fatal("legacy transaction with protected .mewcode was permitted")
+	}
+	if err := coordinator.Recover(context.Background(), tx, PhasePrepared, journal); err == nil {
+		t.Fatal("legacy transaction recovery with protected .mewcode was permitted")
+	}
+	got, err := os.ReadFile(metadata)
+	if err != nil || string(got) != "protected formal metadata" {
+		t.Fatalf("formal .mewcode bytes changed: got=%q err=%v", got, err)
+	}
+	afterInfo, err := os.Stat(metadata)
+	if err != nil || !os.SameFile(beforeInfo, afterInfo) {
+		t.Fatalf("formal .mewcode inode changed: before=%v after=%v err=%v", beforeInfo, afterInfo, err)
+	}
+	if _, err := os.Stat(filepath.Join(current, "file.txt")); err != nil {
+		t.Fatalf("formal root was exchanged despite rejection: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(incoming, "file.txt")); err != nil {
+		t.Fatalf("incoming root was exchanged despite rejection: %v", err)
+	}
+}

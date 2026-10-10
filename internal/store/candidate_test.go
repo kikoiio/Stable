@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -183,6 +184,144 @@ func TestReconcileAcceptanceAfterExchangeBeforeJournalUpdate(t *testing.T) {
 	}
 }
 
+func TestLegacyAcceptanceV12MigrationBlocksGitMetadata(t *testing.T) {
+	s, dbPath := newGoalStore(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	formal := filepath.Join(root, "formal")
+	incoming := filepath.Join(root, "incoming")
+	for _, dir := range []string{formal, incoming} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(formal, "board"), []byte("old formal bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(incoming, "board"), []byte("new incoming bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	metadata := map[string]string{
+		filepath.Join(formal, ".git"):   "gitdir: /external/formal.git\n",
+		filepath.Join(incoming, ".git"): "gitdir: /external/incoming.git\n",
+	}
+	metadataInfo := make(map[string]os.FileInfo, len(metadata))
+	for path, contents := range metadata {
+		if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		metadataInfo[path] = info
+	}
+	_, oldDigest, err := candidate.BuildManifest(formal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, newDigest, err := candidate.BuildManifest(incoming)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := candidate.Candidate{
+		ID: "legacy-v12", ManifestPolicy: candidate.ManifestPolicyLegacy,
+		FormalRoot: formal, CandidateRoot: incoming,
+		BaselineDigest: oldDigest, CandidateDigest: newDigest, Status: "reviewed",
+	}
+	if err = s.SaveCandidate(ctx, CandidateRecord{Candidate: c, ActionID: "legacy-v12-action", GoalID: "goal-1"}); err != nil {
+		t.Fatal(err)
+	}
+	d := candidate.AcceptanceDecision{
+		ID: "legacy-v12-decision", UserID: "user", CandidateID: c.ID,
+		CandidateDigest: newDigest, PreviewDigest: "legacy-preview", FormalDigest: oldDigest,
+		Mode: candidate.AcceptNormal,
+	}
+	if _, err = s.SaveAcceptanceDecision(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restore the v12 schema shape. v13 added manifest policy and protected
+	// metadata facts; v14 added transaction root identities.
+	for _, statement := range []string{
+		`ALTER TABLE candidates DROP COLUMN manifest_policy`,
+		`ALTER TABLE acceptance_apply_journal DROP COLUMN manifest_policy`,
+		`ALTER TABLE acceptance_apply_journal DROP COLUMN protected_metadata_json`,
+		`ALTER TABLE acceptance_apply_journal DROP COLUMN expected_root_identity`,
+		`ALTER TABLE acceptance_apply_journal DROP COLUMN target_root_identity`,
+		`ALTER TABLE rewind_journal DROP COLUMN manifest_policy`,
+		`ALTER TABLE rewind_journal DROP COLUMN expected_root_identity`,
+		`ALTER TABLE rewind_journal DROP COLUMN target_root_identity`,
+		`PRAGMA user_version=12`,
+	} {
+		if _, err = s.DB().Exec(statement); err != nil {
+			t.Fatalf("prepare v12 database with %q: %v", statement, err)
+		}
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = Open(dbPath)
+	if err != nil {
+		t.Fatalf("migrate v12 database: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	var version int
+	if err = s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 14 {
+		t.Fatalf("database version=%d err=%v", version, err)
+	}
+	var candidatePolicy, journalPolicy, protectedMetadata, expectedIdentity, targetIdentity, phase string
+	if err = s.DB().QueryRow(`SELECT manifest_policy FROM candidates WHERE id=?`, c.ID).Scan(&candidatePolicy); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DB().QueryRow(`SELECT manifest_policy,protected_metadata_json,expected_root_identity,target_root_identity,phase FROM acceptance_apply_journal WHERE decision_id=?`, d.ID).Scan(&journalPolicy, &protectedMetadata, &expectedIdentity, &targetIdentity, &phase); err != nil {
+		t.Fatal(err)
+	}
+	if candidatePolicy != candidate.ManifestPolicyLegacy || journalPolicy != candidate.ManifestPolicyLegacy || protectedMetadata != "" || expectedIdentity != "" || targetIdentity != "" || phase != "prepared" {
+		t.Fatalf("migrated legacy candidate/journal was reinterpreted: candidate policy=%q journal policy=%q metadata=%q identities=%q/%q phase=%q", candidatePolicy, journalPolicy, protectedMetadata, expectedIdentity, targetIdentity, phase)
+	}
+
+	if err = s.ReconcileAcceptances(ctx); err == nil {
+		t.Fatal("legacy acceptance with Git metadata was not blocked after migration")
+	}
+	assertLegacyV12AcceptanceRetained(t, s, d.ID, formal, incoming, metadata, metadataInfo, "blocked")
+	if err = s.ReconcileAcceptances(ctx); err != nil {
+		t.Fatalf("repeat blocked recovery: %v", err)
+	}
+	assertLegacyV12AcceptanceRetained(t, s, d.ID, formal, incoming, metadata, metadataInfo, "blocked")
+}
+
+func assertLegacyV12AcceptanceRetained(t *testing.T, s *Store, decisionID, formal, incoming string, metadata map[string]string, metadataInfo map[string]os.FileInfo, wantPhase string) {
+	t.Helper()
+	var phase string
+	if err := s.DB().QueryRow(`SELECT phase FROM acceptance_apply_journal WHERE decision_id=?`, decisionID).Scan(&phase); err != nil || phase != wantPhase {
+		t.Fatalf("acceptance phase=%q want %q err=%v", phase, wantPhase, err)
+	}
+	if _, ok, err := s.FindAcceptanceReceipt(context.Background(), decisionID); err != nil || ok {
+		t.Fatalf("blocked legacy acceptance receipt present=%t err=%v", ok, err)
+	}
+	for path, want := range map[string]string{
+		filepath.Join(formal, "board"):   "old formal bytes",
+		filepath.Join(incoming, "board"): "new incoming bytes",
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("project bytes at %s = %q, want %q, err=%v", path, got, want, err)
+		}
+	}
+	for path, want := range metadata {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("Git metadata at %s = %q, want %q, err=%v", path, got, want, err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil || !os.SameFile(metadataInfo[path], info) {
+			t.Fatalf("Git metadata inode changed at %s: before=%v after=%v err=%v", path, metadataInfo[path], info, err)
+		}
+	}
+}
+
 func TestReconcileAcceptanceConflictBlocks(t *testing.T) {
 	s, _ := newGoalStore(t)
 	ctx := context.Background()
@@ -270,5 +409,368 @@ func TestAcceptCandidateUsesDurableJournal(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(formal, "board"))
 	if err != nil || string(data) != "new" {
 		t.Fatalf("formal project after acceptance=%q err=%v", data, err)
+	}
+}
+
+func TestProjectMetadataAcceptanceRecoveryEveryMoveBoundary(t *testing.T) {
+	cases := []struct {
+		name, phase     string
+		moves, restored int
+	}{
+		{"intent", "prepared", 0, 0}, {"old_move_before_journal", "prepared", 1, 0},
+		{"old_saved", "old_saved", 1, 0}, {"target_move_before_journal", "old_saved", 2, 0},
+		{"target_installed", "target_installed", 2, 0}, {"rollback_move_before_journal", "target_installed", 3, 0},
+		{"swapped", "swapped", 3, 0}, {"git_restored", "swapped", 3, 1},
+		{"service_restored", "swapped", 3, 2}, {"before_finalize", "swapped", 3, 3},
+		{"metadata_destination_conflict", "swapped", 3, 0},
+		{"same_digest_git_pointer_replacement", "swapped", 3, 0},
+		{"same_digest_stable_directory_replacement", "swapped", 3, 0},
+		{"same_digest_formal_replacement", "prepared", 0, 0},
+		{"same_digest_candidate_replacement", "prepared", 0, 0},
+		{"same_digest_rollback_replacement", "old_saved", 1, 0},
+		{"legacy_v13_missing_root_identity", "prepared", 0, 0},
+	}
+	for _, gitDirectory := range []bool{false, true} {
+		for _, fixture := range cases {
+			if fixture.name == "same_digest_git_pointer_replacement" && gitDirectory {
+				continue
+			}
+			if fixture.name == "same_digest_stable_directory_replacement" && !gitDirectory {
+				continue
+			}
+			t.Run(fmt.Sprintf("git_directory_%t/%s", gitDirectory, fixture.name), func(t *testing.T) {
+				s, dbPath := newGoalStore(t)
+				ctx := context.Background()
+				parent := t.TempDir()
+				formal, incoming, rollback := filepath.Join(parent, "formal"), filepath.Join(parent, "incoming"), filepath.Join(parent, "rollback")
+				for _, root := range []string{formal, incoming} {
+					if err := os.Mkdir(root, 0700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for root, value := range map[string]string{formal: "old", incoming: "new"} {
+					if err := os.WriteFile(filepath.Join(root, "board"), []byte(value), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				metadataFiles := map[string]string{".git": "gitdir: /unmounted/external/private\n", ".stable/session": "live log", ".mewcode/history": "legacy state"}
+				if gitDirectory {
+					delete(metadataFiles, ".git")
+					metadataFiles[".git/config"] = "private git config"
+				}
+				for name, value := range metadataFiles {
+					path := filepath.Join(formal, name)
+					if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(path, []byte(value), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				facts, err := candidate.CaptureProtectedMetadata(formal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, oldDigest, err := candidate.BuildManifestForPolicy(formal, candidate.ManifestPolicyProject)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, newDigest, err := candidate.BuildManifestForPolicy(incoming, candidate.ManifestPolicyProject)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c := candidate.Candidate{ID: "v2", ManifestPolicy: candidate.ManifestPolicyProject, FormalRoot: formal, CandidateRoot: incoming, BaselineDigest: oldDigest, CandidateDigest: newDigest, Status: "reviewed"}
+				if err = s.SaveCandidate(ctx, CandidateRecord{Candidate: c, ActionID: "act", GoalID: "goal-1"}); err != nil {
+					t.Fatal(err)
+				}
+				d := candidate.AcceptanceDecision{ID: "v2-decision", UserID: "user", CandidateID: c.ID, CandidateDigest: newDigest, PreviewDigest: "preview", FormalDigest: oldDigest, Mode: candidate.AcceptNormal}
+				if _, err = s.SaveAcceptanceDecision(ctx, d); err != nil {
+					t.Fatal(err)
+				}
+				if err = s.SaveProtectedMetadata(ctx, d.ID, facts); err != nil {
+					t.Fatal(err)
+				}
+				if _, err = s.DB().Exec(`UPDATE acceptance_apply_journal SET transaction_mode='journaled-move',rollback_path=?,phase=? WHERE decision_id=?`, rollback, fixture.phase, d.ID); err != nil {
+					t.Fatal(err)
+				}
+				moves := [][2]string{{formal, rollback}, {incoming, formal}, {rollback, incoming}}
+				for _, move := range moves[:fixture.moves] {
+					if err = os.Rename(move[0], move[1]); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for _, fact := range facts[:fixture.restored] {
+					if err = os.Rename(filepath.Join(incoming, fact.Name), filepath.Join(formal, fact.Name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				replacedRoot := ""
+				switch fixture.name {
+				case "same_digest_formal_replacement":
+					replacedRoot = formal
+				case "same_digest_candidate_replacement":
+					replacedRoot = incoming
+				case "same_digest_rollback_replacement":
+					replacedRoot = rollback
+				}
+				if replacedRoot != "" {
+					original := replacedRoot + "-external-original"
+					if err := os.Rename(replacedRoot, original); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Mkdir(replacedRoot, 0700); err != nil {
+						t.Fatal(err)
+					}
+					data, err := os.ReadFile(filepath.Join(original, "board"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(replacedRoot, "board"), data, 0600); err != nil {
+						t.Fatal(err)
+					}
+					// Keep even the original metadata entities: the data root's
+					// persisted identity must independently reject replacement.
+					for _, fact := range facts {
+						if _, err := os.Lstat(filepath.Join(original, fact.Name)); err == nil {
+							if err := os.Rename(filepath.Join(original, fact.Name), filepath.Join(replacedRoot, fact.Name)); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+				}
+				if fixture.name == "legacy_v13_missing_root_identity" {
+					if _, err := s.DB().Exec(`ALTER TABLE acceptance_apply_journal DROP COLUMN expected_root_identity; ALTER TABLE acceptance_apply_journal DROP COLUMN target_root_identity; PRAGMA user_version=13`); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if fixture.name == "metadata_destination_conflict" {
+					if err := os.WriteFile(filepath.Join(formal, ".git"), []byte("external metadata"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if fixture.name == "same_digest_git_pointer_replacement" {
+					formalGit := filepath.Join(formal, ".git")
+					incomingGit := filepath.Join(incoming, ".git")
+					if _, err := os.Lstat(formalGit); !os.IsNotExist(err) {
+						t.Fatalf("formal .git exists before metadata restore: %v", err)
+					}
+					if data, err := os.ReadFile(filepath.Join(formal, "board")); err != nil || string(data) != "new" {
+						t.Fatalf("formal content before recovery=%q err=%v", data, err)
+					}
+					originalInfo, err := os.Lstat(incomingGit)
+					if err != nil || !originalInfo.Mode().IsRegular() {
+						t.Fatalf("incoming .git pointer info=%v err=%v", originalInfo, err)
+					}
+					pointer, err := os.ReadFile(incomingGit)
+					if err != nil {
+						t.Fatal(err)
+					}
+					replacement := filepath.Join(parent, "replacement.git")
+					if err = os.WriteFile(replacement, pointer, 0600); err != nil {
+						t.Fatal(err)
+					}
+					replacementInfo, err := os.Lstat(replacement)
+					if err != nil || os.SameFile(originalInfo, replacementInfo) {
+						t.Fatalf(".git pointer was not replaced: original=%v replacement=%v err=%v", originalInfo, replacementInfo, err)
+					}
+					if err = os.Rename(replacement, incomingGit); err != nil {
+						t.Fatal(err)
+					}
+				}
+				stableOriginal := filepath.Join(incoming, ".stable")
+				stableReplacement := filepath.Join(parent, "replacement.stable")
+				var stableOriginalInfo, stableReplacementInfo os.FileInfo
+				if fixture.name == "same_digest_stable_directory_replacement" {
+					stableOriginalInfo, err = os.Lstat(stableOriginal)
+					if err != nil || !stableOriginalInfo.IsDir() {
+						t.Fatalf("incoming .stable directory info=%v err=%v", stableOriginalInfo, err)
+					}
+					if err = os.Rename(stableOriginal, stableReplacement); err != nil {
+						t.Fatal(err)
+					}
+					if err = os.Mkdir(stableOriginal, 0700); err != nil {
+						t.Fatal(err)
+					}
+					if err = os.WriteFile(filepath.Join(stableOriginal, "session"), []byte("live log"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					stableReplacementInfo, err = os.Lstat(stableOriginal)
+					if err != nil || !stableReplacementInfo.IsDir() || os.SameFile(stableOriginalInfo, stableReplacementInfo) {
+						t.Fatalf(".stable was not replaced with a different directory inode: original=%v replacement=%v err=%v", stableOriginalInfo, stableReplacementInfo, err)
+					}
+				}
+				if err = s.Close(); err != nil {
+					t.Fatal(err)
+				}
+				s, err = Open(dbPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer s.Close()
+				if replacedRoot != "" || fixture.name == "legacy_v13_missing_root_identity" {
+					if err := s.ReconcileAcceptances(ctx); err == nil {
+						t.Fatal("unknown root identity was accepted")
+					}
+					var phase string
+					if err := s.DB().QueryRow(`SELECT phase FROM acceptance_apply_journal WHERE decision_id=?`, d.ID).Scan(&phase); err != nil || phase != "blocked" {
+						t.Fatalf("phase=%s err=%v", phase, err)
+					}
+					if _, ok, err := s.FindAcceptanceReceipt(ctx, d.ID); err != nil || ok {
+						t.Fatalf("blocked acceptance produced receipt: %t %v", ok, err)
+					}
+					if replacedRoot != "" {
+						for _, path := range []string{replacedRoot, replacedRoot + "-external-original"} {
+							if _, err := os.Lstat(path); err != nil {
+								t.Fatalf("unknown resource deleted: %s %v", path, err)
+							}
+						}
+					}
+					var version int
+					if err := s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 14 {
+						t.Fatalf("version=%d err=%v", version, err)
+					}
+					if err := s.ReconcileAcceptances(ctx); err != nil {
+						t.Fatal(err)
+					}
+					return
+				}
+				if fixture.name == "metadata_destination_conflict" {
+					if err := s.ReconcileAcceptances(ctx); err == nil {
+						t.Fatal("concurrent metadata destination was accepted")
+					}
+					data, err := os.ReadFile(filepath.Join(formal, ".git"))
+					if err != nil || string(data) != "external metadata" {
+						t.Fatalf("destination changed: %q %v", data, err)
+					}
+					retained, err := candidate.CaptureProtectedMetadata(incoming)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for i, fact := range retained {
+						if fact != facts[i] {
+							t.Fatalf("source metadata %s changed: %+v", fact.Name, fact)
+						}
+					}
+					var phase string
+					if err := s.DB().QueryRow(`SELECT phase FROM acceptance_apply_journal WHERE decision_id=?`, d.ID).Scan(&phase); err != nil || phase != "blocked" {
+						t.Fatalf("phase=%s err=%v", phase, err)
+					}
+					if _, ok, err := s.FindAcceptanceReceipt(ctx, d.ID); err != nil || ok {
+						t.Fatalf("blocked acceptance produced receipt: %t %v", ok, err)
+					}
+					if err := s.ReconcileAcceptances(ctx); err != nil {
+						t.Fatal(err)
+					}
+					return
+				}
+				if fixture.name == "same_digest_git_pointer_replacement" {
+					if err := s.ReconcileAcceptances(ctx); err == nil {
+						t.Fatal("recovery accepted a byte-identical replacement Git pointer")
+					}
+					data, err := os.ReadFile(filepath.Join(formal, "board"))
+					if err != nil || string(data) != "new" {
+						t.Fatalf("formal=%q err=%v", data, err)
+					}
+					data, err = os.ReadFile(filepath.Join(incoming, ".git"))
+					if err != nil || string(data) != "gitdir: /unmounted/external/private\n" {
+						t.Fatalf("replacement Git pointer=%q err=%v", data, err)
+					}
+					if _, err = os.Lstat(filepath.Join(formal, ".git")); !os.IsNotExist(err) {
+						t.Fatalf("failed recovery changed formal metadata destination: %v", err)
+					}
+					var phase string
+					if err := s.DB().QueryRow(`SELECT phase FROM acceptance_apply_journal WHERE decision_id=?`, d.ID).Scan(&phase); err != nil || phase != "blocked" {
+						t.Fatalf("phase=%s err=%v", phase, err)
+					}
+					if _, ok, err := s.FindAcceptanceReceipt(ctx, d.ID); err != nil || ok {
+						t.Fatalf("blocked acceptance produced receipt: %t %v", ok, err)
+					}
+					if err := s.ReconcileAcceptances(ctx); err != nil {
+						t.Fatalf("repeat blocked recovery: %v", err)
+					}
+					data, err = os.ReadFile(filepath.Join(formal, "board"))
+					if err != nil || string(data) != "new" {
+						t.Fatalf("repeat recovery changed formal content=%q err=%v", data, err)
+					}
+					data, err = os.ReadFile(filepath.Join(incoming, ".git"))
+					if err != nil || string(data) != "gitdir: /unmounted/external/private\n" {
+						t.Fatalf("repeat recovery changed replacement pointer=%q err=%v", data, err)
+					}
+					if err := s.DB().QueryRow(`SELECT phase FROM acceptance_apply_journal WHERE decision_id=?`, d.ID).Scan(&phase); err != nil || phase != "blocked" {
+						t.Fatalf("repeat recovery phase=%s err=%v", phase, err)
+					}
+					if _, ok, err := s.FindAcceptanceReceipt(ctx, d.ID); err != nil || ok {
+						t.Fatalf("repeat blocked recovery produced receipt: %t %v", ok, err)
+					}
+					return
+				}
+				if fixture.name == "same_digest_stable_directory_replacement" {
+					if err := s.ReconcileAcceptances(ctx); err == nil {
+						t.Fatal("recovery accepted a byte-identical replacement .stable directory")
+					}
+					assertStableReplacementRetained := func(attempt string) {
+						t.Helper()
+						data, readErr := os.ReadFile(filepath.Join(formal, "board"))
+						if readErr != nil || string(data) != "new" {
+							t.Errorf("%s formal accepted content=%q err=%v", attempt, data, readErr)
+						}
+						for path, wantInfo := range map[string]os.FileInfo{
+							stableOriginal:    stableReplacementInfo,
+							stableReplacement: stableOriginalInfo,
+						} {
+							info, statErr := os.Lstat(path)
+							if statErr != nil || !os.SameFile(wantInfo, info) {
+								t.Errorf("%s .stable identity at %s changed: want=%v got=%v err=%v", attempt, path, wantInfo, info, statErr)
+							}
+							content, readErr := os.ReadFile(filepath.Join(path, "session"))
+							if readErr != nil || string(content) != "live log" {
+								t.Errorf("%s .stable bytes at %s=%q err=%v", attempt, path, content, readErr)
+							}
+						}
+						if _, statErr := os.Lstat(filepath.Join(formal, ".stable")); !os.IsNotExist(statErr) {
+							t.Errorf("%s recovery installed .stable despite identity conflict: %v", attempt, statErr)
+						}
+						if data, readErr := os.ReadFile(filepath.Join(incoming, ".mewcode", "history")); readErr != nil || string(data) != "legacy state" {
+							t.Errorf("%s remaining source metadata=%q err=%v", attempt, data, readErr)
+						}
+						var phase string
+						if queryErr := s.DB().QueryRow(`SELECT phase FROM acceptance_apply_journal WHERE decision_id=?`, d.ID).Scan(&phase); queryErr != nil || phase != "blocked" {
+							t.Errorf("%s journal phase=%q err=%v, want blocked", attempt, phase, queryErr)
+						}
+						if _, ok, receiptErr := s.FindAcceptanceReceipt(ctx, d.ID); receiptErr != nil || ok {
+							t.Errorf("%s blocked acceptance receipt exists=%t err=%v", attempt, ok, receiptErr)
+						}
+					}
+					assertStableReplacementRetained("first recovery")
+					if err := s.ReconcileAcceptances(ctx); err != nil {
+						t.Fatalf("repeat blocked recovery: %v", err)
+					}
+					assertStableReplacementRetained("repeat recovery")
+					return
+				}
+				for attempt := 0; attempt < 2; attempt++ {
+					if err = s.ReconcileAcceptances(ctx); err != nil {
+						t.Fatalf("recovery %d: %v", attempt, err)
+					}
+				}
+				data, err := os.ReadFile(filepath.Join(formal, "board"))
+				if err != nil || string(data) != "new" {
+					t.Fatalf("formal=%q err=%v", data, err)
+				}
+				if err = candidate.ValidateProtectedMetadataFacts(formal, incoming, facts); err != nil {
+					t.Fatal(err)
+				}
+				for name, value := range metadataFiles {
+					data, err := os.ReadFile(filepath.Join(formal, name))
+					if err != nil || string(data) != value {
+						t.Fatalf("metadata %s=%q err=%v", name, data, err)
+					}
+				}
+				var count int
+				if err = s.DB().QueryRow(`SELECT count(*) FROM acceptance_receipts WHERE decision_id=?`, d.ID).Scan(&count); err != nil || count != 1 {
+					t.Fatalf("receipt count=%d err=%v", count, err)
+				}
+			})
+		}
 	}
 }

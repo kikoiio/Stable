@@ -201,6 +201,44 @@ func TestMaterializeRestoresExactManifest(t *testing.T) {
 	}
 }
 
+func TestSnapshotRetainsProjectManifestPolicyAcrossRestore(t *testing.T) {
+	store, _ := newStore(t, 1<<20, 10)
+	candidateRoot := newCandidateRoot(t)
+	for _, rel := range []string{".git/config", ".stable/session.jsonl", ".mewcode/agents/private.md"} {
+		writeCandidateFile(t, candidateRoot, rel, "protected")
+	}
+	snap, err := store.CreateForPolicy("sess-1", "cand-v2", "run-1", "baseline", candidateRoot, ManifestPolicyProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.ManifestPolicy != ManifestPolicyProject {
+		t.Fatalf("snapshot policy = %q", snap.ManifestPolicy)
+	}
+	loaded, err := store.ValidateRestore("cand-v2", snap.SnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ManifestPolicy != ManifestPolicyProject {
+		t.Fatalf("persisted snapshot policy = %q", loaded.ManifestPolicy)
+	}
+	staging := t.TempDir()
+	if err = store.Materialize(loaded, staging); err != nil {
+		t.Fatal(err)
+	}
+	_, digest, err := BuildManifestForPolicy(staging, ManifestPolicyProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != snap.Digest {
+		t.Fatal("project-policy snapshot restore changed its digest")
+	}
+	for _, rel := range []string{".git", ".stable", ".mewcode"} {
+		if _, err = os.Lstat(filepath.Join(staging, rel)); !os.IsNotExist(err) {
+			t.Fatalf("protected metadata %s was materialized: %v", rel, err)
+		}
+	}
+}
+
 func TestMaterializeRejectsTraversalEntry(t *testing.T) {
 	store, _ := newStore(t, 1<<20, 10)
 	candidateRoot := newCandidateRoot(t)

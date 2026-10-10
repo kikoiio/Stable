@@ -12,6 +12,7 @@ import (
 
 	"stable/internal/agent"
 	"stable/internal/platform/ipc"
+	"stable/internal/sessionlog"
 )
 
 type StreamClient struct {
@@ -26,6 +27,24 @@ func OpenRun(ctx context.Context, socket string, request agent.ExecutionRequest)
 		return nil, err
 	}
 	if err = client.Send(ClientMsg{Op: "run_start", SessionID: request.Work.SessionID, Run: &request}); err != nil {
+		client.Close()
+		return nil, err
+	}
+	return client, nil
+}
+
+// OpenGoalCoordinatorRun starts one explicit Goal run with a team coordinator
+// binding. Session coordinator mode is selected separately and persists only
+// for subsequent ordinary Session runs.
+func OpenGoalCoordinatorRun(ctx context.Context, socket string, request agent.ExecutionRequest, teamID string) (*StreamClient, error) {
+	if request.Work.Kind != agent.WorkGoal || sessionlog.ValidateID(teamID) != nil {
+		return nil, errors.New("Goal coordinator run requires a Goal scope and valid team ID")
+	}
+	client, err := openStream(ctx, socket)
+	if err != nil {
+		return nil, err
+	}
+	if err = client.Send(ClientMsg{Op: "run_start", SessionID: request.Work.SessionID, Run: &request, CoordinatorTeamID: teamID}); err != nil {
 		client.Close()
 		return nil, err
 	}
@@ -57,6 +76,13 @@ func SubscribeRun(ctx context.Context, socket, sessionID, runID string, afterSeq
 		return nil, err
 	}
 	return client, nil
+}
+
+// SubscribeAgentTasks follows the session's run cursor on an independent
+// connection. Clients filter delegation events and task notifications without
+// changing a currently active parent run subscription.
+func SubscribeAgentTasks(ctx context.Context, socket, sessionID string, afterSeq uint64) (*StreamClient, error) {
+	return SubscribeRun(ctx, socket, sessionID, "", afterSeq)
 }
 
 func openStream(ctx context.Context, socket string) (*StreamClient, error) {

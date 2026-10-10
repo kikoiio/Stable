@@ -20,6 +20,7 @@ import (
 	"stable/internal/permission"
 	"stable/internal/sessionlog"
 	"stable/internal/skills"
+	"stable/internal/workspace"
 )
 
 type Panel int
@@ -95,13 +96,24 @@ type Model struct {
 	ActiveRunID       string
 	LastCursor        uint64
 	stream            *conversation.StreamClient
-	history           *inputhistory.Store
-	historyErr        error
-	histCursor        *inputhistory.Cursor
-	histDraft         string
-	registry          *commands.Registry
-	loader            *commands.Loader
-	host              *commandHost
+	AgentTasks        []agent.AgentTaskSnapshot
+	Worktrees         []workspace.Snapshot
+	WorktreeDialog    *worktreeDecisionDialog
+	worktreeNextPage  *worktreePageRequest
+	// Worktree Goal scope is selected explicitly by /worktrees scope and is
+	// pinned to the session that selected it. An empty GoalID means Session.
+	WorktreeScopeSessionID string
+	WorktreeGoalID         string
+	WorktreeWorkItemID     string
+	agentTaskState
+	teamUIState
+	history    *inputhistory.Store
+	historyErr error
+	histCursor *inputhistory.Cursor
+	histDraft  string
+	registry   *commands.Registry
+	loader     *commands.Loader
+	host       *commandHost
 	// skills is the TUI-side skill catalog: it feeds the /skills listing and
 	// registers one slash command per skill behind the built-in and custom
 	// command names. The conversation service keeps its own instance.
@@ -128,9 +140,23 @@ type commandHost struct {
 func (h *commandHost) send(cmd tea.Cmd) { h.cmds = append(h.cmds, cmd) }
 
 type resultMsg struct {
-	op   string
-	msgs []conversation.ServerMsg
-	err  error
+	taskID     string
+	sessionID  string
+	workKind   string
+	goalID     string
+	workItemID string
+	op         string
+	msgs       []conversation.ServerMsg
+	err        error
+}
+
+type worktreePageRequest struct {
+	sessionID   string
+	workKind    string
+	goalID      string
+	workItemID  string
+	workspaceID string
+	after       string
 }
 
 type runStreamStartedMsg struct {
@@ -316,9 +342,17 @@ func (m *Model) surfaceCommandReport(rejected []string) {
 // hardcoded submitComposer branches one to one, so dispatching through the
 // registry keeps user-visible behavior unchanged.
 func registerBuiltins(host *commandHost, registry *commands.Registry) {
+	registerAgentCommands(host, registry)
+	registerTeamCommands(host, registry)
+	registerWorkspaceCommands(host, registry)
 	set := func(name, description, argPrompt string, local func(args string)) {
 		registry.Register(&commands.Command{Name: name, Description: description, ArgPrompt: argPrompt, Kind: commands.KindLocal, Local: local})
 	}
+	registry.Register(&commands.Command{
+		Name: "delegate", Description: "启动父 agent 并行委派只读调查", ArgPrompt: "任务",
+		Kind: commands.KindPrompt,
+		Body: "请处理下面的任务。你可以在独立、可并行的只读调查有帮助时调用 delegate_tasks，并在收到结果后自行综合。\n\n## 用户任务\n\n$ARGUMENTS",
+	})
 	set("sessions", "浏览会话", "", func(string) {
 		m := host.model
 		m.Composer.SetValue("")
@@ -580,7 +614,11 @@ func requestCmd(socket string, req conversation.ClientMsg) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 		msgs, err := conversation.Request(ctx, socket, req)
-		return resultMsg{op: req.Op, msgs: msgs, err: err}
+		return resultMsg{
+			op: req.Op, sessionID: req.SessionID, taskID: req.TaskID,
+			workKind: req.WorkKind, goalID: req.GoalID, workItemID: req.WorkItemID,
+			msgs: msgs, err: err,
+		}
 	}
 }
 
@@ -594,6 +632,7 @@ const (
 	DialogQuestion
 	DialogPlan
 	DialogReview
+	DialogWorkspace
 	DialogProposal
 	DialogRemoteAccess
 )
@@ -620,6 +659,9 @@ func (m Model) pendingDialog() DialogKind {
 	if m.Review != nil {
 		return DialogReview
 	}
+	if m.WorktreeDialog != nil {
+		return DialogWorkspace
+	}
 	if _, ok := m.popupProposal(); ok {
 		return DialogProposal
 	}
@@ -628,6 +670,12 @@ func (m Model) pendingDialog() DialogKind {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
+	case agentStreamStartedMsg:
+		return m.handleAgentStreamStarted(v)
+	case agentStreamMsg:
+		return m.handleAgentStreamMessage(v)
+	case agentReconnectMsg:
+		return m.handleAgentReconnect(v)
 	case tea.WindowSizeMsg:
 		m.Width, m.Height = v.Width, v.Height
 		m.resize()
@@ -683,6 +731,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if v.message.Type == "resubscribed" {
 			return m, receiveRunCmd(v.client)
 		}
+		if v.message.Type == "agent_task_update" {
+			m.applyRunMessage(v.message)
+			return m, receiveRunCmd(v.client)
+		}
 		if m.Pending && m.ActiveRunID != "" && v.message.RunID != "" && v.message.RunID != m.ActiveRunID {
 			return m, receiveRunCmd(v.client)
 		}
@@ -712,6 +764,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, receiveRunCmd(v.client)
 	case tea.KeyMsg:
 		if v.String() == "ctrl+c" {
+			m.closeAgentStream()
 			if m.stream != nil && m.ActiveRunID != "" {
 				_ = m.stream.Cancel(m.ActiveSession, m.ActiveRunID)
 			}
@@ -734,6 +787,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handlePlanKey(v)
 		case DialogReview:
 			return m.handleReviewKey(v)
+		case DialogWorkspace:
+			return m.handleWorktreeDecisionKey(v)
 		case DialogProposal:
 			return m.handleProposalKey(v)
 		}
@@ -749,6 +804,51 @@ func (m *Model) resize() {
 }
 
 func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
+	if strings.HasPrefix(r.op, "agent_") {
+		return m.handleAgentResult(r)
+	}
+	if strings.HasPrefix(r.op, "team_") {
+		return m.handleTeamResult(r)
+	}
+	if strings.HasPrefix(r.op, "worktree_") {
+		// Async workspace replies are scoped to the exact Session or Goal item
+		// that issued them.
+		// Do not surface an old session's paths in the currently selected session.
+		responseScope := conversation.ClientMsg{
+			SessionID: r.sessionID, WorkKind: r.workKind, GoalID: r.goalID, WorkItemID: r.workItemID,
+		}
+		if responseScope.WorkKind == "" {
+			responseScope.WorkKind = "session"
+		}
+		activeScope := workspaceScopeRequest(&m)
+		if responseScope.SessionID != activeScope.SessionID || responseScope.WorkKind != activeScope.WorkKind || responseScope.GoalID != activeScope.GoalID || responseScope.WorkItemID != activeScope.WorkItemID {
+			if m.WorktreeDialog != nil && m.WorktreeDialog.Snapshot.SessionID == r.sessionID && worktreeDialogScopeMatches(m.WorktreeDialog, responseScope) {
+				m.WorktreeDialog = nil
+			}
+			return m, nil
+		}
+		if r.err != nil {
+			m.Err = r.err
+			m.Status = "工作树请求失败：" + r.err.Error()
+			return m, nil
+		}
+		m.Err = nil
+		applyWorktreeMessages(&m, r.op, r.msgs)
+		if r.op == "worktree_resolve" && m.worktreeNextPage != nil && m.worktreeNextPage.sessionID == r.sessionID && m.worktreeNextPage.workKind == responseScope.WorkKind && m.worktreeNextPage.goalID == responseScope.GoalID && m.worktreeNextPage.workItemID == responseScope.WorkItemID {
+			nextPage := m.worktreeNextPage
+			m.worktreeNextPage = nil
+			for _, msg := range r.msgs {
+				if msg.Worktree != nil && msg.Worktree.ID == nextPage.workspaceID && msg.Worktree.ResolvedCount < msg.Worktree.ConflictCount {
+					return m, requestCmd(m.Socket, conversation.ClientMsg{
+						Op: "worktree_preview", SessionID: nextPage.sessionID, WorkKind: nextPage.workKind,
+						GoalID: nextPage.goalID, WorkItemID: nextPage.workItemID,
+						ID: nextPage.workspaceID, ConflictAfter: nextPage.after,
+					})
+				}
+			}
+		}
+		return m, nil
+	}
 	m.Pending = false
 	if r.err != nil {
 		m.Err = r.err
@@ -980,6 +1080,7 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 		case "transcript":
 			if x.Transcript != nil {
 				m.Events = x.Transcript.Events
+				m.restoreTeamState()
 				m.LastCursor = 0
 				for _, event := range m.Events {
 					if event.Seq > m.LastCursor {
@@ -1051,11 +1152,12 @@ func (m Model) handleResult(r resultMsg) (tea.Model, tea.Cmd) {
 	if r.op == "session_load" && m.ActiveSession != "" {
 		list := requestCmd(m.Socket, conversation.ClientMsg{Op: "approval_list", SessionID: m.ActiveSession})
 		questions := requestCmd(m.Socket, conversation.ClientMsg{Op: "question_list", SessionID: m.ActiveSession})
+		tasks := m.restoreAgentTasks()
 		if !m.approvalPollStarted {
 			m.approvalPollStarted = true
-			return m, tea.Batch(list, questions, approvalPollCmd())
+			return m, tea.Batch(list, questions, approvalPollCmd(), tasks)
 		}
-		return m, tea.Batch(list, questions)
+		return m, tea.Batch(list, questions, tasks)
 	}
 	return m, nil
 }
@@ -1488,6 +1590,10 @@ func (m Model) dispatchCommand(text string) (tea.Model, tea.Cmd, bool) {
 		return m, nil, false
 	}
 	if cmd.Kind == commands.KindPrompt {
+		if cmd.Name == "delegate" && strings.TrimSpace(args) == "" {
+			m.Status = "用法：/delegate <任务>"
+			return m, nil, true
+		}
 		m.Candidates = nil
 		model, submit := m.submitChatPath(commands.ExpandPrompt(cmd.Body, args), text)
 		return model, submit, true
@@ -1734,11 +1840,18 @@ func (m Model) acceptReview(mode candidate.AcceptanceMode, confirmed ...string) 
 	if err != nil {
 		return func() tea.Msg { return resultMsg{op: "review_accept", err: err} }
 	}
-	return requestCmd(m.Socket, conversation.ClientMsg{Op: "review_accept", CandidateID: m.Review.CandidateID, DecisionID: decisionID, PreviewDigest: m.Review.Digest, CandidateDigest: m.Review.CandidateDigest, FormalDigest: m.Review.FormalDigest, AcceptanceMode: string(mode), Confirmed: confirmed})
+	return requestCmd(m.Socket, conversation.ClientMsg{Op: "review_accept", SessionID: m.ActiveSession, CandidateID: m.Review.CandidateID, DecisionID: decisionID, PreviewDigest: m.Review.Digest, CandidateDigest: m.Review.CandidateDigest, FormalDigest: m.Review.FormalDigest, AcceptanceMode: string(mode), Confirmed: confirmed})
 }
 
 func (m *Model) applyRunMessage(message conversation.ServerMsg) {
 	switch message.Type {
+	case "team_update", "team_message_update", "team_task_update", "team_request_update":
+		m.captureTeamMessage(message)
+		m.Status = "团队状态已更新。"
+	case "agent_task_update":
+		if message.AgentTask != nil {
+			m.applyAgentTask(*message.AgentTask, true)
+		}
 	case "approval_pending":
 		if message.Approval != nil {
 			m.upsertApproval(*message.Approval)
@@ -1943,6 +2056,8 @@ func (m Model) View() string {
 		}
 		runActive := m.ActiveRunID != "" || m.Pending
 		return renderReview(*m.Review, m.ReviewConfirmed, m.ReviewCursor, m.ReviewSnapshots, m.RewindPick, m.RewindCursor, m.RewindArmed, runActive, m.Status, errorText, m.Width)
+	case DialogWorkspace:
+		return m.renderWorktreeDecision()
 	case DialogProposal:
 		proposal, _ := m.popupProposal()
 		return renderProposalDialog(proposal, m.Width)

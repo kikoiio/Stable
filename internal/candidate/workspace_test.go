@@ -59,6 +59,290 @@ func TestManifestAndCandidateCopy(t *testing.T) {
 	}
 }
 
+func TestProjectV2ManifestExcludesRootProtectedMetadata(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{".git/config", ".stable/session.json", ".mewcode/settings.json", "src/main.go"} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, digest, err := BuildManifestForPolicy(root, ManifestPolicyProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Path != filepath.Join("src", "main.go") {
+		t.Fatalf("project-v2 entries = %+v", entries)
+	}
+	if err = os.WriteFile(filepath.Join(root, ".git", "config"), []byte("changed"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, after, err := BuildManifestForPolicy(root, ManifestPolicyProject)
+	if err != nil || after != digest {
+		t.Fatalf("protected metadata changed project digest: before=%s after=%s err=%v", digest, after, err)
+	}
+	if _, _, err = BuildManifestForPolicy(root, "unknown"); err == nil {
+		t.Fatal("unknown manifest policy was accepted")
+	}
+}
+
+func TestProjectV2RejectsNestedGitAndCandidateMetadataInjection(t *testing.T) {
+	formal := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(formal, "vendor", ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := BuildManifestForPolicy(formal, ManifestPolicyProject); err == nil {
+		t.Fatal("nested .git metadata was accepted")
+	}
+
+	formal = t.TempDir()
+	if err := os.Mkdir(filepath.Join(formal, ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	candidateRoot := t.TempDir()
+	if err := ValidateProtectedMetadata(formal, candidateRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(candidateRoot, ".git"), []byte("injected"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateProtectedMetadata(formal, candidateRoot); err == nil {
+		t.Fatal("candidate metadata injection was accepted")
+	}
+}
+
+func TestProtectedMetadataIdentityAndPartialRestore(t *testing.T) {
+	formal := t.TempDir()
+	spent := t.TempDir()
+	for _, name := range []string{".git", ".stable", ".mewcode"} {
+		if err := os.Mkdir(filepath.Join(formal, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(formal, name, "state"), []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	facts, err := CaptureProtectedMetadata(formal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".git", ".stable", ".mewcode"} {
+		if err = os.Rename(filepath.Join(formal, name), filepath.Join(spent, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = os.Rename(filepath.Join(spent, ".git"), filepath.Join(formal, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	if err = RestoreProtectedMetadataFacts(formal, spent, facts); err != nil {
+		t.Fatal(err)
+	}
+	if err = RestoreProtectedMetadataFacts(formal, spent, facts); err != nil {
+		t.Fatalf("second metadata recovery was not idempotent: %v", err)
+	}
+	if err = os.Rename(filepath.Join(formal, ".git"), filepath.Join(spent, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Mkdir(filepath.Join(formal, ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = RestoreProtectedMetadataFacts(formal, spent, facts); err == nil {
+		t.Fatal("identity mismatch was not blocked")
+	}
+}
+
+func TestProtectedMetadataRestoreBlocksMetadataCreatedAfterCapture(t *testing.T) {
+	formal := t.TempDir()
+	spent := t.TempDir()
+	facts, err := CaptureProtectedMetadata(formal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fact := range facts {
+		if fact.Present {
+			t.Fatalf("fixture unexpectedly captured %s", fact.Name)
+		}
+	}
+
+	// A concurrent writer creates protected metadata after the transaction
+	// captured its absent-state facts. Recovery must block without deleting it.
+	metadata := filepath.Join(formal, ".git")
+	if err := os.Mkdir(metadata, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(metadata, "config"), []byte("concurrent"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreProtectedMetadataFacts(formal, spent, facts); err == nil {
+		t.Fatal("restore accepted metadata that appeared after capture")
+	}
+	if data, err := os.ReadFile(filepath.Join(metadata, "config")); err != nil || string(data) != "concurrent" {
+		t.Fatalf("concurrent metadata was changed: %q, %v", data, err)
+	}
+	if _, err := os.Lstat(filepath.Join(spent, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected metadata was materialized in spent root: %v", err)
+	}
+}
+
+func TestCreateCandidateProjectV2OmitsProtectedMetadata(t *testing.T) {
+	formal := t.TempDir()
+	for _, name := range []string{".git/config", ".stable/state", ".mewcode/settings"} {
+		path := filepath.Join(formal, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(formal, "source.txt"), []byte("content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := CreateCandidateForPolicy("candidate-v2", formal, t.TempDir(), ManifestPolicyProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ManifestPolicy != ManifestPolicyProject {
+		t.Fatalf("manifest policy = %q", c.ManifestPolicy)
+	}
+	for _, name := range []string{".git", ".stable", ".mewcode"} {
+		if _, err = os.Lstat(filepath.Join(c.CandidateRoot, name)); !os.IsNotExist(err) {
+			t.Fatalf("candidate contains %s: %v", name, err)
+		}
+	}
+	if _, err = os.Stat(filepath.Join(c.CandidateRoot, "source.txt")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAcceptanceRejectsReviewWithDifferentManifestPolicy(t *testing.T) {
+	candidate := Candidate{ID: "candidate-policy", Status: "reviewed", ManifestPolicy: ManifestPolicyProject}
+	review := Review{CandidateID: candidate.ID, ManifestPolicy: ManifestPolicyLegacy}
+	err := validateAcceptance(context.Background(), candidate, review, AcceptanceDecision{})
+	if err == nil || err.Error() != "review manifest policy does not match candidate" {
+		t.Fatalf("acceptance silently accepted a mismatched manifest contract: %v", err)
+	}
+}
+
+func TestProjectV2AcceptanceRestoresProtectedMetadata(t *testing.T) {
+	root := t.TempDir()
+	formal := filepath.Join(root, "formal")
+	candidateParent := filepath.Join(root, "candidates")
+	for _, name := range []string{".git/config", ".stable/session.json", ".mewcode/settings.json"} {
+		path := filepath.Join(formal, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("original:"+name), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(formal, "source.txt"), []byte("before"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := CreateCandidateForPolicy("candidate-accept-v2", formal, candidateParent, ManifestPolicyProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(c.CandidateRoot, "source.txt"), []byte("after"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err = FreezeCandidate(c, nil, context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := BuildReview(context.Background(), c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Status = "reviewed"
+	decision := AcceptanceDecision{ID: "accept-v2", UserID: "test-user", CandidateID: c.ID, CandidateDigest: review.CandidateDigest, PreviewDigest: review.Digest, FormalDigest: review.FormalDigest, Mode: AcceptNormal}
+	if _, err = AcceptCandidate(context.Background(), c, review, decision, "session-test", "", &memoryAcceptance{}, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".git/config", ".stable/session.json", ".mewcode/settings.json"} {
+		data, readErr := os.ReadFile(filepath.Join(formal, name))
+		if readErr != nil || string(data) != "original:"+name {
+			t.Fatalf("protected metadata %s changed: data=%q err=%v", name, data, readErr)
+		}
+	}
+	if data, readErr := os.ReadFile(filepath.Join(formal, "source.txt")); readErr != nil || string(data) != "after" {
+		t.Fatalf("project content was not accepted: data=%q err=%v", data, readErr)
+	}
+}
+
+func TestLegacyAcceptanceRejectsMewcodeReplacementOrOmission(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(string) error
+	}{
+		{
+			name: "replacement",
+			change: func(candidateRoot string) error {
+				return os.WriteFile(filepath.Join(candidateRoot, ".mewcode", "settings.json"), []byte("candidate metadata"), 0600)
+			},
+		},
+		{
+			name: "omission",
+			change: func(candidateRoot string) error {
+				return os.RemoveAll(filepath.Join(candidateRoot, ".mewcode"))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			formal := filepath.Join(root, "formal")
+			metadata := filepath.Join(formal, ".mewcode", "settings.json")
+			if err := os.MkdirAll(filepath.Dir(metadata), 0700); err != nil {
+				t.Fatal(err)
+			}
+			const original = "formal metadata"
+			if err := os.WriteFile(metadata, []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			beforeInfo, err := os.Stat(metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidateRoot := filepath.Join(root, "candidates")
+			c, err := CreateCandidateForPolicy("legacy-mewcode-"+test.name, formal, candidateRoot, ManifestPolicyLegacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.change(c.CandidateRoot); err != nil {
+				t.Fatal(err)
+			}
+			c, err = FreezeCandidate(c, nil, context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			review, err := BuildReview(context.Background(), c, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision := AcceptanceDecision{
+				ID: "accept-legacy-mewcode-" + test.name, UserID: "test-user", CandidateID: c.ID,
+				CandidateDigest: review.CandidateDigest, PreviewDigest: review.Digest,
+				FormalDigest: review.FormalDigest, Mode: AcceptNormal,
+			}
+			if _, err := AcceptCandidate(context.Background(), c, review, decision, "session-test", "", &memoryAcceptance{}, time.Time{}); err == nil {
+				t.Fatal("legacy acceptance with protected .mewcode was permitted")
+			}
+			got, err := os.ReadFile(metadata)
+			if err != nil || string(got) != original {
+				t.Fatalf("formal .mewcode bytes changed: got=%q err=%v", got, err)
+			}
+			afterInfo, err := os.Stat(metadata)
+			if err != nil || !os.SameFile(beforeInfo, afterInfo) {
+				t.Fatalf("formal .mewcode inode changed: before=%v after=%v err=%v", beforeInfo, afterInfo, err)
+			}
+		})
+	}
+}
+
 func TestManifestRejectsSymlink(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target")
@@ -77,9 +361,10 @@ func TestManifestRejectsSymlink(t *testing.T) {
 type fixedChecker struct{ finding Finding }
 
 type memoryAcceptance struct {
-	saved   bool
-	receipt *Receipt
-	phase   string
+	saved    bool
+	receipt  *Receipt
+	phase    string
+	metadata []ProtectedMetadataFact
 }
 
 func (m *memoryAcceptance) CheckAcceptance(_ context.Context, _ AcceptanceDecision) (bool, Receipt, bool, error) {
@@ -99,6 +384,13 @@ func (m *memoryAcceptance) SaveAcceptanceDecision(context.Context, AcceptanceDec
 	m.saved = true
 	m.phase = "prepared"
 	return true, nil
+}
+func (m *memoryAcceptance) SaveProtectedMetadata(_ context.Context, _ string, facts []ProtectedMetadataFact) error {
+	m.metadata = append([]ProtectedMetadataFact(nil), facts...)
+	return nil
+}
+func (m *memoryAcceptance) LoadProtectedMetadata(context.Context, string) ([]ProtectedMetadataFact, error) {
+	return append([]ProtectedMetadataFact(nil), m.metadata...), nil
 }
 func (m *memoryAcceptance) FindAcceptanceReceipt(_ context.Context, _ string) (Receipt, bool, error) {
 	if m.receipt == nil {
@@ -249,4 +541,8 @@ func TestAcceptRejectsStalePreview(t *testing.T) {
 	if _, err = AcceptCandidate(context.Background(), c, review, d, "goal", "action", &memoryAcceptance{}, time.Time{}); err == nil {
 		t.Fatal("stale preview accepted")
 	}
+}
+
+func (m *memoryAcceptance) SaveAcceptanceRootIdentities(context.Context, string, string, string) error {
+	return nil
 }

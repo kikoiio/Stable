@@ -55,11 +55,12 @@ type Context struct {
 }
 
 type Result struct {
-	HookID   string
-	Output   string
-	Success  bool
-	Rejected bool
-	TimedOut bool
+	HookID     string
+	Output     string
+	Success    bool
+	Rejected   bool
+	TimedOut   bool
+	ChildRunID string
 }
 
 var validEvents = map[Event]bool{
@@ -298,7 +299,7 @@ func FireOne(h Hook, ctx Context) Result {
 	case "http":
 		output, err = runHTTPAction(h.Action, timeout)
 	case "agent":
-		err = errors.New("agent action not enabled (reserved for M09)")
+		err = errors.New("agent action must run through the HookGate coordinator")
 	case "command":
 		ctxTimeout, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()

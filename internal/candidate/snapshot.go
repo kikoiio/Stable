@@ -20,15 +20,16 @@ import (
 // FileSnapshot is the trusted record of one candidate's file state, bound
 // to its owning project, session, candidate, and run.
 type FileSnapshot struct {
-	SnapshotID  string          `json:"snapshot_id"`
-	ProjectID   string          `json:"project_id"`
-	SessionID   string          `json:"session_id"`
-	CandidateID string          `json:"candidate_id"`
-	RunID       string          `json:"run_id,omitempty"`
-	Label       string          `json:"label,omitempty"`
-	CreatedAt   time.Time       `json:"created_at"`
-	Digest      string          `json:"digest"`
-	Entries     []ManifestEntry `json:"entries"`
+	SnapshotID     string          `json:"snapshot_id"`
+	ProjectID      string          `json:"project_id"`
+	SessionID      string          `json:"session_id"`
+	CandidateID    string          `json:"candidate_id"`
+	ManifestPolicy string          `json:"manifest_policy,omitempty"`
+	RunID          string          `json:"run_id,omitempty"`
+	Label          string          `json:"label,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+	Digest         string          `json:"digest"`
+	Entries        []ManifestEntry `json:"entries"`
 }
 
 // SnapshotStore keeps content-addressed snapshot blobs and per-candidate
@@ -102,14 +103,22 @@ func NewSnapshotStore(projectRoot string, maxBytes int64, maxManifests int, cred
 // failures return an error before any blob is written, so the caller can
 // refuse the tool change instead of faking a checkpoint.
 func (s *SnapshotStore) Create(sessionID, candidateID, runID, label, candidateRoot string) (FileSnapshot, error) {
-	if sessionID == "" || candidateID == "" {
-		return FileSnapshot{}, errors.New("snapshot requires session and candidate IDs")
-	}
-	label, err := s.redact(label)
+	return s.CreateForPolicy(sessionID, candidateID, runID, label, candidateRoot, ManifestPolicyLegacy)
+}
+
+func (s *SnapshotStore) CreateForPolicy(sessionID, candidateID, runID, label, candidateRoot, policy string) (FileSnapshot, error) {
+	policy, err := normalizeManifestPolicy(policy)
 	if err != nil {
 		return FileSnapshot{}, err
 	}
-	entries, digest, err := BuildManifest(candidateRoot)
+	if sessionID == "" || candidateID == "" {
+		return FileSnapshot{}, errors.New("snapshot requires session and candidate IDs")
+	}
+	label, err = s.redact(label)
+	if err != nil {
+		return FileSnapshot{}, err
+	}
+	entries, digest, err := BuildManifestForPolicy(candidateRoot, policy)
 	if err != nil {
 		return FileSnapshot{}, err
 	}
@@ -146,15 +155,16 @@ func (s *SnapshotStore) Create(sessionID, candidateID, runID, label, candidateRo
 		}
 	}
 	snap := FileSnapshot{
-		SnapshotID:  newSnapshotID(),
-		ProjectID:   s.projectID,
-		SessionID:   sessionID,
-		CandidateID: candidateID,
-		RunID:       runID,
-		Label:       label,
-		CreatedAt:   time.Now().UTC(),
-		Digest:      digest,
-		Entries:     entries,
+		SnapshotID:     newSnapshotID(),
+		ProjectID:      s.projectID,
+		SessionID:      sessionID,
+		CandidateID:    candidateID,
+		ManifestPolicy: policy,
+		RunID:          runID,
+		Label:          label,
+		CreatedAt:      time.Now().UTC(),
+		Digest:         digest,
+		Entries:        entries,
 	}
 	if err = s.writeManifestLocked(snap); err != nil {
 		return FileSnapshot{}, err
@@ -253,10 +263,14 @@ func (s *SnapshotStore) ValidateRestore(candidateID, snapshotID string) (FileSna
 // verifies the result against the snapshot digest. The caller performs the
 // atomic directory exchange; the formal project tree is never a target.
 func (s *SnapshotStore) Materialize(snap FileSnapshot, stagingDir string) error {
+	policy, err := normalizeManifestPolicy(snap.ManifestPolicy)
+	if err != nil {
+		return err
+	}
 	if snap.ProjectID != s.projectID {
 		return errors.New("snapshot belongs to a different project")
 	}
-	stagingDir, err := filepath.Abs(stagingDir)
+	stagingDir, err = filepath.Abs(stagingDir)
 	if err != nil {
 		return err
 	}
@@ -280,7 +294,7 @@ func (s *SnapshotStore) Materialize(snap FileSnapshot, stagingDir string) error 
 			return err
 		}
 	}
-	_, digest, err := BuildManifest(stagingDir)
+	_, digest, err := BuildManifestForPolicy(stagingDir, policy)
 	if err != nil {
 		return err
 	}

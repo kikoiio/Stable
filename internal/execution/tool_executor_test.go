@@ -47,7 +47,7 @@ type executorTestHookRunner struct {
 	sequence    *[]string
 }
 
-func (h *executorTestHookRunner) PreToolUse(_ string, _ string, args map[string]any) (bool, string, string) {
+func (h *executorTestHookRunner) PreToolUseRun(_ context.Context, _ agent.ParentRun, _ string, _ string, args map[string]any) (bool, string, string) {
 	h.preCalls++
 	h.preArgs = args
 	if h.sequence != nil {
@@ -56,7 +56,7 @@ func (h *executorTestHookRunner) PreToolUse(_ string, _ string, args map[string]
 	return h.preRejected, h.preHookID, h.preMessage
 }
 
-func (h *executorTestHookRunner) PostToolUse(_ string, _ string, args map[string]any, result string) {
+func (h *executorTestHookRunner) PostToolUseRun(_ context.Context, _ agent.ParentRun, _ string, _ string, args map[string]any, result string) {
 	h.postCalls++
 	h.postArgs = args
 	h.postContent = result
@@ -642,7 +642,9 @@ func (c *fakeMCPCaller) Instructions() string { return "" }
 // to its re-authorization instead of polling forever.
 type resolvedApprovals struct{ status permission.ApprovalStatus }
 
-func (resolvedApprovals) CreateApproval(context.Context, permission.ApprovalRequest) error { return nil }
+func (resolvedApprovals) CreateApproval(context.Context, permission.ApprovalRequest) error {
+	return nil
+}
 func (resolvedApprovals) GetApproval(context.Context, string) (permission.ApprovalRequest, error) {
 	return permission.ApprovalRequest{}, errors.New("unused")
 }
@@ -652,7 +654,7 @@ func (a resolvedApprovals) GetApprovalForOperation(context.Context, string, stri
 func (resolvedApprovals) ResolveApproval(context.Context, string, permission.ApprovalStatus, string, string, *permission.ExactRule) error {
 	return nil
 }
-func (resolvedApprovals) CancelApproval(context.Context, string, string) error { return nil }
+func (resolvedApprovals) CancelApproval(context.Context, string, string) error          { return nil }
 func (resolvedApprovals) ConsumeApproval(context.Context, string, string, string) error { return nil }
 func (resolvedApprovals) RecordPermissionDecision(context.Context, permission.PermissionDecision, permission.Authority, permission.Operation) error {
 	return nil

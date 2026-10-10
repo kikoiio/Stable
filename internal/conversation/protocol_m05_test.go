@@ -193,7 +193,11 @@ func TestRewindSnapshotRefusals(t *testing.T) {
 
 	// An unfinished rewind journal blocks a second attempt.
 	journaled := newRewindFixture(t)
-	if err := journaled.store.BeginRewind(ctx, store.RewindJournal{ID: "j-1", CandidateID: "cand-1", SnapshotID: journaled.snap.SnapshotID, ExpectedDigest: journaled.currentDigest, TargetDigest: journaled.snap.Digest, StagingDir: filepath.Join(t.TempDir(), "staging")}); err != nil {
+	staging := filepath.Join(t.TempDir(), "staging")
+	if err := os.Mkdir(staging, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := journaled.store.BeginRewind(ctx, store.RewindJournal{ID: "j-1", CandidateID: "cand-1", SnapshotID: journaled.snap.SnapshotID, ExpectedDigest: journaled.currentDigest, TargetDigest: journaled.snap.Digest, StagingDir: staging}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := journaled.service().rewindSnapshot(ctx, journaled.rewindRequest()); err == nil || !strings.Contains(err.Error(), "unfinished") {

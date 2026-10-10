@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,6 +16,71 @@ type providerFunc func(context.Context, llm.Request) (<-chan llm.Event, <-chan e
 func (f providerFunc) Stream(ctx context.Context, request llm.Request) (<-chan llm.Event, <-chan error) {
 	return f(ctx, request)
 }
+
+type gatedExecutor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (e gatedExecutor) Execute(context.Context, llm.ToolUse) (ToolOutcome, error) {
+	e.started <- struct{}{}
+	<-e.release
+	return ToolOutcome{Status: ToolSucceeded, Content: "ok"}, nil
+}
+
+func TestRunnerPublishesDelegationEventsInRunSequence(t *testing.T) {
+	var calls atomic.Int32
+	provider := providerFunc(func(context.Context, llm.Request) (<-chan llm.Event, <-chan error) {
+		events := make(chan llm.Event, 2)
+		if calls.Add(1) == 1 {
+			events <- llm.Event{Kind: llm.ToolCallComplete, Tool: &llm.ToolCall{ID: "read-1", Name: "read_file", Arguments: json.RawMessage(`{"file_path":"a"}`), Complete: true}}
+		} else {
+			events <- llm.Event{Kind: llm.TextDelta, Text: "done"}
+		}
+		events <- llm.Event{Kind: llm.StreamEnd, StopReason: "completed"}
+		close(events)
+		errs := make(chan error)
+		close(errs)
+		return events, errs
+	})
+	executor := gatedExecutor{started: make(chan struct{}, 1), release: make(chan struct{})}
+	runner := NewRunner(provider, RunnerOptions{MaxRetries: -1, ExecutorFactory: FakeExecutorFactory{Executor: &FakeExecutor{Script: []ToolOutcome{{Status: ToolSucceeded}}}}})
+	// Swap in the blocking executor through a small factory so the parent run
+	// remains in the tool execution phase while collaboration is injected.
+	runner.SetTooling(singleExecutorFactory{executor: executor}, nil)
+	handle, err := runner.Start(context.Background(), sessionRequest("delegation-seq"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-executor.started
+	if err = runner.PublishDelegation("delegation-seq", DelegationEvent{BatchID: "batch", TaskID: "task", TaskName: "inspect", Status: DelegationRunning}); err != nil {
+		t.Fatal(err)
+	}
+	close(executor.release)
+	var seqs []uint64
+	found := false
+	for event := range handle.Events {
+		seqs = append(seqs, event.RunSeq)
+		if event.Kind == EventDelegation {
+			found = true
+		}
+	}
+	if outcome := <-handle.Done; outcome.Status != RunCompleted {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	if !found || len(seqs) == 0 {
+		t.Fatalf("delegation event missing: seqs=%v", seqs)
+	}
+	for i, seq := range seqs {
+		if seq != uint64(i+1) {
+			t.Fatalf("run sequence=%v", seqs)
+		}
+	}
+}
+
+type singleExecutorFactory struct{ executor RunExecutor }
+
+func (f singleExecutorFactory) ForRun(ExecutionRequest) (RunExecutor, error) { return f.executor, nil }
 
 func TestRunnerAssignsOrderedEventsAndCompletes(t *testing.T) {
 	provider := providerFunc(func(context.Context, llm.Request) (<-chan llm.Event, <-chan error) {
@@ -149,6 +215,34 @@ func TestRunnerToolCallEndsAwaitingTools(t *testing.T) {
 	}
 	if got := (<-handle.Done).Status; got != RunAwaitingTools {
 		t.Fatalf("status=%s", got)
+	}
+}
+
+func TestRunnerUsesTrustedPerRunToolSchemaOverride(t *testing.T) {
+	var tools []llm.ToolSchema
+	provider := providerFunc(func(_ context.Context, request llm.Request) (<-chan llm.Event, <-chan error) {
+		tools = append([]llm.ToolSchema(nil), request.Tools...)
+		events := make(chan llm.Event, 1)
+		errs := make(chan error)
+		events <- llm.Event{Kind: llm.StreamEnd, StopReason: "completed"}
+		close(events)
+		close(errs)
+		return events, errs
+	})
+	runner := NewRunner(provider, RunnerOptions{MaxRetries: -1, ToolSchemas: []llm.ToolSchema{{Name: "write_file"}, {Name: "read_file"}}})
+	request := sessionRequest("coordinator-tools")
+	request.ToolSchemas = []llm.ToolSchema{{Name: "team_send"}, {Name: "team_task_update"}}
+	handle, err := runner.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range handle.Events {
+	}
+	if outcome := <-handle.Done; outcome.Status != RunCompleted {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	if len(tools) != 2 || tools[0].Name != "team_send" || tools[1].Name != "team_task_update" {
+		t.Fatalf("per-run tool schemas were not applied: %+v", tools)
 	}
 }
 
@@ -394,6 +488,46 @@ func TestRunnerCancellationStopsToolExecution(t *testing.T) {
 	}
 	if outcome := <-handle.Done; outcome.Status != RunCancelled {
 		t.Fatalf("outcome=%+v", outcome)
+	}
+}
+
+func TestTrustedPerRunExecutorOverridesGlobalFactory(t *testing.T) {
+	var calls atomic.Int32
+	provider := providerFunc(func(context.Context, llm.Request) (<-chan llm.Event, <-chan error) {
+		events := make(chan llm.Event, 2)
+		if calls.Add(1) == 1 {
+			events <- llm.Event{Kind: llm.ToolCallComplete, Tool: &llm.ToolCall{ID: "trusted-call", Name: "read_file", Arguments: json.RawMessage(`{"file_path":"a"}`), Complete: true}}
+		} else {
+			events <- llm.Event{Kind: llm.TextDelta, Text: "done"}
+		}
+		events <- llm.Event{Kind: llm.StreamEnd, StopReason: "completed"}
+		close(events)
+		errs := make(chan error)
+		close(errs)
+		return events, errs
+	})
+	globalCalls := atomic.Int32{}
+	trustedCalls := atomic.Int32{}
+	global := executorFactoryFunc(func(ExecutionRequest) (RunExecutor, error) {
+		globalCalls.Add(1)
+		return nil, errors.New("global factory must not be used")
+	})
+	trusted := executorFactoryFunc(func(ExecutionRequest) (RunExecutor, error) {
+		trustedCalls.Add(1)
+		return &FakeExecutor{Script: []ToolOutcome{{Status: ToolSucceeded, Content: "ok"}}}, nil
+	})
+	runner := NewRunner(provider, RunnerOptions{MaxRetries: -1, ExecutorFactory: global})
+	handle, err := runner.StartWithExecutorFactory(context.Background(), sessionRequest("trusted-factory"), trusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range handle.Events {
+	}
+	if outcome := <-handle.Done; outcome.Status != RunCompleted {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	if globalCalls.Load() != 0 || trustedCalls.Load() != 1 {
+		t.Fatalf("global factory calls=%d trusted factory calls=%d", globalCalls.Load(), trustedCalls.Load())
 	}
 }
 

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	tea "github.com/charmbracelet/bubbletea"
 	"stable/internal/sessionlog"
 	"strings"
@@ -17,6 +18,58 @@ func TestRenderMarkdownStructureAndNoColor(t *testing.T) {
 	}
 	if strings.Contains(out, "\x1b[") {
 		t.Fatalf("no-color output contains ANSI: %q", out)
+	}
+}
+
+func TestDelegationEventsAggregateWithoutReasoningStream(t *testing.T) {
+	events := []sessionlog.Event{}
+	for i, status := range []string{"queued", "running", "succeeded"} {
+		payload, _ := json.Marshal(map[string]any{
+			"batch_id": "batch", "task_id": "task", "task_name": "inspect config",
+			"status": status, "stage": "read_file", "summary": "loaded config",
+			"thinking": "private child reasoning",
+		})
+		events = append(events, sessionlog.Event{Seq: uint64(i + 1), Type: sessionlog.EventRunEvent, Data: sessionlog.RunEvent{
+			RunID: "parent", Kind: "delegation_event", Payload: json.RawMessage(payload),
+		}})
+	}
+	out := projectTranscript(events, 80, false)
+	if strings.Count(out, "协作任务") != 1 || !strings.Contains(out, "succeeded") || !strings.Contains(out, "loaded config") || strings.Contains(out, "private child reasoning") {
+		t.Fatalf("delegation projection=%s", out)
+	}
+}
+
+func TestTeamChildTranscriptHidesRawTextAndThinking(t *testing.T) {
+	events := []sessionlog.Event{
+		{Type: sessionlog.EventRunStarted, Data: sessionlog.RunStarted{
+			RunID: "team-child", TeamID: "team-1", TeamMemberID: "member-1", TeamTurnID: "turn-1",
+		}},
+		{Type: sessionlog.EventRunEvent, Data: sessionlog.RunEvent{
+			RunID: "team-child", Kind: "thinking_delta", Payload: map[string]string{"text": "private team child thinking sentinel"},
+		}},
+		{Type: sessionlog.EventRunEvent, Data: sessionlog.RunEvent{
+			RunID: "team-child", Kind: "text_delta", Payload: map[string]string{"text": "raw team child transcript sentinel"},
+		}},
+		{Type: sessionlog.EventRunEvent, Data: sessionlog.RunEvent{
+			RunID: "team-child", Kind: "delegation_event", Payload: map[string]string{
+				"batch_id": "batch-1", "task_id": "turn-1", "task_name": "inspect", "status": "succeeded", "summary": "safe team child summary",
+			},
+		}},
+		{Type: sessionlog.EventRunEvent, Data: sessionlog.RunEvent{
+			RunID: "parent", Kind: "text_delta", Payload: map[string]string{"text": "parent response remains visible"},
+		}},
+	}
+
+	out := projectTranscript(events, 100, false)
+	for _, private := range []string{"private team child thinking sentinel", "raw team child transcript sentinel"} {
+		if strings.Contains(out, private) {
+			t.Errorf("transcript exposed %q:\n%s", private, out)
+		}
+	}
+	for _, visible := range []string{"safe team child summary", "parent response remains visible"} {
+		if !strings.Contains(out, visible) {
+			t.Errorf("transcript omitted %q:\n%s", visible, out)
+		}
 	}
 }
 

@@ -182,24 +182,27 @@ func TestRunEventsEnforcePerRunSequenceAndReplayCursor(t *testing.T) {
 	if _, err = Append(root, s.ID, EventRunEvent, RunEvent{ID: "e3", RunID: "r1", SessionID: s.ID, RunSeq: 2, At: startedAt.Add(2 * time.Millisecond), Kind: "terminal", Payload: map[string]string{"status": "completed"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = Append(root, s.ID, EventRunEvent, RunEvent{ID: "e4", RunID: "r1", SessionID: s.ID, RunSeq: 3, At: startedAt.Add(3 * time.Millisecond), Kind: "text_delta"}); err == nil {
-		t.Fatal("event after terminal accepted")
+	if _, err = Append(root, s.ID, EventRunEvent, RunEvent{ID: "e4", RunID: "r1", SessionID: s.ID, RunSeq: 3, At: startedAt.Add(3 * time.Millisecond), Kind: "delegation_event", Payload: map[string]string{"status": "succeeded"}}); err != nil {
+		t.Fatalf("post-terminal delegation event rejected: %v", err)
 	}
-	if _, err = Append(root, s.ID, EventRunEvent, RunEvent{ID: "e5", RunID: "r2", SessionID: s.ID, RunSeq: 3, At: startedAt.Add(4 * time.Millisecond), Kind: "text_delta"}); err == nil {
+	if _, err = Append(root, s.ID, EventRunEvent, RunEvent{ID: "e5", RunID: "r1", SessionID: s.ID, RunSeq: 4, At: startedAt.Add(4 * time.Millisecond), Kind: "text_delta"}); err == nil {
+		t.Fatal("ordinary event after terminal accepted")
+	}
+	if _, err = Append(root, s.ID, EventRunEvent, RunEvent{ID: "e6", RunID: "r2", SessionID: s.ID, RunSeq: 3, At: startedAt.Add(5 * time.Millisecond), Kind: "text_delta"}); err == nil {
 		t.Fatal("run sequence gap accepted")
 	}
 	partial, err := ReplayAfter(root, s.ID, first.Seq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(partial.Events) != 3 || partial.Events[0].Seq != first.Seq+1 {
+	if len(partial.Events) != 4 || partial.Events[0].Seq != first.Seq+1 {
 		t.Fatalf("cursor replay=%+v", partial.Events)
 	}
 	full, err := Replay(root, s.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(full.Events) != 6 {
+	if len(full.Events) != 7 {
 		t.Fatalf("full event count=%d", len(full.Events))
 	}
 }

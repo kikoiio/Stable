@@ -188,22 +188,19 @@ func TestChatRepliesWithoutGoalOrWorkflowEvent(t *testing.T) {
 	svc, socket := startService(t, model.(decision.StructuredProvider))
 	conn, reader := dial(t, socket)
 	send(t, conn, ClientMsg{Op: "chat", Text: "你好"})
-	user := readMsg(t, reader)
-	agent := readMsg(t, reader)
-	done := readMsg(t, reader)
-	if user.Message == nil || user.Message.Role != core.MessageRoleUser || user.Message.GoalID != "" || agent.Message == nil || agent.Message.Role != core.MessageRoleAgent || !strings.Contains(agent.Message.Text, "你好") || done.Type != "done" {
-		t.Fatalf("chat exchange: %+v %+v %+v", user, agent, done)
+	first := readChatMessagesUntilDone(t, reader)
+	if len(first) != 2 || first[0].Role != core.MessageRoleUser || first[0].GoalID != "" || first[1].Role != core.MessageRoleAgent || !strings.Contains(first[1].Text, "你好") {
+		t.Fatalf("chat exchange: %+v", first)
 	}
 	if len(requests) != 1 || len(requests[0]) < 2 || requests[0][len(requests[0])-1].Content != "你好" {
 		t.Fatalf("model request: %+v", requests)
 	}
 	send(t, conn, ClientMsg{Op: "chat", Text: "还记得刚才说什么吗？"})
-	readMsg(t, reader)
-	readMsg(t, reader)
-	if done := readMsg(t, reader); done.Type != "done" {
-		t.Fatalf("second chat completion: %+v", done)
+	second := readChatMessagesUntilDone(t, reader)
+	if len(second) != 2 || second[0].Role != core.MessageRoleUser || second[1].Role != core.MessageRoleAgent {
+		t.Fatalf("second chat exchange: %+v", second)
 	}
-	if len(requests) != 2 || len(requests[1]) != 4 || requests[1][1].Content != "你好" || requests[1][2].Content != agent.Message.Text {
+	if len(requests) != 2 || len(requests[1]) != 4 || requests[1][1].Content != "你好" || requests[1][2].Content != first[1].Text {
 		t.Fatalf("conversation context: %+v", requests)
 	}
 	events, err := svc.deps.Store.PendingEvents(context.Background())
@@ -213,6 +210,20 @@ func TestChatRepliesWithoutGoalOrWorkflowEvent(t *testing.T) {
 	history, err := svc.deps.Store.ListMessages(context.Background())
 	if err != nil || len(history) != 4 {
 		t.Fatalf("chat history: %+v %v", history, err)
+	}
+}
+
+func readChatMessagesUntilDone(t *testing.T, reader *bufio.Reader) []core.SessionMessage {
+	t.Helper()
+	var messages []core.SessionMessage
+	for {
+		msg := readMsg(t, reader)
+		if msg.Type == "done" {
+			return messages
+		}
+		if msg.Type == "message" && msg.Message != nil && msg.Message.Ref == "chat" {
+			messages = append(messages, *msg.Message)
+		}
 	}
 }
 
@@ -310,7 +321,7 @@ func TestLegacyHistoryIsNotReplayedButLiveGoalMessagesBroadcast(t *testing.T) {
 	if msgA.Type != "message" || msgA.Message.Text != "focus on J1" {
 		t.Fatalf("client A: %+v", msgA)
 	}
-	msgB := readMsg(t, rb)
+	msgB := readRequestMsg(t, rb)
 	if msgB.Type != "message" || msgB.Message.Text != "focus on J1" {
 		t.Fatalf("client B missed broadcast: %+v", msgB)
 	}

@@ -91,11 +91,11 @@ func (k KicadERCChecker) Check(ctx context.Context, c Candidate) (Finding, error
 	if c.ID == "" || c.FormalRoot == "" || c.CandidateRoot == "" || c.Status != "frozen" && c.Status != "reviewed" {
 		return Finding{}, errors.New("KiCad checker requires a frozen candidate")
 	}
-	formal, formalBefore, err := BuildManifest(c.FormalRoot)
+	formal, formalBefore, err := BuildManifestForPolicy(c.FormalRoot, c.ManifestPolicy)
 	if err != nil {
 		return Finding{}, err
 	}
-	proposed, candidateBefore, err := BuildManifest(c.CandidateRoot)
+	proposed, candidateBefore, err := BuildManifestForPolicy(c.CandidateRoot, c.ManifestPolicy)
 	if err != nil {
 		return Finding{}, err
 	}
@@ -218,11 +218,11 @@ func (k KicadERCChecker) Check(ctx context.Context, c Candidate) (Finding, error
 			return Finding{}, err
 		}
 	}
-	_, formalAfter, err := BuildManifest(c.FormalRoot)
+	_, formalAfter, err := BuildManifestForPolicy(c.FormalRoot, c.ManifestPolicy)
 	if err != nil {
 		return Finding{}, err
 	}
-	_, candidateAfter, err := BuildManifest(c.CandidateRoot)
+	_, candidateAfter, err := BuildManifestForPolicy(c.CandidateRoot, c.ManifestPolicy)
 	if err != nil {
 		return Finding{}, err
 	}

@@ -3,6 +3,8 @@ package execution
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,11 +22,13 @@ import (
 	"stable/internal/candidate"
 	"stable/internal/llm"
 	"stable/internal/permission"
+	"stable/internal/platform/proc"
 	"stable/internal/platform/sandbox"
 	"stable/internal/redact"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
 	"stable/internal/todo"
+	"stable/internal/workspace"
 )
 
 const (
@@ -78,12 +82,36 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 	started := e.deps.Now()
 	args := map[string]any{}
 	postHook := false
+	var writeReservation workspace.WriteReservation
+	reservationSettled := false
+	defer func() {
+		if writeReservation != nil && !reservationSettled {
+			writeReservation.Release()
+		}
+	}()
 	defer func() {
 		if postHook && ctx.Err() == nil && e.deps.HookRunner != nil {
-			e.deps.HookRunner.PostToolUse(e.request.Work.SessionID, call.Name, args, outcome.Content)
+			e.deps.HookRunner.PostToolUseRun(ctx, e.hookParentRun(), e.request.Work.SessionID, call.Name, args, outcome.Content)
 		}
 	}()
 	outcome = agent.ToolOutcome{CallID: call.ID, ToolName: call.Name, Status: agent.ToolFailed, IsError: true}
+	if e.deps.ReadOnly && call.Name != "read_file" && call.Name != "glob" && call.Name != "grep" {
+		outcome.Content = "Error: child run only permits read_file, glob, and grep"
+		return e.finish(outcome, started), nil
+	}
+	workspaceLifecycleAllowed := e.deps.WorkspaceLifecycle != nil && isWorkspaceLifecycleTool(call.Name) && e.request.TeamTurn == nil && !e.request.TeamCoordinator && !e.request.TeamUser
+	if e.deps.WorkspaceLease != nil && call.Name != "read_file" && call.Name != "glob" && call.Name != "grep" && call.Name != "write_file" && call.Name != "edit_file" && call.Name != "command" && !workspaceLifecycleAllowed {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace child only permits bounded file tools and isolated command"
+		return e.finish(outcome, started), nil
+	}
+	if e.deps.WorkspaceLease != nil && !isWorkspaceLifecycleTool(call.Name) {
+		leaseCheck, leaseErr := e.deps.WorkspaceAccounting.ReserveWriterWrite(ctx, *e.deps.WorkspaceLease, 0)
+		if leaseErr != nil {
+			outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace writer lease is stale or blocked"
+			return e.finish(outcome, started), nil
+		}
+		leaseCheck.Release()
+	}
 	if len(call.Arguments) != 0 {
 		if err = json.Unmarshal(call.Arguments, &args); err != nil {
 			outcome.Content = "Error: invalid tool arguments"
@@ -95,18 +123,32 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		return e.finish(outcome, started), nil
 	}
 	if e.deps.SessionRoot != "" {
-		if _, logErr := sessionlog.Append(e.deps.SessionRoot, e.request.Work.SessionID, sessionlog.EventToolCall, sessionlog.ToolCall{CallID: call.ID, Name: call.Name, Input: redactJSON(memoryAuditInput(call.Name, args), e.deps.ProviderCredential)}); logErr != nil {
+		if _, logErr := sessionlog.Append(e.deps.SessionRoot, e.request.Work.SessionID, sessionlog.EventToolCall, sessionlog.ToolCall{CallID: call.ID, RunID: e.request.RunID, Name: call.Name, Input: redactJSON(memoryAuditInput(call.Name, args), e.deps.ProviderCredential)}); logErr != nil {
 			return outcome, fmt.Errorf("record tool call: %w", logErr)
 		}
 	}
+	if e.request.TeamCoordinator && !TeamCoordinatorToolAllowed(call.Name) {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: coordinator mode only permits team coordination tools"
+		return e.finish(outcome, started), nil
+	}
+	if isWorkspaceLifecycleTool(call.Name) {
+		var allowed bool
+		outcome, allowed = e.authorizeWorkspaceLifecycleTool(ctx, call, args, outcome)
+		if !allowed {
+			return e.finish(outcome, started), nil
+		}
+	}
 	if !e.authority.ReadOnly && e.deps.HookRunner != nil {
-		rejected, hookID, message := e.deps.HookRunner.PreToolUse(e.request.Work.SessionID, call.Name, args)
+		rejected, hookID, message := e.deps.HookRunner.PreToolUseRun(ctx, e.hookParentRun(), e.request.Work.SessionID, call.Name, args)
 		if rejected {
 			outcome.Status = agent.ToolDenied
 			outcome.Content = fmt.Sprintf("Blocked by hook %s: %s", hookID, message)
 			return e.finish(outcome, started), nil
 		}
 		postHook = true
+	}
+	if isWorkspaceLifecycleTool(call.Name) {
+		return e.finish(e.executeWorkspaceLifecycleTool(ctx, call, outcome), started), nil
 	}
 	// M06 host-side branches run before the sandbox mapping: the interactive
 	// and task tools never touch the filesystem, and a write to the session's
@@ -193,6 +235,30 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 				return e.finish(outcome, started), nil
 			}
 		}
+		if e.deps.WorkspaceLease != nil {
+			growth, estimateErr := e.estimateWorkspaceWrite(args, call.Name, rel)
+			if estimateErr != nil {
+				outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace write exceeds file limits"
+				return e.finish(outcome, started), nil
+			}
+			writeReservation, err = e.deps.WorkspaceAccounting.ReserveWriterWrite(ctx, *e.deps.WorkspaceLease, growth)
+			if err != nil {
+				outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace quota or writer lease rejected the change"
+				return e.finish(outcome, started), nil
+			}
+		}
+	}
+	if kind == permission.OpCommand && e.deps.WorkspaceLease != nil {
+		used, usageErr := workspace.DiskUsage(ctx, e.deps.WorkspaceLease.Paths.Root, workspace.DefaultLimits())
+		if usageErr != nil {
+			outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace usage unavailable"
+			return e.finish(outcome, started), nil
+		}
+		writeReservation, err = e.deps.WorkspaceAccounting.ReserveWriterWrite(ctx, *e.deps.WorkspaceLease, workspace.DefaultLimits().MaxWorkspaceBytes-used)
+		if err != nil {
+			outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace command budget unavailable"
+			return e.finish(outcome, started), nil
+		}
 	}
 	// Checkpoint the candidate before any file-changing call. A blocked
 	// candidate refuses further mutations, and a failed pre-state snapshot
@@ -217,6 +283,17 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 		response, err = e.executeCommand(ctx, args)
 	} else {
 		response, diff, err = e.executeHelper(ctx, call.Name, tool, args, rel)
+	}
+
+	if writeReservation != nil {
+		settleCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		commitErr := writeReservation.Commit(settleCtx)
+		cancel()
+		reservationSettled = true
+		if commitErr != nil {
+			outcome.Status, outcome.Content = agent.ToolFailed, "Error: workspace write settlement failed; writer is blocked"
+			return e.finish(outcome, started), err
+		}
 	}
 	if err != nil {
 		if errors.Is(err, sandbox.ErrUnavailable) {
@@ -248,6 +325,7 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 				outcome.Content += "\nError: post-change snapshot failed; candidate is blocked from further writes and acceptance"
 			}
 		}
+
 	}
 	return e.finish(outcome, started), nil
 }
@@ -257,7 +335,7 @@ func (e *toolRunExecutor) Execute(ctx context.Context, call llm.ToolUse) (outcom
 // instead of writing a duplicate, so only real state transitions consume the
 // per-candidate manifest quota.
 func (e *toolRunExecutor) preSnapshot(ctx context.Context, tool string, outcome *agent.ToolOutcome) (string, error) {
-	_, digest, err := candidate.BuildManifest(e.candidate.CandidateRoot)
+	_, digest, err := candidate.BuildManifestForPolicy(e.candidate.CandidateRoot, e.candidate.ManifestPolicy)
 	if err != nil {
 		e.blockCandidate(ctx, "pre-change snapshot failed")
 		return "", err
@@ -265,7 +343,7 @@ func (e *toolRunExecutor) preSnapshot(ctx context.Context, tool string, outcome 
 	if digest == e.snapshotDigest {
 		return digest, nil
 	}
-	snap, err := e.deps.Snapshots.Create(e.request.Work.SessionID, e.candidate.ID, e.request.RunID, "pre:"+tool, e.candidate.CandidateRoot)
+	snap, err := e.deps.Snapshots.CreateForPolicy(e.request.Work.SessionID, e.candidate.ID, e.request.RunID, "pre:"+tool, e.candidate.CandidateRoot, e.candidate.ManifestPolicy)
 	if err != nil {
 		e.blockCandidate(ctx, "pre-change snapshot failed")
 		return "", err
@@ -278,7 +356,7 @@ func (e *toolRunExecutor) preSnapshot(ctx context.Context, tool string, outcome 
 // postSnapshot checkpoints the candidate after a successful file-changing
 // call when its digest moved away from the pre-call state.
 func (e *toolRunExecutor) postSnapshot(ctx context.Context, tool, preDigest string, outcome *agent.ToolOutcome) error {
-	_, digest, err := candidate.BuildManifest(e.candidate.CandidateRoot)
+	_, digest, err := candidate.BuildManifestForPolicy(e.candidate.CandidateRoot, e.candidate.ManifestPolicy)
 	if err != nil {
 		e.blockCandidate(ctx, "post-change snapshot failed")
 		return err
@@ -286,7 +364,7 @@ func (e *toolRunExecutor) postSnapshot(ctx context.Context, tool, preDigest stri
 	if digest == preDigest {
 		return nil
 	}
-	snap, err := e.deps.Snapshots.Create(e.request.Work.SessionID, e.candidate.ID, e.request.RunID, "post:"+tool, e.candidate.CandidateRoot)
+	snap, err := e.deps.Snapshots.CreateForPolicy(e.request.Work.SessionID, e.candidate.ID, e.request.RunID, "post:"+tool, e.candidate.CandidateRoot, e.candidate.ManifestPolicy)
 	if err != nil {
 		e.blockCandidate(ctx, "post-change snapshot failed")
 		return err
@@ -331,12 +409,26 @@ func (e *toolRunExecutor) mapTool(name string, args map[string]any) (helperName 
 		if command, _ := args["command"].(string); strings.TrimSpace(command) == "" {
 			return "", "", "", "", errors.New("command is required")
 		}
+		if e.deps.WorkspaceLease != nil {
+			lease := e.deps.WorkspaceLease
+			if err := sandbox.BoundedWorkspaceVolume(lease.Paths.Root, lease.Paths.Baseline, lease.Paths.Repository, lease.Paths.Checkout, lease.Paths.Run); err != nil {
+				return "", "", "", "", err
+			}
+		}
 		return "", permission.OpCommand, "Command", "", nil
 	default:
 		return "", "", "", "", fmt.Errorf("unknown tool %q", name)
 	}
 	if err != nil {
 		return "", "", "", "", err
+	}
+	if e.deps.WorkspaceLease != nil {
+		if name == "command" {
+			return "", "", "", "", errors.New("command requires an enforced workspace disk quota")
+		}
+		if relative != "" && workspace.ProtectedRoot(relative) {
+			return "", "", "", "", workspace.ErrUnsafePath
+		}
 	}
 	if relative == "." {
 		relative = ""
@@ -369,6 +461,9 @@ func cleanArg(args map[string]any, key, fallback string) (string, error) {
 
 func (e *toolRunExecutor) checkMappedPath(kind permission.OperationKind, rel string) error {
 	root := e.authority.AllowedRoot
+	if e.deps.WorkspaceLease != nil {
+		root = e.authority.CandidateRoot
+	}
 	if kind == permission.OpWrite {
 		root = e.authority.CandidateRoot
 		if e.candidate != nil {
@@ -391,6 +486,19 @@ func (e *toolRunExecutor) checkMappedPath(kind permission.OperationKind, rel str
 }
 
 func (e *toolRunExecutor) ensureCandidate(ctx context.Context) error {
+	if e.deps.WorkspaceLease != nil {
+		lease := e.deps.WorkspaceLease
+		if lease.RunID != e.request.RunID || lease.Generation == 0 || filepath.Clean(lease.Paths.Checkout) != filepath.Clean(e.authority.CandidateRoot) {
+			return workspace.ErrOwnership
+		}
+		for _, root := range []string{lease.Paths.Baseline, lease.Paths.Checkout, lease.Paths.Run} {
+			info, err := os.Lstat(root)
+			if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return workspace.ErrOwnership
+			}
+		}
+		return nil
+	}
 	if e.candidate != nil {
 		return nil
 	}
@@ -421,6 +529,47 @@ func (e *toolRunExecutor) ensureCandidate(ctx context.Context) error {
 	e.candidate = &created
 	e.authority.CandidateRoot = created.CandidateRoot
 	return nil
+}
+
+func (e *toolRunExecutor) estimateWorkspaceWrite(args map[string]any, name, rel string) (int64, error) {
+	var size int
+	switch name {
+	case "write_file":
+		content, ok := args["content"].(string)
+		if !ok {
+			return 0, workspace.ErrOwnership
+		}
+		size = len(content)
+	case "edit_file":
+		content, ok := args["new_string"].(string)
+		if !ok {
+			return 0, workspace.ErrOwnership
+		}
+		old, ok := args["old_string"].(string)
+		if !ok || old == "" {
+			return 0, workspace.ErrOwnership
+		}
+		info, err := os.Lstat(filepath.Join(e.authority.CandidateRoot, rel))
+		if err != nil || !info.Mode().IsRegular() || info.Size() > workspace.DefaultLimits().MaxFileBytes {
+			return 0, workspace.ErrQuota
+		}
+		data, err := os.ReadFile(filepath.Join(e.authority.CandidateRoot, rel))
+		if err != nil {
+			return 0, err
+		}
+		replacements := strings.Count(string(data), old)
+		if all, _ := args["replace_all"].(bool); !all && replacements > 1 {
+			replacements = 1
+		}
+		size = len(data) + replacements*(len(content)-len(old))
+	default:
+		return 0, workspace.ErrOwnership
+	}
+	limits := workspace.DefaultLimits()
+	if int64(size) > limits.MaxFileBytes || int64(size) > limits.MaxWorkspaceBytes-(64<<10) {
+		return 0, workspace.ErrQuota
+	}
+	return int64(size) + (64 << 10), nil
 }
 
 func (e *toolRunExecutor) executeHelper(ctx context.Context, modelName, helper string, args map[string]any, rel string) (string, *agent.DiffSummary, error) {
@@ -461,12 +610,16 @@ func (e *toolRunExecutor) executeHelper(ctx context.Context, modelName, helper s
 	// persistent session bounds remain unchanged.
 	profileAuthority := e.authority
 	profileAuthority.CandidateRoot = candidateMount
+	if e.deps.WorkspaceLease != nil && (helper == "ReadFile" || helper == "Glob" || helper == "Grep") {
+		profileAuthority.AllowedRoot = e.authority.CandidateRoot
+	}
 	profile, err := OneShotSandboxProfile(ctx, profileAuthority, e.runRoot, helperAbs, toolRunTimeout, 1<<20, nil)
 	if err != nil {
 		return "", nil, err
 	}
-	profile.ReadOnlyMounts = []sandbox.ReadOnlyMount{{HostPath: filepath.Dir(helperAbs), GuestPath: "/workspace/runtime"}}
-	result, err := e.deps.Sandbox.RunIsolated(ctx, profile, []string{"/workspace/runtime/" + filepath.Base(helperAbs), "--stable-tool-exec"}, bytes.NewReader(append(request, '\n')))
+	profile.ReadOnlyFiles = []sandbox.ReadOnlyFileMount{{HostPath: helperAbs, GuestPath: "/workspace/runtime/agentworker"}}
+	profile.WorkspaceIsolation = e.deps.WorkspaceLease != nil
+	result, err := e.deps.Sandbox.RunIsolated(ctx, profile, []string{"/workspace/runtime/agentworker", "--stable-tool-exec"}, bytes.NewReader(append(request, '\n')))
 	if err != nil {
 		return "", nil, err
 	}
@@ -506,9 +659,37 @@ func (e *toolRunExecutor) executeCommand(ctx context.Context, args map[string]an
 			return "", err
 		}
 	}
-	profile, err := OneShotSandboxProfile(ctx, e.authority, e.runRoot, helperPath, commandTimeoutFor(args), 1<<20, nil)
+	timeout := commandTimeoutFor(args)
+	if e.deps.WorkspaceLease != nil {
+		timeout = min(timeout, 90*time.Second)
+	}
+	profile, err := OneShotSandboxProfile(ctx, e.authority, e.runRoot, helperPath, timeout, 1<<20, nil)
 	if err != nil {
 		return "", err
+	}
+	if e.deps.WorkspaceLease != nil {
+		accounting, ok := e.deps.WorkspaceAccounting.(workspace.WriterProcessAccounting)
+		if !ok {
+			return "", errors.New("workspace command requires durable sandbox process identity tracking")
+		}
+		var tokenBytes [32]byte
+		if _, err := rand.Read(tokenBytes[:]); err != nil {
+			return "", fmt.Errorf("create workspace process token: %w", err)
+		}
+		identity := proc.TrackedProcess{
+			Token: hex.EncodeToString(tokenBytes[:]), WorkspaceID: e.deps.WorkspaceLease.WorkspaceID,
+			RunID: e.deps.WorkspaceLease.RunID, Generation: e.deps.WorkspaceLease.Generation,
+		}
+		profile.WorkspaceIsolation = true
+		profile.WorkspaceVolumeRoot = e.deps.WorkspaceLease.Paths.Root
+		profile.WorkspaceProcess = &identity
+		lease := *e.deps.WorkspaceLease
+		profile.OnProcessStart = func(process proc.TrackedProcess) error {
+			return accounting.RegisterWriterProcess(context.Background(), lease, process)
+		}
+		profile.OnProcessExit = func(process proc.TrackedProcess) error {
+			return accounting.ClearWriterProcess(context.Background(), lease, process)
+		}
 	}
 	result, err := e.deps.Sandbox.RunIsolated(ctx, profile, []string{"bash", "-c", command}, nil)
 	if err != nil {
@@ -692,6 +873,17 @@ func (e *toolRunExecutor) executeHostTool(ctx context.Context, call llm.ToolUse,
 		return e.executeTaskTool(call, args, outcome), true
 	case "load_skill":
 		return e.executeLoadSkill(ctx, call, args, outcome), true
+	case "run_agent", "task_output", "task_stop":
+		return e.executeAgentTaskTool(ctx, call, args, outcome), true
+	case "team_create", "team_member_spawn", "team_member_resume", "team_list", "team_get", "team_close", "team_member_get", "team_member_list", "team_send", "team_messages", "team_plan_submit", "team_request_list", "team_request_respond", "team_shutdown_request", "team_task_create", "team_task_get", "team_task_list", "team_task_update":
+		if e.deps.TeamTools != nil {
+			teamOutcome, err := e.deps.TeamTools.Execute(ctx, e.request, call)
+			if err != nil {
+				outcome.Status, outcome.Content = agent.ToolFailed, "Error: team operation failed"
+				return outcome, true
+			}
+			return teamOutcome, true
+		}
 	case "mcp_call":
 		if e.deps.MCP != nil {
 			return e.executeMCPCall(ctx, call, args, outcome), true
@@ -720,6 +912,10 @@ func (e *toolRunExecutor) executeHostTool(ctx context.Context, call llm.ToolUse,
 			outcome.Status, outcome.IsError = agent.ToolSucceeded, false
 			return outcome, true
 		}
+	case "delegate_tasks":
+		if e.deps.Delegator != nil {
+			return e.executeDelegation(ctx, args, outcome), true
+		}
 	case "write_file", "edit_file":
 		if target, ok := e.planFileTarget(args); ok {
 			return e.executePlanFileWrite(ctx, call, args, target, outcome), true
@@ -738,6 +934,134 @@ func boundedMemoryEventText(value string) string {
 		return string(runes[:sessionlog.MaxMemoryEventText])
 	}
 	return value
+}
+
+func (e *toolRunExecutor) authorizeWorkspaceLifecycleTool(ctx context.Context, call llm.ToolUse, args map[string]any, outcome agent.ToolOutcome) (agent.ToolOutcome, bool) {
+	if e.deps.WorkspaceLifecycle == nil || e.request.TeamTurn != nil || e.request.TeamCoordinator || e.request.TeamUser {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace lifecycle tools are available only to a lead run"
+		return outcome, false
+	}
+	if e.deps.Gate == nil {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: permission gate unavailable"
+		return outcome, false
+	}
+	parameters, err := json.Marshal(args)
+	if err != nil {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace lifecycle arguments are invalid"
+		return outcome, false
+	}
+	operation := permission.Operation{ID: call.ID, Kind: permission.OpWorkspaceLifecycle, Name: call.Name, Parameters: parameters}
+	decision, authErr := e.deps.Gate.Authorize(ctx, e.authority, operation)
+	if authErr != nil {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: permission authorization failed"
+		return outcome, false
+	}
+	if decision.Kind == permission.DecisionAsk {
+		if e.approvalObserver != nil {
+			e.approvalObserver()
+		}
+		decision, authErr = e.waitForApproval(ctx, operation)
+		if authErr != nil {
+			if errors.Is(authErr, context.Canceled) || errors.Is(authErr, context.DeadlineExceeded) {
+				outcome.Content = "Error: run cancelled while awaiting workspace permission approval"
+				return outcome, false
+			}
+			outcome.Status, outcome.Content = agent.ToolDenied, "Error: workspace permission approval unavailable"
+			return outcome, false
+		}
+	}
+	if decision.Kind != permission.DecisionAllow {
+		outcome.Status, outcome.Content = agent.ToolDenied, "Error: "+safeReason(decision.Reason, "workspace lifecycle operation denied")
+		return outcome, false
+	}
+	return outcome, true
+}
+
+func (e *toolRunExecutor) executeWorkspaceLifecycleTool(ctx context.Context, call llm.ToolUse, outcome agent.ToolOutcome) agent.ToolOutcome {
+	var lease *workspace.WriterLease
+	if e.deps.WorkspaceLease != nil {
+		leaseCopy := *e.deps.WorkspaceLease
+		lease = &leaseCopy
+	}
+	result, err := e.deps.WorkspaceLifecycle.Execute(ctx, e.request, lease, call)
+	if err != nil {
+		outcome.Status, outcome.Content = agent.ToolFailed, "Error: workspace lifecycle operation unavailable"
+		return outcome
+	}
+	if result.CallID == "" {
+		result.CallID = call.ID
+	}
+	if result.ToolName == "" {
+		result.ToolName = call.Name
+	}
+	return result
+}
+
+func (e *toolRunExecutor) executeDelegation(ctx context.Context, args map[string]any, outcome agent.ToolOutcome) agent.ToolOutcome {
+	if e.request.Work.Kind != agent.WorkSession {
+		outcome.Content = "Error: delegate_tasks is available only to session runs"
+		return outcome
+	}
+	if e.deps.Provider == nil || e.deps.Delegator == nil {
+		outcome.Content = "Error: delegation service is unavailable"
+		return outcome
+	}
+	rawTasks, ok := args["tasks"].([]any)
+	if !ok {
+		outcome.Content = "Error: tasks must be an array"
+		return outcome
+	}
+	tasks := make([]agent.DelegationTask, 0, len(rawTasks))
+	for i, raw := range rawTasks {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			outcome.Content = fmt.Sprintf("Error: task %d must be an object", i+1)
+			return outcome
+		}
+		task := agent.DelegationTask{}
+		task.ID, _ = item["id"].(string)
+		task.Name, _ = item["name"].(string)
+		task.Instruction, _ = item["instruction"].(string)
+		tasks = append(tasks, task)
+	}
+	childDeps := e.deps
+	childDeps.SessionRoot = "" // child tool calls are intentionally not transcript events
+	childDeps.HookRunner = nil // read-only child tools cannot recursively invoke hooks
+	childFactory := NewToolExecutorFactory(childDeps, WithReadOnlyTools())
+	permissionBounds, err := json.Marshal(e.authority)
+	if err != nil {
+		outcome.Content = "Error: could not derive delegation permissions"
+		return outcome
+	}
+	parent := agent.ParentRun{
+		RunID: e.request.RunID, Deadline: e.request.RunDeadline, Work: e.request.Work,
+		ProjectRoot: e.authority.AllowedRoot, PermissionBounds: permissionBounds,
+		Provider: e.deps.Provider, ProviderName: e.request.ProviderName, Model: e.request.Model,
+		ToolSchemas: ReadOnlyToolSchemas(), ExecutorFactory: childFactory,
+	}
+	results, err := e.deps.Delegator.RunBatch(ctx, parent, tasks)
+	if err != nil {
+		outcome.Content = "Error: " + err.Error()
+		return outcome
+	}
+	encoded, err := json.Marshal(results)
+	if err != nil {
+		outcome.Content = "Error: could not encode delegation results"
+		return outcome
+	}
+	outcome.Content = string(encoded)
+	outcome.Status = agent.ToolSucceeded
+	outcome.IsError = true
+	for _, result := range results {
+		if result.Status == agent.DelegationSucceeded {
+			outcome.IsError = false
+			break
+		}
+	}
+	if outcome.IsError {
+		outcome.Status = agent.ToolFailed
+	}
+	return outcome
 }
 
 // executePlanFileWrite writes the session plan file on the host. The
@@ -1094,9 +1418,9 @@ func (e *toolRunExecutor) executeTaskTool(call llm.ToolUse, args map[string]any,
 }
 
 // executeLoadSkill activates a skill through the host SkillProvider and
-// returns its rendered body as the tool result. The provider composes all
-// error cases — unknown skill (with the available names), fork-mode skills,
-// unreadable bodies — so the executor only validates the arguments.
+// returns its rendered body or fork result as the tool result. The provider
+// composes error cases such as unknown skills and unreadable bodies, so the
+// executor only validates the arguments.
 func (e *toolRunExecutor) executeLoadSkill(ctx context.Context, call llm.ToolUse, args map[string]any, outcome agent.ToolOutcome) agent.ToolOutcome {
 	name, _ := args["name"].(string)
 	if strings.TrimSpace(name) == "" {
@@ -1108,6 +1432,14 @@ func (e *toolRunExecutor) executeLoadSkill(ctx context.Context, call llm.ToolUse
 		return outcome
 	}
 	skillArgs, _ := args["args"].(string)
+	parent, err := e.forkSkillParentRun()
+	if err != nil {
+		outcome.Content = "Error: could not derive fork skill context"
+		return outcome
+	}
+	// SkillProvider decides whether the named skill is fork-mode. Inline skills
+	// ignore this optional context and retain their existing activation path.
+	ctx = agent.WithForkSkillParentRun(ctx, parent)
 	body, err := e.deps.SkillProvider.LoadSkill(ctx, e.request.Work.SessionID, name, skillArgs)
 	if err != nil {
 		outcome.Content = "Error: " + err.Error()
@@ -1115,6 +1447,37 @@ func (e *toolRunExecutor) executeLoadSkill(ctx context.Context, call llm.ToolUse
 	}
 	outcome.Status, outcome.IsError, outcome.Content = agent.ToolSucceeded, false, "# Skill: "+name+"\n\n"+body
 	return outcome
+}
+
+// forkSkillParentRun derives the fork child's authority and runtime inputs
+// from the currently active parent run. The child factory enforces the same
+// read-only tool allowlist used by delegate_tasks.
+func (e *toolRunExecutor) forkSkillParentRun() (agent.ParentRun, error) {
+	permissionBounds, err := json.Marshal(e.authority)
+	if err != nil {
+		return agent.ParentRun{}, err
+	}
+	childDeps := e.deps
+	childDeps.SessionRoot = "" // child tool calls are not parent transcript events
+	childDeps.HookRunner = nil
+	childFactory := NewToolExecutorFactory(childDeps, WithReadOnlyTools())
+	return agent.ParentRun{
+		RunID: e.request.RunID, Deadline: e.request.RunDeadline, Work: e.request.Work,
+		ProjectRoot: e.authority.AllowedRoot, PermissionBounds: permissionBounds,
+		Provider: e.deps.Provider, ProviderName: e.request.ProviderName, Model: e.request.Model,
+		ToolSchemas: ReadOnlyToolSchemas(), ExecutorFactory: childFactory,
+	}, nil
+}
+
+func (e *toolRunExecutor) hookParentRun() agent.ParentRun {
+	parent, err := e.forkSkillParentRun()
+	if err == nil {
+		return parent
+	}
+	// Keep enough event identity for non-agent hooks to proceed even when the
+	// read-only child runtime is unavailable. An agent action will then fail
+	// through its normal hook error policy.
+	return agent.ParentRun{RunID: e.request.RunID, Deadline: e.request.RunDeadline, Work: e.request.Work}
 }
 
 func (e *toolRunExecutor) executeTaskCreate(list *todo.TaskList, args map[string]any, outcome agent.ToolOutcome) agent.ToolOutcome {
