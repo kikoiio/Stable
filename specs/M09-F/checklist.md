@@ -11,6 +11,7 @@
 ## AC1 归属与进入退出
 
 - [ ] workspace ID/label分离，label不用于路径/ref，创建与所有query/lifecycle操作拒绝跨session/project/Goal/WorkItem或伪造根。增量证据：双 session TUI same-label 与 Goal/WorkItem socket scope 矩阵通过；后者覆盖 get/enter/list、keep/export/remove/preview/discard-preview/discard/resolve，并验证客户端伪造 ProjectRoot 的 query 拒绝和越权后 owner binding、snapshot、checkout/formal bytes 与 candidate 不变（`TestWorkspaceSocketScopesGoalAndWorkItemOwnership`）。另有 `TestWorkspaceCreateOverSocketRequiresExactGoalWorkItemRunScope` 用真实 owner Goal run 验证 worktree_create 拒绝跨 Goal 和跨 WorkItem、正确 owner scope 可创建并查询。两项定向 Go 测试本地通过（2026-10-10）；剩余 ownership predicate 与完整 AC1 仍需验收。
+- 增量 label 身份边界：`TestWorkspaceLabelCannotSelectFilesystemOrGitIdentity` 使用合法的 `../../label-escape` 显示标签，验证 root 仍精确由 opaque ID 决定、project root 外不出现 label 派生路径、private Git refs 不含 label 且无相邻逃逸目录。定向 workspace 测试本地通过（2026-10-10）；完整 AC1 ownership 矩阵仍开放。
 - 增量证据：`TestWorkspaceSocketSessionScopeCannotMutateGoalOwnedWorkspace` 用 session-scope socket 请求触达 Goal-owned workspace，验证 get/enter/keep/export/remove/preview/discard-preview 等操作拒绝、list 为空，且 owner/binding、checkout/formal、candidate 数据均不变。定向 conversation 测试本地通过（2026-10-10）；完整 AC1 仍开放。
 - 增量证据：`TestWorkspaceBindingDenialsPreserveOwnerAndSiblingState` 验证 sibling session 的 Get/Enter 被拒、owner 有活动 run 时 Exit/切换也被拒；每次拒绝后 owner/sibling bindings、generation/state、checkout bytes 与运行中 request authority 均不变。定向 conversation 测试本地通过（2026-10-10）；完整 AC1 仍开放。
 - 增量证据：`TestWorkspaceGoalSocketRejectsSiblingSessionWithMatchingGoalIdentity` 经真实 conversation socket 创建 sibling session，再以 owner 的准确 GoalID/WorkItemID 和 owner workspace ID 发起 get/enter/keep/export/remove/preview/discard-preview/list，并附带伪造 ProjectRoot；均拒绝，owner binding/snapshot/checkout、formal bytes 与候选记录/root 保持不变。该组合补充了“同 Goal、同 WorkItem、不同 session”的 SourceSessionID 边界，不重复同 session 的跨 Goal/WorkItem 矩阵。定向测试 `TMPDIR=$PWD/.tmp GOMAXPROCS=1 go test -p 1 ./internal/conversation -run '^TestWorkspaceGoalSocketRejectsSiblingSessionWithMatchingGoalIdentity$' -count=1` 本地通过（2026-10-10）；AC1 其它 ownership/concurrency 条件仍待验收。
@@ -23,6 +24,12 @@
 ## AC2 私有 Git 与基线
 
 - [ ] 私有bare由sanitized当前文件快照生成，dirty/untracked/ignored regular数据不遗漏，源变化拒绝结果；所有文件/字节上限真实执行。
+
+新增 mode-only 源变化回归：`TestPrivateGitMaterializeRejectsSourceModeChangeAfterBaselineCapture` 在私有 baseline 捕获后只修改 formal 源文件权限位，字节不变；物化返回 `ErrSourceChanged`，确认 mode 已变化、bytes 未变且 baseline/repository/checkout/run/receipt 均未发布、ownership intent 保留。定向 workspace 测试本地通过（2026-10-10）；AC2 其它 dirty/untracked/quota 与 source race 矩阵仍开放。
+
+新增 ignored nested hierarchy 快照回归：`TestPrivateGitMaterializePreservesNestedIgnoredDirectoryFiles` 对 `.gitignore` 整目录忽略的多层目录写入多个 regular files（含可执行文件），验证源/baseline/checkout manifest digest 一致，文件内容与 mode 精确保留且 private Git blob 存在。定向 workspace 测试本地通过（2026-10-10）；AC2 其余源快照和真实 quota 矩阵仍开放。
+
+新增 materialize 源文件字节上限集成边界：`TestPrivateGitMaterializeRejectsOverLimitSourceWithoutReceipt` 将单文件限制设为 4 bytes，确认超限源返回 `ErrQuota`，formal 源字节不变，baseline/repository/checkout/run/receipt 均未发布且创建 intent 保留。定向 workspace 测试本地通过（2026-10-10）；AC2 其它总量、文件数与源变化矩阵仍开放。
 - [ ] 正式Git refs/index/config/hooks及service数据在create/run/export前后保持原值，没有正式worktree add/prune/reset/fetch、源history/credentials复制。
 - [ ] 私有bare/commonDir在本项service-owned目录；无remotes/alternates/replace/external hooks、objects hardlinks、共享兄弟refs，Git净化env/config与属性攻击fixture通过。
 - [ ] 根metadata不复制，嵌套Git/submodule/symlink/hardlink/specialfile拒绝，未执行source settings/.worktreeinclude/hooks或自动依赖安装。
@@ -47,6 +54,8 @@
 增量证据：`TestPlanModeWriterEntryDenialLeavesOwnedWorkspaceUntouched` 以真实私有 Git workspace 验证 plan-mode `AcquireWriter` 被拒后，owner snapshot/binding、checkout/formal 内容、private repository 与 checkout inode 保持不变，且无 candidate root。定向 workspace 测试本地通过（2026-10-10）；真实 sandbox 与完整 AC3 仍开放。
 
 ## AC4 三方导出、冲突与用户接收
+
+AC4 合并矩阵审计通过：五项行为由逐项和纵向 focused regressions 共同覆盖，独立复核未发现未覆盖的明确功能缺口。SHA `c3e5b73aa41c10fef2edee68e813cca3d14fc7d7` 的 [Go run 38014494848](https://github.com/kikoiio/Stable/actions/runs/38014494848)（`build-and-test`、`test-package`）与 [M09 Workspace Linux run 38014494795](https://github.com/kikoiio/Stable/actions/runs/38014494795) 均通过。各条旧增量记录中的“仍开放”描述记录的是测试添加当时状态；本段五项现已完成。
 
 增量证据：`TestWorkspaceSocketRejectsResolutionFromStalePreview` 经真实 conversation socket 验证：preview 后 formal 文件变更会使旧冲突选择被拒绝且不保存 resolution/candidate；刷新 preview 后可以重新选择并导出，formal 仍未改变且候选保持未接收。本地定向测试通过（2026-10-10）；完整 B/F/W 矩阵、并发导出和 crash cuts 仍开放。
 
@@ -76,11 +85,11 @@
 
 新增真实 socket 手工合并导出证据：`TestWorkspaceSocketManualConflictResolutionExportsExactMergedValue` 通过 conversation Unix socket 对精确冲突路径作用户 `UseWorkspace` 选择，确认与旧 B/F 都不同的手工 W 字节原样进入 ready candidate，随后可生成 review，且 export/review 均不改变 formal 或 baseline。定向 conversation 测试本地通过（2026-10-10）；显式 accept、并发源变化、完整三方表及当前 SHA 云端复验仍开放。
 
-- [ ] B/F/W相等/仅一方变/双方相同/双方不同表覆盖bytes、mode、创建、删除；rename按delete/add，冲突有绑定digest的路径摘要，无自动文本merge/force旁路。
-- [ ] 两工作树不同文件依次导出并接受不会回退先前正式改动；相同文件冲突阻断，用户手工合并W后，逐路径user resolution可继续导出，不要求W等于旧B/F；生成候选有新真实版本。
-- [ ] conflict preview/resolution绑定真实user/session/workspace/generation、完整B/F/W digests及所有精确冲突路径的W/F选择；缺失/额外路径、源变化、过期或模型决策拒绝；resolution不改正式根或baseline，导出后仍须新候选review/用户accept。
-- [ ] export停止writer、冻结digest、流式same-volume candidate；并发正式/工作树改变、超限、写盘失败不产生伪ready结果，幂等export返回同一候选引用。
-- [ ] 导出走既有freeze/review/checkers及显式用户review_accept；普通任务/Goal都不能自行接受、提交、merge、push或改变目标证据/成功。
+- [x] B/F/W相等/仅一方变/双方相同/双方不同表覆盖bytes、mode、创建、删除；rename按delete/add，冲突有绑定digest的路径摘要，无自动文本merge/force旁路。
+- [x] 两工作树不同文件依次导出并接受不会回退先前正式改动；相同文件冲突阻断，用户手工合并W后，逐路径user resolution可继续导出，不要求W等于旧B/F；生成候选有新真实版本。
+- [x] conflict preview/resolution绑定真实user/session/workspace/generation、完整B/F/W digests及所有精确冲突路径的W/F选择；缺失/额外路径、源变化、过期或模型决策拒绝；resolution不改正式根或baseline，导出后仍须新候选review/用户accept。
+- [x] export停止writer、冻结digest、流式same-volume candidate；并发正式/工作树改变、超限、写盘失败不产生伪ready结果，幂等export返回同一候选引用。
+- [x] 导出走既有freeze/review/checkers及显式用户review_accept；普通任务/Goal都不能自行接受、提交、merge、push或改变目标证据/成功。
 
 ## AC5 Metadata 事务与兼容
 
@@ -102,11 +111,21 @@
 
 新增 v12 legacy rewind migration 恢复：`TestLegacyRewindV12MigrationBlocksWithoutInventingIdentity` 创建 v12 pending rewind 并跨迁移到 v14，确认 legacy-v1 policy 不变且缺失的 root identity 保持为空；遇 linked `.git` pointer 时 recovery blocked，重复恢复继续保留 candidate/staging/Git common-dir bytes 与 inode、digest/status。定向 store 测试本地通过（2026-10-10）；完整 AC5 crash-cut/version 矩阵仍开放。
 
+新增 v13 project-v2 rewind migration 边界：`TestProjectRewindV13MigrationBlocksMissingRootIdentity` 将 v13 pending rewind 升级到 v14，确认 project-v2 policy 保留、旧记录未知 root identity 不被补造；恢复 fail closed，重复恢复保持两侧 roots/文件 bytes/inodes 与 candidate ready/digest。定向 store 测试本地通过（2026-10-10）；完整 AC5 crash-cut/version 矩阵仍开放。
+
+新增 project-v2 atomic acceptance metadata 归位后 crash cut：`TestProjectAcceptanceRecoversAtomicMetadataRestoreBeforeReceipt` 在 atomic exchange 和 protected metadata 归位完成、journal 仍 prepared 且无 receipt 时模拟重启；重复恢复后正式内容和 `.git/.stable/.mewcode` bytes/inodes 正确，spent root 清理，且只产生一份正确 receipt。定向 store 测试本地通过（2026-10-10）；完整 AC5 crash-cut/version 矩阵仍开放。
+
 新增 legacy linked-Git restart 隔离证据：`TestLegacyLinkedGitTransactionsBlockAfterDatabaseRestart` 分别持久化 legacy acceptance 与 rewind intent、关闭并重新打开数据库后执行 recovery；两条路径都进入 blocked、无 acceptance receipt，保留 formal/incoming 或 candidate/staging 字节，并确认 linked `.git` common-dir `config` sentinel 的内容与 inode 不变。定向 `internal/store` 测试本地通过（2026-10-10）；补强旧 Git pointer 事务重启边界，但 AC5 的旧版本组合、metadata 事务各阶段和 workspace→accept 整合矩阵仍开放，当前 SHA 云端验证待完成。
 
 新增 AC6 fail-closed workspace cleanup 证据：`TestTeamWorkspaceCleanupRetainsCreatedWorkspaceWhenTeamLogIsDamaged` 在新 workspace 已被 durable team member fact 引用后注入损坏 team log，确认 replay 失败时清理 helper 保留 workspace root/journal 与 checkout bytes 而不 RemoveClean；未知 ownership 状态只尝试安全释放 writer lease。定向 conversation 测试本地通过（2026-10-10）；其它清理 ownership/generation/PID 与 lifecycle crash cuts 仍开放，当前 SHA 云端复验待完成。
 
 ## AC6 中断、归属与清理
+
+新增 Keep 重启幂等：`TestKeepAfterRestartIsIdempotentAndRetainsDirtyCheckout` 在 dirty checkout 成功 Keep 后重建 service 并重复 Keep，验证 Operation ID/Kind/Phase、cursor、checkout 内容与 evidence 保留，重启后的 `UsedBytes == DiskUsage` 且再次恢复稳定。定向 workspace 测试本地通过（2026-10-10）；完整 AC6 lifecycle crash 矩阵仍开放。
+
+新增 Exit transition 跨重启幂等：`TestWorkspaceLifecycleExitTransitionRemainsIdempotentAcrossRestarts` 恢复 pending Exit 且 writer terminal success 后清空 binding；再次重启/recover 仍保持 Ready 与 unbound，transition 只有一次 Applied，cursor/UsedBytes/Operation ID/root inode/checkout bytes 均稳定。定向 conversation 测试本地通过（2026-10-10）；完整 AC6 crash/cleanup 矩阵仍开放。
+
+新增 Export 后候选持久、journal CAS 失败恢复：`TestExportCandidatePersistsButJournalCASFailureRecoversWithoutReplay` 让 exporter 持久化一份可追踪 evidence 后模拟并发 journal generation 前进，使导出最终 ownership CAS 失败；重启恢复为 Interrupted/blocked 且无 CandidateID，显式再次 Export 被拒、不重放 exporter，唯一 evidence 仍保留可追踪。定向 workspace 测试本地通过（2026-10-10）；其他导出状态与生命周期故障组合仍开放。
 
 - [ ] creating/queued/running/stopping/exporting/removing各中断点恢复两次无模型/command重跑、重复export或重复终态。增量证据：prepared rewind 的 snapshot 尚未写入时，仅当 candidate 身份/digest匹配、staging身份匹配且 staging 为空、且空目录digest不同于目标时才安全清理并finalize；合法空snapshot仍由事务安装。same-root 内出现未知partial data会blocked并保留。`TestReconcileLegacyRewindRetainsUnknownPreparedStaging`、`TestReconcilePreparedEmptySnapshotInstallsValidTarget`、`TestM05SnapshotRewindAndRestartRecovery` 及 `TestRewindSnapshotRefusals` 定向通过（2026-10-10）；`TestRecoverCreatingWithoutPersistedRootIdentityFailsClosed` 定向通过（`TMPDIR=$PWD/.tmp GOMAXPROCS=1 go test -p 1 ./internal/workspace -run '^TestRecoverCreatingWithoutPersistedRootIdentityFailsClosed$' -count=1`，2026-10-10），覆盖初始 create intent 与根目录已分配但root身份未持久化时的 fail-closed 恢复：保留 unknown root、服务可启动查询其他项、生命周期拒绝操作并跨两次重启保持 inode/sentinel。其他生命周期 crash cuts 仍开放。
 - [ ] 清理核对service ownership、root身份、sandbox PID启动身份与generation；不能误杀/删除用户或其它任务资源。增量证据：rewind journal现记录候选和staging根身份，legacy/project恢复和清理统一经事务coordinator校验身份及digest；替换staging与缺失身份的legacy journal被blocked并保留候选、原staging及替换数据。finalize后清理恢复测试现同时覆盖legacy-v1/project-v2，未知替换目录的bytes+inode、spent root及candidate均保留（`TestReconcileFinalizedRewindCleansPostFinalizeStaging`、`TestReconcileFinalizedRewindRetainsReplacedStaging`）；writer恢复遇到 PID 重用（starttime mismatch）时保留 interrupted workspace/身份journal、不向原进程发信号（`TestRestartBlocksReusedWriterPIDWithoutSignaling`，2026-10-10定向通过）。其余ownership/PID/generation矩阵仍开放。
@@ -142,6 +161,8 @@
 - [ ] `/worktrees`、create/enter/exit/keep/export/resolve/remove、`/agent --worktree`与父工具形成真实service闭环，完整用法/错误/状态/冲突反馈可见。（TUI 增加显式 Goal+WorkItem 工作树范围选择/清除与贯穿请求；Session 默认不变。真实 Goal lifecycle 集成及四项定向 TUI 测试本地通过；其余入口闭环仍待验收。）
 - [ ] 独立task/workspace session游标重连、重复通知去重，不覆盖父ActiveRunID/stream；恢复能看到同一工作树/candidate/保留原因。
 - [ ] 用户冲突resolution、discard与候选接受是单独可审阅决策；目录/事件/日志/TUI不显示角色正文、凭据、thinking、raw transcript或无限diff。
+
+新增 dirty-discard 真实 TUI/service 确认回归：`TestWorktreeTUIDirtyDiscardRequiresArmedSocketConfirmation` 通过真实 TUI 与 conversation socket 获取 digest/generation 预览；未 armed 的 Enter 不发删除请求且 dirty 文件保留，按 `d` 后 Enter 才由服务端删除工作树，formal 文件 bytes 不变。定向 TUI 测试本地通过（2026-10-10）；完整隐私和用户决策矩阵仍开放。
 - 增量证据：`TestWorktreeStatusRenderingOmitsPrivateSummaryAndDiffBody` 验证工作树状态只展示标签、冲突路径与摘要 digest，不展示角色正文、API key、thinking、raw transcript 或 diff 正文。定向 TUI 测试本地通过（2026-10-10）；目录、事件、日志及完整 diff 限制矩阵仍开放。
 - [ ] 后台成功/summary/export不成为Goal证据，候选接受后仍需独立目标复检；Session/Goal WorkRef沿可信事件保持关联。
 
