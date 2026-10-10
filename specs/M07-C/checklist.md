@@ -41,7 +41,7 @@
 
 - [x] 场景 1(全链路):service e2e 覆盖真实 stdio、eager 直调、dispatch 查询/调用、未知目标、instructions 去重、/mcp 列表/重载和事件投影；hook/审批顺序由 execution 单测覆盖。
 - [x] 场景 2(热更新):e2e 覆盖项目配置增删、mtime 自动刷新、Runner schema 同步、手动 reload 事件，以及会话服务 OS 进程重启后 `session_load` 的事件顺序和内容回放。
-- [ ] 场景 2b(完整 Linux runtime 重启):`bash tests/e2e/m07c_runtime_restart.sh` 使用隔离 HOME/state、项目 MCP fixture 与正式 `stable down`/`stable up`；核对 supervisor PID 变化、重启后的 MCP connected 状态，以及同一 session 的 reload/server 事件类型、顺序与载荷一致。（本机未执行；待 Linux CI/云端验收记录日志路径。）
+- [x] 场景 2b(完整 Linux runtime 重启):`bash tests/e2e/m07c_runtime_restart.sh` 使用隔离 HOME/state、项目 MCP fixture 与正式 `stable down`/`stable up`；核对 supervisor PID 变化、重启后的 MCP connected 状态，以及同一 session 的 reload/server 事件类型、顺序与载荷一致。（GitHub Actions E2E run `38030566176`, job `e2e-m07c`; 日志 `M07-C RUNTIME RESTART PASS`。）
 - [x] 场景 3(http hook):`internal/hooks/http_action_test.go` 的 httptest 矩阵覆盖请求、响应、截断、超时和 `on_error`。
 - [x] 场景 4(失败链):失败服务器隔离、健康服务器继续调用、未知工具指引均由 service e2e 验证；调用/传输错误由 execution 单测验证。
 - [x] 场景 5(回归保障):无 MCP 时 manager 注入为空时执行路径保持未知工具，schema 组装保留既有清单；全量回归测试通过。
@@ -52,4 +52,4 @@
 
 ## Linux 收尾复核（M11）
 
-- [ ] 关闭并重新启动完整 stable service/runtime 后，MCP reload 状态、事件投影和会话恢复一致；验收命令：`bash tests/e2e/m07c_runtime_restart.sh`（或包含它的 `bash tests/e2e/m07c_mcp.sh`），仅重建 Go service 实例不算完整进程重启。记录 `M07-C RUNTIME RESTART PASS` 日志路径。
+- [x] 关闭并重新启动完整 stable service/runtime 后，MCP reload 状态、事件投影和会话恢复一致；验收命令：`bash tests/e2e/m07c_runtime_restart.sh`（E2E run `38030566176`, job `e2e-m07c`），日志包含 `M07-C RUNTIME RESTART PASS`；仅重建 Go service 实例不算完整进程重启。
