@@ -209,6 +209,8 @@ func (s *LifecycleService) removeDiscardUserWithHooks(ctx context.Context, scope
 	if current != digest {
 		return Snapshot{}, ErrSourceChanged
 	}
+	hooks.removalPolicy = "user_discard"
+	hooks.removalAuthorization = digest
 	hooks.validateBeforeRename = func(validateCtx context.Context) error {
 		current, _, _, err := s.discardFacts(validateCtx, scope, record)
 		if err != nil {

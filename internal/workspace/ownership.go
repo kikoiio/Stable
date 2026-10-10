@@ -30,13 +30,16 @@ type RootIdentity struct {
 }
 
 type Operation struct {
-	ID         string               `json:"id"`
-	Kind       string               `json:"kind"`
-	Phase      string               `json:"phase"` // intent, complete, blocked
-	Generation uint64               `json:"generation"`
-	UpdatedAt  time.Time            `json:"updated_at"`
-	Quarantine string               `json:"quarantine,omitempty"`
-	Process    *proc.TrackedProcess `json:"process,omitempty"`
+	ID                         string               `json:"id"`
+	Kind                       string               `json:"kind"`
+	Phase                      string               `json:"phase"` // intent, complete, blocked
+	Generation                 uint64               `json:"generation"`
+	UpdatedAt                  time.Time            `json:"updated_at"`
+	Quarantine                 string               `json:"quarantine,omitempty"`
+	RemovalPolicy              string               `json:"removal_policy,omitempty"`
+	RemovalContentDigest       string               `json:"removal_content_digest,omitempty"`
+	RemovalAuthorizationDigest string               `json:"removal_authorization_digest,omitempty"`
+	Process                    *proc.TrackedProcess `json:"process,omitempty"`
 }
 
 type Record struct {
@@ -289,6 +292,17 @@ func validateRecord(record Record) error {
 	if record.Operation.Quarantine != "" && (record.Operation.Kind != "remove" || !strings.HasPrefix(record.Operation.Quarantine, ".remove-") || !ValidID(strings.TrimPrefix(record.Operation.Quarantine, ".remove-"))) {
 		return ErrOwnership
 	}
+	if record.Operation.RemovalPolicy != "" || record.Operation.RemovalContentDigest != "" || record.Operation.RemovalAuthorizationDigest != "" {
+		if record.Operation.Kind != "remove" || (record.Operation.RemovalPolicy != "clean" && record.Operation.RemovalPolicy != "user_discard") || !validDigest(record.Operation.RemovalContentDigest) || !validDigest(record.Operation.RemovalAuthorizationDigest) {
+			return ErrOwnership
+		}
+		if record.Operation.RemovalPolicy == "clean" && record.Operation.RemovalAuthorizationDigest != record.Snapshot.BaselineDigest {
+			return ErrOwnership
+		}
+		if record.Operation.RemovalPolicy == "user_discard" && (record.Discard == nil || record.Operation.RemovalAuthorizationDigest != record.Discard.Digest) {
+			return ErrOwnership
+		}
+	}
 	if record.Snapshot.Error == unknownCreatingRootIdentityReason && !hasUnknownCreatingRootIdentity(record) {
 		return ErrOwnership
 	}
@@ -455,10 +469,23 @@ func (s *OwnershipStore) verifyRoot(record Record) error {
 	if err != nil {
 		return err
 	}
-	if err := validateAncestors(paths.Root, true); err != nil {
+	if err := verifyRootPath(paths.Root, record.RootIdentity); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	info, err := os.Lstat(paths.Root)
+	if record.Operation.Kind != "remove" || record.Operation.Quarantine == "" || (record.Snapshot.State != StateBlocked && record.Snapshot.State != StateRemoving && record.Snapshot.State != StateInterrupted) {
+		return os.ErrNotExist
+	}
+	quarantine := filepath.Join(s.layout.projectRoot(), record.Operation.Quarantine)
+	return verifyRootPath(quarantine, record.RootIdentity)
+}
+
+func verifyRootPath(path string, expected RootIdentity) error {
+	if err := validateAncestors(path, true); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
@@ -466,7 +493,7 @@ func (s *OwnershipStore) verifyRoot(record Record) error {
 	if err != nil {
 		return err
 	}
-	if identity != record.RootIdentity {
+	if identity != expected {
 		return ErrOwnership
 	}
 	return nil

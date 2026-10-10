@@ -31,6 +31,8 @@
 
 增量证据：`TestTeamTUICoordinatorModeEnableDisableAppliesToNextRunOnly` 通过真实 TUI command→Unix socket 启用协调器，确认后续 run 使用 team-only prompt/schema；活动 run 中关闭不改变已 admission 的 run，结束后新 run 恢复默认 schema/prompt。定向 TUI 集成测试本地通过（2026-10-10）；完整 E AC7 仍开放。
 
+增量证据：`TestTUIUserCanStopBoundTeamDuringCoordinatorRun` 在有效 TUI/socket coordinator run 仍活动时验证用户可 force-stop 绑定 team 的目标 child；同一 request 构造的直接 `team_member_stop` coordinator tool 在 TeamToolHost 前被拒，随后用户 stop 成功，只取消目标成员，sibling 仍运行，coordinator parent stream 继续可读。定向 `internal/tui` 测试本地通过（2026-10-10）；用户 close 与完整 AC7 矩阵仍开放。
+
 增量证据：`TestCoordinatorCannotSubmitTeamPlanDirectlyBeforeSideEffects` 直接构造有效 `team_plan_submit` 参数调用 coordinator executor，确认静态模式拒绝发生在 permission gate、hooks 与 TeamToolHost 之前，三者计数均为零。定向 execution 测试本地通过（2026-10-10）；AC7 其余入口、角色和用户停止/关闭矩阵仍开放。
 
 增量证据：`TestCoordinatorDirectTeamCloseIsDeniedBeforeUserCloseHost` 以 coordinator request 直接提交有效 `team_close` 参数，确认 coordinator mode 在 TeamToolHost、permission gate 和 pre/post hooks 前拒绝调用，所有副作用计数为零。定向 execution 测试本地通过（2026-10-10）；合法用户入口和剩余角色矩阵仍开放。

@@ -82,4 +82,6 @@ SHA `2eca48a` 的 Go run [37999887455](https://github.com/kikoiio/Stable/actions
 
 SHA `ad14e4f` 的 Go run [38005341959](https://github.com/kikoiio/Stable/actions/runs/38005341959) 与 M09 Workspace Linux run [38005341823](https://github.com/kikoiio/Stable/actions/runs/38005341823) 通过；E2E run [38005341767](https://github.com/kikoiio/Stable/actions/runs/38005341767) 仍在运行。该 SHA 增加 lead 通知批次字节边界、proof 过期、存储上限和 live writer 退出失败用例。
 
-当前本地下一批补充六项回归：aborted team intent 后的 member 恢复、workspace binding owner/sibling 状态不可变、冲突 resolution 遇 baseline 或 checkout digest 变化时失败关闭、coordinator 管理入口零副作用拒绝，以及工作树 TUI 的敏感摘要/diff 隐私；定向用例均通过，待提交及云端复验。M09-E/F checklist 与 M09 总体仍保持未整体验收状态。
+SHA `56a5111` 的 Go run [38006389753](https://github.com/kikoiio/Stable/actions/runs/38006389753) 与 M09 Workspace Linux run [38006389754](https://github.com/kikoiio/Stable/actions/runs/38006389754) 通过；E2E run [38006389755](https://github.com/kikoiio/Stable/actions/runs/38006389755) 仍在运行。该 SHA 修复 workspace list/get/preview 服务端 30 秒上限，并补 stop/close 与 child terminal 持久故障恢复交叉测试。
+
+当前本地下一批包含 E coordinator 活跃期间的 TUI/socket 用户 stop 权限与 sibling 隔离，以及 F quarantine rename 后同 inode 内容改写/新增的 fail-closed 删除恢复修复；两项定向测试通过，待提交及云端复验。M09-E/F checklist 与 M09 总体仍保持未整体验收状态。

@@ -378,6 +378,25 @@ func (s *LifecycleService) recoverInterruptedOperations(ctx context.Context, rec
 					if openErr != nil {
 						return openErr
 					}
+					if !validRemovalAuthorization(record) {
+						_ = quarantineRoot.Close()
+						if err := s.blockRemoval(ctx, record, "remove recovery lacks persisted content authorization; quarantine retained"); err != nil {
+							return err
+						}
+						continue
+					}
+					contentDigest, digestErr := removalContentDigest(ctx, quarantineRoot, s.limits)
+					if digestErr != nil || contentDigest != record.Operation.RemovalContentDigest {
+						_ = quarantineRoot.Close()
+						cause := digestErr
+						if cause == nil {
+							cause = ErrSourceChanged
+						}
+						if err := s.blockRemoval(ctx, record, "remove recovery content changed or became unsafe; quarantine retained: "+boundedError(cause)); err != nil {
+							return err
+						}
+						continue
+					}
 					if removeErr := removePinnedRootContents(quarantineRoot); removeErr != nil {
 						_ = quarantineRoot.Close()
 						return removeErr
@@ -1467,6 +1486,8 @@ func (s *LifecycleService) removeCleanWithHooks(ctx context.Context, scope Scope
 	if err != nil {
 		return Snapshot{}, err
 	}
+	hooks.removalPolicy = "clean"
+	hooks.removalAuthorization = baselineDigest
 	hooks.validateBeforeRename = func(validateCtx context.Context) error {
 		current, err := s.cleanRemovalBaselineDigest(validateCtx, scope, record)
 		if err != nil {
@@ -1504,6 +1525,8 @@ type removeHooks struct {
 	validateBeforeRename   func(context.Context) error
 	afterQuarantine        func(string) error
 	afterQuarantineRemoved func(string) error
+	removalPolicy          string
+	removalAuthorization   string
 }
 
 func (s *LifecycleService) removeRecordLockedWithHooks(ctx context.Context, scope Scope, record Record, hooks removeHooks) (Snapshot, error) {
@@ -1516,7 +1539,22 @@ func (s *LifecycleService) removeRecordLockedWithHooks(ctx context.Context, scop
 	removing := record
 	removing.Snapshot.State = StateRemoving
 	removing.Snapshot.Cursor++
-	removing.Operation = Operation{ID: mustID(), Kind: "remove", Phase: "intent", Generation: removing.Snapshot.Generation, UpdatedAt: time.Now().UTC(), Quarantine: quarantineName}
+	policy, authorization := hooks.removalPolicy, hooks.removalAuthorization
+	if policy == "" {
+		// Internal lifecycle callers without a user-discard confirmation are
+		// treated as clean removal; public paths set this explicitly below.
+		policy, authorization = "clean", record.Snapshot.BaselineDigest
+	}
+	if (policy != "clean" && policy != "user_discard") || !validDigest(authorization) {
+		return Snapshot{}, ErrOwnership
+	}
+	rootPath := filepath.Join(s.layout.projectRoot(), id)
+	contentDigest, err := removalContentDigestAt(ctx, rootPath, record.RootIdentity, s.limits)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	removing.Operation = Operation{ID: mustID(), Kind: "remove", Phase: "intent", Generation: removing.Snapshot.Generation, UpdatedAt: time.Now().UTC(), Quarantine: quarantineName,
+		RemovalPolicy: policy, RemovalContentDigest: contentDigest, RemovalAuthorizationDigest: authorization}
 	if err := s.store.Save(ctx, scope, removing, record.Snapshot.Generation); err != nil {
 		return Snapshot{}, err
 	}
@@ -1559,6 +1597,24 @@ func (s *LifecycleService) removeRecordLockedWithHooks(ctx context.Context, scop
 			return Snapshot{}, err
 		}
 	}
+	currentDigest, digestErr := removalContentDigestAt(ctx, rootPath, removing.RootIdentity, s.limits)
+	if digestErr != nil || currentDigest != removing.Operation.RemovalContentDigest {
+		project.Close()
+		cause := digestErr
+		if cause == nil {
+			cause = ErrSourceChanged
+		}
+		interrupted := removing
+		interrupted.Snapshot.State = StateInterrupted
+		interrupted.Snapshot.Error = "remove content changed before quarantine rename; workspace retained"
+		interrupted.Snapshot.Cursor++
+		interrupted.Operation.Phase = "blocked"
+		interrupted.Operation.UpdatedAt = time.Now().UTC()
+		if saveErr := s.store.Save(ctx, scope, interrupted, removing.Snapshot.Generation); saveErr != nil {
+			return Snapshot{}, errors.Join(cause, saveErr)
+		}
+		return Snapshot{}, cause
+	}
 	if err := project.Rename(id, quarantineName); err != nil {
 		project.Close()
 		return Snapshot{}, err
@@ -1573,6 +1629,19 @@ func (s *LifecycleService) removeRecordLockedWithHooks(ctx context.Context, scop
 	if err != nil {
 		project.Close()
 		return Snapshot{}, err
+	}
+	quarantineDigest, digestErr := removalContentDigest(ctx, quarantineRoot, s.limits)
+	if digestErr != nil || quarantineDigest != removing.Operation.RemovalContentDigest {
+		_ = quarantineRoot.Close()
+		_ = project.Close()
+		cause := digestErr
+		if cause == nil {
+			cause = ErrSourceChanged
+		}
+		if saveErr := s.blockRemoval(ctx, removing, "remove content changed after quarantine rename; quarantine retained: "+boundedError(cause)); saveErr != nil {
+			return Snapshot{}, errors.Join(cause, saveErr)
+		}
+		return Snapshot{}, cause
 	}
 	if err := removePinnedRootContents(quarantineRoot); err != nil {
 		_ = quarantineRoot.Close()
@@ -1614,6 +1683,51 @@ func (s *LifecycleService) removeRecordLockedWithHooks(ctx context.Context, scop
 	}
 	_ = s.budget.Remove(id)
 	return removing.Snapshot, nil
+}
+
+func validRemovalAuthorization(record Record) bool {
+	operation := record.Operation
+	if operation.Kind != "remove" || !validDigest(operation.RemovalContentDigest) || !validDigest(operation.RemovalAuthorizationDigest) {
+		return false
+	}
+	switch operation.RemovalPolicy {
+	case "clean":
+		return operation.RemovalAuthorizationDigest == record.Snapshot.BaselineDigest
+	case "user_discard":
+		return record.Discard != nil && operation.RemovalAuthorizationDigest == record.Discard.Digest
+	default:
+		return false
+	}
+}
+
+func removalContentDigestAt(ctx context.Context, path string, expected RootIdentity, limits Limits) (string, error) {
+	root, info, err := openVerifiedRoot(path)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	identity, err := rootIdentity(info)
+	if err != nil || identity != expected {
+		return "", ErrOwnership
+	}
+	digest, err := removalContentDigest(ctx, root, limits)
+	if err != nil {
+		return "", err
+	}
+	if err := revalidateRoot(path, info); err != nil {
+		return "", ErrSourceChanged
+	}
+	return digest, nil
+}
+
+func (s *LifecycleService) blockRemoval(ctx context.Context, record Record, reason string) error {
+	blocked := record
+	blocked.Snapshot.State = StateBlocked
+	blocked.Snapshot.Error = boundedError(errors.New(reason))
+	blocked.Snapshot.Cursor++
+	blocked.Operation.Phase = "blocked"
+	blocked.Operation.UpdatedAt = time.Now().UTC()
+	return s.store.Save(ctx, record.Scope, blocked, record.Snapshot.Generation)
 }
 
 func (s *LifecycleService) openRemovalQuarantine(record Record, name string) (*os.Root, error) {
