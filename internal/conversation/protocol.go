@@ -239,8 +239,11 @@ type SkillReport struct {
 func validOp(op string) bool {
 	switch op {
 	case "session_list", "session_create", "session_discard", "session_load", "session_search", "chat", "say", "create_goal", "confirm", "reject", "reply", "history", "status", "run_start", "run_subscribe", "run_cancel", "review_get", "review_accept", "approval_list", "approval_resolve", "approval_cancel", "snapshot_list", "snapshot_rewind", "question_list", "plan_mode", "plan_resolve", "skill_invoke", "skill_reload", "skill_list", "hooks_list", "hooks_reload", "mcp_list", "mcp_reload", "memory_list", "memory_delete", "memory_clear", "remote_access_request", "remote_access_list", "remote_access_resolve", "remote_access_release", "remote_access_cancel":
+		return true
 	case "agent_list", "agent_reload", "agent_task_start", "agent_task_list", "agent_task_get", "agent_task_cancel":
+		return true
 	case "team_create", "team_list", "team_get", "team_close", "team_coordinator", "team_member_spawn", "team_member_resume", "team_member_stop", "team_send", "team_messages", "team_request_list", "team_request_respond", "team_shutdown_request", "team_task_create", "team_task_get", "team_task_list", "team_task_update":
+		return true
 	case "worktree_create", "worktree_list", "worktree_get", "worktree_enter", "worktree_exit", "worktree_keep", "worktree_export", "worktree_remove", "worktree_preview", "worktree_resolve", "worktree_discard_preview", "worktree_discard":
 		return true
 	}

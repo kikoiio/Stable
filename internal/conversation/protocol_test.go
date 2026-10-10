@@ -7,6 +7,17 @@ import (
 	"stable/internal/agent"
 )
 
+func TestValidOpIncludesM08AndM09OperationGroups(t *testing.T) {
+	for _, op := range []string{"session_list", "memory_list", "remote_access_list", "agent_list", "team_list", "worktree_list"} {
+		if !validOp(op) {
+			t.Errorf("validOp(%q) = false", op)
+		}
+	}
+	if validOp("not_a_real_operation") {
+		t.Fatal("validOp accepted an unknown operation")
+	}
+}
+
 func TestSessionProtocolRequiresProjectAndSessionIdentity(t *testing.T) {
 	for _, raw := range []string{`{"op":"session_list"}`, `{"op":"session_load","project_root":"/tmp"}`, `{"op":"chat","text":"hello","unknown":true}`} {
 		if _, err := decodeClient(strings.NewReader(raw)); err == nil {
