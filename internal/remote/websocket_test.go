@@ -266,7 +266,9 @@ func TestRemoteConversationEndToEndWithLocalApprovalAndFakeProvider(t *testing.T
 	}
 	cookie := pairResponse.Cookies()[0]
 	header := http.Header{"Cookie": []string{cookie.Name + "=" + cookie.Value}, "Origin": []string{baseURL}}
-	wsCtx, wsCancel := context.WithTimeout(ctx, 8*time.Second)
+	// This exercises pairing, local approval, multiple streaming runs and
+	// replay. Keep the wall-clock limit above CI's package-parallel slowdown.
+	wsCtx, wsCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer wsCancel()
 	ws, _, err := websocket.Dial(wsCtx, "ws://"+started.ListenAddr+"/ws", &websocket.DialOptions{HTTPHeader: header})
 	if err != nil {
