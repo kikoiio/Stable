@@ -1,6 +1,6 @@
 # M11 Linux 全量对照验收
 
-> 当前状态：Linux 功能与验收通过，发布操作待最终分支合并。M08、M10-A、M10-B 的 AC 均有独立 checklist 证据。跨平台运行时验收不在本轮范围。
+> 当前状态：Linux 功能、验收、合并与 v0.1.0 发布完成。M08、M10-A、M10-B 的 AC 均有独立 checklist 证据。跨平台运行时验收仍暂缓。
 
 ## 功能迁移对照
 
@@ -23,7 +23,7 @@
 - [x] GitHub Actions `Go` workflow：Node 浏览器 UI 回归、Go build/unit、package/install/CLI/e2e/restart 全通过。（验证：Go run [38035716679](https://github.com/kikoiio/Stable/actions/runs/38035716679)，`build-and-test` 和 `test-package` 均通过。）
 - [x] GitHub Actions `E2E` workflow 全部 jobs 通过。（验证：E2E run [38035716717](https://github.com/kikoiio/Stable/actions/runs/38035716717)，七个 jobs 均通过；`e2e-core` 首次遇到 dependency-change 状态读取竞态，失败 job 在同 SHA 重跑后通过。）
 - [x] M09 Workspace Linux `writer-sandbox-volume` 通过。（验证：run [38035724944](https://github.com/kikoiio/Stable/actions/runs/38035724944)，使用 disposable ext4 volume 的真实 quota 与 writer sandbox acceptance 通过。）
-- [ ] Linux x86_64 发布包安装、启动、停止、重启及 SHA256 记录完成。（Go `test-package` 已通过；artifact 已校验，待合并后发布 v0.1.0 并复核 Release assets。）
+- [x] Linux x86_64 发布包安装、启动、停止、重启及 SHA256 记录完成。（Go `test-package` 通过；[GitHub Release v0.1.0](https://github.com/kikoiio/Stable/releases/tag/v0.1.0) 已公开，tar.gz 与 `.sha256` 两个 asset 均上传并二次核验；SHA-256 `84815bf387862fd2e65eb21c66e6f1d7b6686de7f3fb83e3ea406153e24aeaf7`。）
 - [x] README 与 Linux 发布安装文档记录验收范围和已知边界；Darwin/Windows/ARM64 未由 Linux 结果推定为已验收。
 
 ## 同 SHA 证据
