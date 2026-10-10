@@ -27,7 +27,7 @@ func projectTranscript(events []sessionlog.Event, width int, color bool) string 
 	for _, event := range events {
 		if event.Type == sessionlog.EventRunStarted {
 			var started sessionlog.RunStarted
-			if decodeEventData(event.Data, &started) == nil && started.AgentTaskID != "" {
+			if decodeEventData(event.Data, &started) == nil && (started.AgentTaskID != "" || started.TeamID != "") {
 				backgroundRuns[started.RunID] = true
 			}
 		}

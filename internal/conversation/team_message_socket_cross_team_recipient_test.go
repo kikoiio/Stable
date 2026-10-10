@@ -18,7 +18,7 @@ func TestTeamSendSocketRejectsAnotherTeamsMemberIDWithoutFacts(t *testing.T) {
 	if err := os.MkdirAll(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	socketDir, err := os.MkdirTemp(".tmp", "m09-team-message-socket-")
+	socketDir, err := os.MkdirTemp(os.TempDir(), "m09-")
 	if err != nil {
 		t.Fatal(err)
 	}

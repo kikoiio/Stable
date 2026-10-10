@@ -59,6 +59,8 @@
 
 新增 conflict resolution 分页证据：`TestConflictResolutionPagesAccumulateEveryExactPath` 构造205条冲突路径，验证分页预览不漏路径、同一用户分批选择会累计到完整路径集合，并拒绝伪造路径且不更改已保存的决策。定向 workspace 测试本地通过（2026-10-10）；尚未覆盖该选择经完整 export→candidate review/accept 闭环或分页时源变化，AC4 仍开放。
 
+新增真实 socket 手工合并导出证据：`TestWorkspaceSocketManualConflictResolutionExportsExactMergedValue` 通过 conversation Unix socket 对精确冲突路径作用户 `UseWorkspace` 选择，确认与旧 B/F 都不同的手工 W 字节原样进入 ready candidate，随后可生成 review，且 export/review 均不改变 formal 或 baseline。定向 conversation 测试本地通过（2026-10-10）；显式 accept、并发源变化、完整三方表及当前 SHA 云端复验仍开放。
+
 - [ ] B/F/W相等/仅一方变/双方相同/双方不同表覆盖bytes、mode、创建、删除；rename按delete/add，冲突有绑定digest的路径摘要，无自动文本merge/force旁路。
 - [ ] 两工作树不同文件依次导出并接受不会回退先前正式改动；相同文件冲突阻断，用户手工合并W后，逐路径user resolution可继续导出，不要求W等于旧B/F；生成候选有新真实版本。
 - [ ] conflict preview/resolution绑定真实user/session/workspace/generation、完整B/F/W digests及所有精确冲突路径的W/F选择；缺失/额外路径、源变化、过期或模型决策拒绝；resolution不改正式根或baseline，导出后仍须新候选review/用户accept。
@@ -78,6 +80,8 @@
 - [ ] legacy-v1 受保护metadata必须fail closed。增量修复：accept、directory transaction/recovery 与 rewind reconciliation 现在共用 `.git`/`.mewcode` 检查；legacy candidate 覆盖或省略 formal `.mewcode`、旧 transaction 与旧 rewind 都会阻断并保留 formal/staging/candidate 数据及 inode。新增 `TestLegacyAcceptanceV12MigrationBlocksGitMetadata` 以真实 `user_version=12` acceptance journal 执行 v12→v14 migration，确认旧 candidate/journal 保持 legacy-v1 与空身份；遇 `.git` 指针时恢复 blocked、无 receipt，保留 formal/incoming bytes 与 metadata inode，重复恢复稳定（2026-10-10 本地通过）。项目v2路径不变；完整AC5和当前SHA云端验证仍开放。
 
 新增 project-v2 恢复证据：`TestProjectAcceptanceRecoveryWithoutMetadataFactsBlocksAndRetainsRoots` 验证 v2 acceptance journal 缺少受保护 metadata facts 时恢复 fail closed：formal/incoming 内容及 formal `.stable` bytes/inode 保留，journal blocked、无 receipt，重复恢复稳定。定向 store 测试本地通过（2026-10-10）；AC5 其余版本、crash cut 与 metadata 组合矩阵仍开放。
+
+新增 project-v2 原子交换恢复切口：`TestReconcileAtomicExchangeRestoresProjectMetadataAfterPreparedCrash` 写入 `.git` regular 指针、`.stable`、`.mewcode` 的 protected metadata facts，真实执行 Linux atomic directory exchange 后在 journal 仍为 prepared 时模拟重启；连续两次 reconcile 后正式内容及 metadata 原 inode/bytes 均恢复/保留、journal finalized 且 receipt 唯一。定向 store 测试本地通过（2026-10-10；非 atomic-exchange 平台 skip）；其它 move/exchange/finalize 切口仍开放，当前 SHA 云端验证待完成。
 
 ## AC6 中断、归属与清理
 
@@ -120,7 +124,7 @@
 
 ## AC9 组合回归与源差异
 
-- [ ] 源create/session/agent/async/teammate/cleanup/setup逐项比对，明确哪些适配、哪些源仅解析/缺完整运行、哪些平台unsupported；未运行源项目。
+- [x] 源create/session/agent/async/teammate/cleanup/setup逐项比对，明确哪些适配、哪些源仅解析/缺完整运行、哪些平台unsupported；未运行源项目。（对照见 [spec 源行为对照](spec.md#源行为对照)：覆盖 create.go、session.go、setup.go、ExitWorktree/dirty cleanup、sync Agent、async/definition 的源码缺口、teammate 条件适配及 stale cleanup；分别说明 Stable 做法、未沿用项、未完整验证的源路径与平台 unavailable 条件。该项是静态源码对照，不声称运行源项目或关闭其它 AC9 回归。）
 - 增量证据：源 `setup.go` 的本地设置/hooks/`.worktreeinclude` 行为对应 [spec 源差异表](spec.md#源端行为对照与边界)；`TestWorktreeCreateNoticeExplainsSkippedLocalSetup` 已验证 TUI 与持久 transcript 明确告知 Stable 不复制或执行这些设置并提示用户手动配置（本地定向测试通过，2026-10-09）。该用例验证的是适配告知，不代表源 setup 行为逐项实现或 AC9 源覆盖完成；当前组合 SHA 云端复验待更新。
 - [ ] A/B/C/D、已实施E、普通Session/Goal、候选accept/rewind/recovery、权限/plan/hook回归通过。E未实施写“不适用/待实施”，不能勾成组合已通过。
 - [ ] Linux真实sandbox/quota/privateGit/metadata故障集成通过；其它平台能力不足返回unavailable，不假写跨平台运行通过。

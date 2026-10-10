@@ -39,6 +39,40 @@ func TestDelegationEventsAggregateWithoutReasoningStream(t *testing.T) {
 	}
 }
 
+func TestTeamChildTranscriptHidesRawTextAndThinking(t *testing.T) {
+	events := []sessionlog.Event{
+		{Type: sessionlog.EventRunStarted, Data: sessionlog.RunStarted{
+			RunID: "team-child", TeamID: "team-1", TeamMemberID: "member-1", TeamTurnID: "turn-1",
+		}},
+		{Type: sessionlog.EventRunEvent, Data: sessionlog.RunEvent{
+			RunID: "team-child", Kind: "thinking_delta", Payload: map[string]string{"text": "private team child thinking sentinel"},
+		}},
+		{Type: sessionlog.EventRunEvent, Data: sessionlog.RunEvent{
+			RunID: "team-child", Kind: "text_delta", Payload: map[string]string{"text": "raw team child transcript sentinel"},
+		}},
+		{Type: sessionlog.EventRunEvent, Data: sessionlog.RunEvent{
+			RunID: "team-child", Kind: "delegation_event", Payload: map[string]string{
+				"batch_id": "batch-1", "task_id": "turn-1", "task_name": "inspect", "status": "succeeded", "summary": "safe team child summary",
+			},
+		}},
+		{Type: sessionlog.EventRunEvent, Data: sessionlog.RunEvent{
+			RunID: "parent", Kind: "text_delta", Payload: map[string]string{"text": "parent response remains visible"},
+		}},
+	}
+
+	out := projectTranscript(events, 100, false)
+	for _, private := range []string{"private team child thinking sentinel", "raw team child transcript sentinel"} {
+		if strings.Contains(out, private) {
+			t.Errorf("transcript exposed %q:\n%s", private, out)
+		}
+	}
+	for _, visible := range []string{"safe team child summary", "parent response remains visible"} {
+		if !strings.Contains(out, visible) {
+			t.Errorf("transcript omitted %q:\n%s", visible, out)
+		}
+	}
+}
+
 func TestTranscriptProjectionAndSessionReset(t *testing.T) {
 	events := []sessionlog.Event{{Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "user", Text: "first\nsecond"}}, {Type: sessionlog.EventMessage, Data: sessionlog.Message{Role: "assistant", Text: "reply"}}}
 	out := projectTranscript(events, 60, false)
