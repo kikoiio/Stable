@@ -4,12 +4,29 @@ import (
 	"encoding/json"
 	"errors"
 	tea "github.com/charmbracelet/bubbletea"
+	"stable/internal/agent"
 	"stable/internal/conversation"
 	"stable/internal/core"
 	"stable/internal/sessionlog"
 	"strings"
 	"testing"
 )
+
+func TestRunOutcomeRestoresComposerFocus(t *testing.T) {
+	m := New("socket", t.TempDir())
+	m.ActiveSession = "session-1"
+	m.Pending = true
+	m.Composer.Blur()
+
+	updated, cmd := m.handleRunOutcome(conversation.ServerMsg{Outcome: &agent.RunOutcome{Status: agent.RunCompleted}}, nil)
+	got := updated.(Model)
+	if !got.Composer.Focused || got.Pending || got.ActiveRunID != "" {
+		t.Fatalf("run outcome did not restore the chat composer: focused=%v pending=%v run=%q", got.Composer.Focused, got.Pending, got.ActiveRunID)
+	}
+	if cmd == nil {
+		t.Fatal("run outcome did not refresh the completed session")
+	}
+}
 
 func TestSessionNavigationAndResizeStayAvailable(t *testing.T) {
 	m := New("socket", t.TempDir())

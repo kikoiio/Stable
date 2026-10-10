@@ -743,23 +743,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, resubscribeRunCmd(v.client, m.ActiveSession, v.message.RunID, v.message.Cursor)
 		}
 		if v.message.Type == "run_outcome" {
-			m.Pending = false
-			if v.message.Outcome != nil {
-				switch v.message.Outcome.Status {
-				case agent.RunCompleted:
-					m.Status = "回答完成。"
-				case agent.RunCancelled:
-					m.Status = "已取消；已收到的内容已保留。"
-				case agent.RunAwaitingTools:
-					m.Status = "模型请求了工具；当前阶段未执行工具。"
-				case agent.RunFailed:
-					m.Status = "运行失败；已收到的内容已保留。"
-				}
-			}
-			_ = v.client.Close()
-			m.stream = nil
-			m.ActiveRunID = ""
-			return m, requestCmd(m.Socket, conversation.ClientMsg{Op: "session_load", ProjectRoot: m.Root, SessionID: m.ActiveSession})
+			return m.handleRunOutcome(v.message, v.client)
 		}
 		return m, receiveRunCmd(v.client)
 	case tea.KeyMsg:
@@ -796,6 +780,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
+
+func (m Model) handleRunOutcome(message conversation.ServerMsg, client *conversation.StreamClient) (tea.Model, tea.Cmd) {
+	m.Pending = false
+	if message.Outcome != nil {
+		switch message.Outcome.Status {
+		case agent.RunCompleted:
+			m.Status = "回答完成。"
+		case agent.RunCancelled:
+			m.Status = "已取消；已收到的内容已保留。"
+		case agent.RunAwaitingTools:
+			m.Status = "模型请求了工具；当前阶段未执行工具。"
+		case agent.RunFailed:
+			m.Status = "运行失败；已收到的内容已保留。"
+		}
+	}
+	if client != nil {
+		_ = client.Close()
+	}
+	m.stream = nil
+	m.ActiveRunID = ""
+	focusCmd := m.Composer.Focus()
+	loadCmd := requestCmd(m.Socket, conversation.ClientMsg{Op: "session_load", ProjectRoot: m.Root, SessionID: m.ActiveSession})
+	return m, tea.Batch(focusCmd, loadCmd)
+}
+
 func (m *Model) resize() {
 	m.Layout = ComputeLayout(m.Width, m.Height, m.Composer.Height())
 	m.Composer.SetSize(max(1, m.Width-4), max(1, min(6, m.Height/3)))
