@@ -243,7 +243,9 @@ def main() -> int:
         tui.send(b"\x1b[5~")  # Page Up
         tui.wait_for(b"M01_LONG_000", start=offset, label="Page Up transcript view")
         offset = len(tui.output)
-        tui.send(b"\x1b[6~")  # Page Down
+        for _ in range(8):
+            tui.send(b"\x1b[6~")  # Page Down to the latest transcript viewport.
+            time.sleep(0.05)
         tui.wait_for(b"M01_LONG_119", start=offset, label="Page Down transcript view")
         offset = len(tui.output)
         tui.resize(58, 16)
