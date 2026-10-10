@@ -112,7 +112,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 		if msg.CoordinatorTeamID != "" || msg.CoordinatorOn {
 			return errors.New("session coordinator mode must be selected before the run")
 		}
-		coordinator, modeErr := teamCoordinatorModeForSession(s.deps.ProjectRoot, msg.SessionID)
+		coordinator, modeErr := teamCoordinatorModeForSession(projectRoot, msg.SessionID)
 		err = modeErr
 		if err != nil {
 			return err
@@ -122,7 +122,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 			if coordinator.TeamID == "" {
 				return errors.New("team coordinator mode has no bound team")
 			}
-			team, teamErr := s.getTeamForSession(ctx, currentProjectRoot(s.deps.ProjectRoot), msg.SessionID, coordinator.TeamID, &request.Work)
+			team, teamErr := s.getTeamForSession(ctx, projectRoot, msg.SessionID, coordinator.TeamID, &request.Work)
 			if teamErr != nil || team.Status != teams.TeamOpen {
 				return errors.New("team coordinator binding is no longer authorized")
 			}
@@ -134,7 +134,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 			return errors.New("Goal coordinator mode requires an explicit team selection")
 		}
 		if msg.CoordinatorTeamID != "" {
-			team, teamErr := s.getTeamForSession(ctx, currentProjectRoot(s.deps.ProjectRoot), msg.SessionID, msg.CoordinatorTeamID, &request.Work)
+			team, teamErr := s.getTeamForSession(ctx, projectRoot, msg.SessionID, msg.CoordinatorTeamID, &request.Work)
 			if teamErr != nil || team.Status != teams.TeamOpen {
 				return errors.New("Goal coordinator team is not authorized for this Goal and WorkItem")
 			}
