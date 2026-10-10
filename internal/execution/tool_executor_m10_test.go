@@ -20,6 +20,13 @@ func (h *m10HookProbe) PreToolUse(string, string, map[string]any) (bool, string,
 	return false, "", ""
 }
 func (h *m10HookProbe) PostToolUse(string, string, map[string]any, string) { h.calls++ }
+func (h *m10HookProbe) PreToolUseRun(_ context.Context, _ agent.ParentRun, _ string, _ string, _ map[string]any) (bool, string, string) {
+	h.calls++
+	return false, "", ""
+}
+func (h *m10HookProbe) PostToolUseRun(_ context.Context, _ agent.ParentRun, _ string, _ string, _ map[string]any, _ string) {
+	h.calls++
+}
 
 func TestReadOnlyExecutorRejectsBeforeHooks(t *testing.T) {
 	root := t.TempDir()
