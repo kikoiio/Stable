@@ -163,7 +163,13 @@ func TestExportCandidatePersistsButJournalCASFailureRecoversWithoutReplay(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer service.Close(ctx)
+	firstRecoveredService := service
+	firstRecoveredClosed := false
+	defer func() {
+		if !firstRecoveredClosed {
+			_ = firstRecoveredService.Close(ctx)
+		}
+	}()
 	recovered, err := service.Get(ctx, scope, created.ID)
 	if err != nil || recovered.State != StateInterrupted || recovered.CandidateID != "" || recovered.Error != "service restarted during export; resource retained for explicit recovery" {
 		t.Fatalf("recovered export snapshot=%+v err=%v", recovered, err)
@@ -185,6 +191,7 @@ func TestExportCandidatePersistsButJournalCASFailureRecoversWithoutReplay(t *tes
 	if err := service.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
+	firstRecoveredClosed = true
 
 	service, err = opener(exporter)
 	if err != nil {

@@ -150,16 +150,25 @@ AC4 合并矩阵审计通过：五项行为由逐项和纵向 focused regression
 ## AC7 有界资源
 
 - [ ] 3 workers/32 queue与D/A/B/C共池，单materializer/8 pending、20,000 files/128 MiB snapshot/16 MiB file真实边界和拒绝路径有屏障证据。增量证据：`TestMaterializerSingleWorkerAndEightPendingSlots` 以channel-gated callback验证单 materializer 同时仅运行一个任务、容纳8个pending、第9个返回 `ErrQueueFull` 且不持久化；定向测试本地通过（2026-10-10）。代码审阅确认 supervisor 只创建一个 `PoolDelegator`，并将同一实例注入 `AgentTaskCoordinator`、team scheduler 与 workspace child dispatch；`TestTeamCapacityUsesSharedPoolAndResumesWaitingMessagesFairly` 和 `TestWorktreeTeamMemberFlowsThroughExportReviewAndAcceptance` 分别覆盖共池排队与真实workspace成员路径。后者现新增屏障：worktree writer 持有 lease 时 D named task 保持queued，释放 writer 后 named child 才启动，两个任务均成功settle；focused conversation test passed 2026-10-10。`TestPoolDelegatorUsesDefaultWorkerAndQueueCapacity` 使用生产默认值并实际验证3 worker同时运行、32项排队、第33项拒绝、35个已接纳任务全部只执行一次；本地定向测试通过（2026-10-10）。`TestManifestDefaultSnapshotLimitAtBoundary` 用 sparse fixtures 验证生产默认128 MiB快照精确上限通过、超1 byte返回 `ErrQuota` 且不创建目标；`TestManifestDefaultFileCountLimitAtBoundary` 验证默认20,000个空文件通过、第20,001个返回 `ErrQuota`。两项 workspace 定向测试本地通过（2026-10-10）。16 MiB 已有直接证据；其他跨入口容量组合与全量矩阵仍未整体验收，当前实现 SHA 云端复验待完成。
+
+- [x] 生产共享池 `PoolDelegator` 数值边界：`TestPoolDelegatorUsesDefaultWorkerAndQueueCapacity` 实测默认3 worker并发、32 queued、第33拒绝、35个已接受任务 exactly-once。只关闭数值边界子项，不代表 D/A/B/C/workspace 跨入口共池矩阵完成。
+- [x] Materializer 队列边界：`TestMaterializerSingleWorkerAndEightPendingSlots` 屏障验证一个运行任务、8个pending、第9个 `ErrQueueFull` 且无持久化副作用。
+- [x] Manifest 默认边界：`TestManifestDefaultSingleFileLimitAtBoundary`、`TestManifestDefaultSnapshotLimitAtBoundary`、`TestManifestDefaultFileCountLimitAtBoundary` 分别验证 16 MiB 单文件、128 MiB 总快照、20,000 files 的精确上限与超 1 byte/1 file 拒绝。
 - [ ] 每项512 MiB/每project2 GiB/16未删除项、child8轮/3分钟/50,000输出/8 KiB摘要/64 KiB输入生效；定义/请求只能收窄。增量证据：`TestBudgetDefaultWorkspaceCountLimitAtBoundary` 以 production limits 验证默认16个 live workspace 可用、第17个被 `ErrQuota` 拒绝，removed record 不占槽，移除一项后新建成功且仍为16项；`TestStreamingChildRunnerEnforcesProductionDefaultAggregateOutputLimit` 验证真实 child tool loop 聚合输出精确50,000 bytes成功、50,001 bytes被拒，summary不超过默认8 KiB。两项定向测试通过（2026-10-10）。其余每项/每project空间、child时间与部分请求预算组合仍开放。
 
 增量证据：`TestBudgetProductionDefaultStorageLimitsAtBoundary` 通过 Budget production defaults 验证 workspace 用量 512 MiB 精确上限通过、+1 byte 拒绝；四项 workspace 汇总 2 GiB 通过，第五项 +1 byte 拒绝。仅操作配额记账，不分配大文件；定向 workspace 测试本地通过（2026-10-10）。child 时间与其余限额组合仍开放。
+- [x] 存储容量与 live workspace 数值边界：`TestBudgetProductionDefaultStorageLimitsAtBoundary` 和 `TestBudgetDefaultWorkspaceCountLimitAtBoundary` 验证每项512 MiB、project2 GiB、16个未删除项的生产默认上限与超限拒绝；其余预算维度仍开放。
+- [x] child输出/摘要数值边界：`TestStreamingChildRunnerEnforcesProductionDefaultAggregateOutputLimit` 验证 50,000 bytes 聚合输出边界及 8 KiB summary 限制；child turn/时长/输入联合边界仍开放。
 - [ ] create/materialize3分钟、command90秒并受childdeadline、query最多30秒、stop清理10秒边界生效；等待不占额外childworker、不产生未接受无界goroutine。增量证据：`TestWorkspaceCommandDeadlineIsCappedAndInheritsParentDeadline` 通过真实 workspace writer executor 检查 command 即使请求600秒也将 profile 限制为90秒，并验证 sandbox 有效 deadline 不超过90秒；上游30秒 context deadline 原样收窄有效期限。测试中的 recording sandbox 按 profile timeout 对传入 context 应用 `context.WithTimeout`；Linux `RunIsolated` 使用同一规则。本机 execution 定向测试通过（2026-10-10）。`TestWorkspaceStopUsesBoundedDeadlineAndRetainsLeaseOnFailure` 用 recording stopper 验证默认 stop context 不超过10秒、父期限较短时保留原期限，且 stop 失败仍持久保留 blocked lease 的 RunID/generation。`TestWorkspaceQueriesUseThirtySecondBoundAndPreserveParentDeadline` 覆盖服务端 list/get/preview query 入口的默认30秒 deadline、较短父期限、超时错误透传，且 exit 等生命周期操作不受 query cap；服务层在解析 scope/manager 前建立 deadline，query 错误通过既有 socket error 响应可见。conversation 定向测试本地通过（2026-10-10）；create/materialize 与其余等待/worker矩阵仍开放。
+- [x] command/query/stop deadline 子项：`TestWorkspaceCommandDeadlineIsCappedAndInheritsParentDeadline`、`TestWorkspaceQueriesUseThirtySecondBoundAndPreserveParentDeadline`、`TestWorkspaceStopUsesBoundedDeadlineAndRetainsLeaseOnFailure` 验证默认90s/30s/10s deadline、父 context 收窄和失败时 lease 保留。create/materialize 3 分钟及等待/worker资源矩阵仍开放。
 - [ ] 配额/持久化/取消/队列失败可见，临时资源只清理自身；构建/全量/容器/大数据走已授权云端，未完成检查如实保留。
 
 ## AC8 入口、恢复、隐私与目标事实
 
 - [ ] `/worktrees`、create/enter/exit/keep/export/resolve/remove、`/agent --worktree`与父工具形成真实service闭环，完整用法/错误/状态/冲突反馈可见。（TUI 增加显式 Goal+WorkItem 工作树范围选择/清除与贯穿请求；Session 默认不变。真实 Goal lifecycle 集成及四项定向 TUI 测试本地通过；其余入口闭环仍待验收。）
 - [ ] 独立task/workspace session游标重连、重复通知去重，不覆盖父ActiveRunID/stream；恢复能看到同一工作树/candidate/保留原因。
+
+新增真实 agent-task stream 重连回归：`TestAgentTaskTUIReconnectReplaysFromIndependentCursor` 在 conversation service/Unix socket 中启动活跃 parent run 与后台 agent task，TUI 收到 task progress 后断开并在 task 完成后从独立 cursor 重连；重放 cursor 严格递增、终态摘要只呈现一次，parent `ActiveRunID`、`LastCursor`、stream 指针与 Pending 保持不变。定向 TUI 测试本地通过（2026-10-10）；workspace stream 与完整 AC8 通知矩阵仍开放。
 - [ ] 用户冲突resolution、discard与候选接受是单独可审阅决策；目录/事件/日志/TUI不显示角色正文、凭据、thinking、raw transcript或无限diff。
 
 新增 dirty-discard 真实 TUI/service 确认回归：`TestWorktreeTUIDirtyDiscardRequiresArmedSocketConfirmation` 通过真实 TUI 与 conversation socket 获取 digest/generation 预览；未 armed 的 Enter 不发删除请求且 dirty 文件保留，按 `d` 后 Enter 才由服务端删除工作树，formal 文件 bytes 不变。定向 TUI 测试本地通过（2026-10-10）；完整隐私和用户决策矩阵仍开放。

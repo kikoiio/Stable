@@ -27,6 +27,8 @@
 增量证据：`TestTeamUserProofEnforcesExpiryAndFutureClockSkew` 验证内部 socket user HMAC proof 新鲜时可用、超出 30 秒 TTL 或未来时间偏差超过 5 秒时拒绝，proof 与完整 WorkRef 校验测试均本地通过（2026-10-10）。
 
 新增跨 Goal 关闭隔离：`TestGoalTeamCloseRejectsAnotherGoalOwnerWithoutSideEffects` 使用两个合法 Goal/WorkItem owner，A 的 team 含 queued child；B 的有效 owner 身份尝试 CloseTeam 时返回权限拒绝，Replay/projection/history/session events/member 状态与 cancel 次数均不变；A 随后可成功关闭并取消 child。定向 conversation 测试本地通过（2026-10-10）；完整 AC1 owner/root/actor 与操作矩阵仍开放。
+
+新增跨 Goal stop 隔离：`TestTeamStopSocketRejectsValidAnotherGoalOwnerIdentityWithoutFacts` 通过真实 Unix socket 验证 Goal B 的合法 lead run 携有效 RunID/GoalID/WorkItemID 停止 Goal A 的 running member 会被拒绝，且 ReplayTeams、team history、session events/member 状态不变、runner 未取消；session user 随后通过合法 stop 使 child 真正停止。定向 conversation 测试本地通过（2026-10-10）；AC1 创建、查询、消息、stop 的完整 owner/root/actor 矩阵仍开放。
 - [x] **AC2 多轮：** 同一member连续两个有界turn，输入仅角色/身份/上一摘要/明确批次；没有父历史或兄弟transcript；idle不占worker，一member不并行；首spawn队满拒绝，后续消息waiting_capacity公平重试。（定向多轮/容量矩阵覆盖；SHA `5997ef511486af5911406bc04cfacbc428d48c2f` Go `build-and-test`通过。）
 - [x] **AC3 消息：** p2p/lead/broadcast持久有序、固定接收者、全或无投递；额满和写盘失败不误成功；批次handoff/restart destination gap、并发新消息和重连不丢失/重复；lead消息不自动起模型run。（定向投递/容量/恢复矩阵和 handoff 竞态用例均通过；SHA `42ebd90ace8e1b3bab4755a24d501d62aba237b4` Go `build-and-test` 通过。）
 - [x] **AC4 任务板：** CRUD、revision、owner、canonical依赖和blocks视图一致；未知/环/自依赖/跨队拒绝，未解除依赖禁止进行/完成；两成员抢claim只有一个成功，取消不会伪完成，M06 todo与Goal工作项独立。（本地定向矩阵通过；SHA `fb4353aaa1eae4003641d9232a913d69e1886029` Go `build-and-test` 与 `test-package` 通过。）
