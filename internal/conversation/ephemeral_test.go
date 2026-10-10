@@ -77,6 +77,12 @@ func TestEphemeralPrintRunUsesRequestedProjectAndCleansTranscript(t *testing.T) 
 		t.Fatalf("create=%+v err=%v", created, err)
 	}
 	id := created[0].Session.ID
+	if !created[0].Session.Ephemeral {
+		t.Fatal("session_create did not preserve the ephemeral marker")
+	}
+	if got := svc.sessionProjectRoot(id); got != root {
+		t.Fatalf("ephemeral session root = %q, want %q", got, root)
+	}
 	request := agent.ExecutionRequest{RunID: "print-integration", Work: agent.WorkRef{Kind: agent.WorkSession, SessionID: id}, Intent: "inspect", Model: "fixture", Messages: []llm.Message{{Role: "user", Content: "print fixture"}}}
 	stream, err := OpenRun(ctx, socket, request)
 	if err != nil {
