@@ -489,8 +489,9 @@ func TestM08MemorySurvivesCompactionRestoreAndCandidateRewind(t *testing.T) {
 		if event.Type != sessionlog.EventBoundary {
 			continue
 		}
-		boundary, ok := event.Data.(sessionlog.Boundary)
-		if ok && boundary.Scope == sessionlog.BoundaryScopeRun && boundary.RunID == request.RunID && boundary.FromSeq > 0 && boundary.ToSeq > 0 {
+		var boundary sessionlog.Boundary
+		raw, marshalErr := json.Marshal(event.Data)
+		if marshalErr == nil && json.Unmarshal(raw, &boundary) == nil && boundary.Scope == sessionlog.BoundaryScopeRun && boundary.RunID == request.RunID && boundary.FromSeq > 0 && boundary.ToSeq > 0 {
 			boundarySeen = true
 			if !strings.Contains(boundary.Summary, "好的，已记录。") {
 				t.Fatalf("unexpected real-run compaction summary: %+v", boundary)
