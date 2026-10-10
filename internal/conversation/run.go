@@ -389,9 +389,6 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	if request.Work.Kind != agent.WorkSession && len(hookPrefix) > 0 {
 		request.Messages = append(hookPrefix, request.Messages...)
 	}
-	if s.hooks != nil && !s.sessionIsEphemeral(msg.SessionID) && leadLease == nil {
-		s.hooks.RunStart(msg.SessionID, request.RunID, request.Intent)
-	}
 	var handle *agent.RunHandle
 	if trustedFactory != nil {
 		handle, err = s.deps.Runner.(agent.TrustedExecutorRunner).StartWithExecutorFactory(ctx, request, trustedFactory)
@@ -432,7 +429,7 @@ func (s *Service) startRun(ctx context.Context, msg ClientMsg, updates chan Serv
 	s.mu.Unlock()
 	s.workspaceAdmissionMu.Unlock()
 	admissionHeld = false
-	if s.hooks != nil {
+	if s.hooks != nil && !s.sessionIsEphemeral(msg.SessionID) {
 		// Start the runner first so run_start child progress can be published
 		// into its durable parent event stream. The consumer starts after the
 		// synchronous run_start hooks have completed.
