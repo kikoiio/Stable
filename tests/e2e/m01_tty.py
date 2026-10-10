@@ -87,7 +87,9 @@ class TTYRun:
             os.chdir(self.cwd)
             os.execve(self.executable, [str(self.executable)], self.env)
         self.resize(100, 32)
-        self.wait_for(b"Ctrl+S", 60)
+        # The compact status footer may be clipped at the initial width; the
+        # rendered empty-session state is stable and confirms TUI readiness.
+        self.wait_for("空会话".encode(), 60)
 
     def resize(self, columns: int, rows: int):
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ,
