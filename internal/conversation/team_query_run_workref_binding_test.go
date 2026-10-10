@@ -2,12 +2,14 @@ package conversation
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
 	"stable/internal/agent"
+	"stable/internal/llm"
 	"stable/internal/sessionlog"
 	"stable/internal/store"
 	"stable/internal/teams"
@@ -151,6 +153,26 @@ func TestTeamQueriesBindRunToPersistedWorkRef(t *testing.T) {
 	} {
 		if err := query.call(); err == nil {
 			t.Errorf("Run A with forged WorkRef B was accepted by %s query", query.name)
+		}
+	}
+	for _, query := range []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "team_member_get", args: map[string]any{"team_id": teamB.ID, "member_id": "query-member-b"}},
+		{name: "team_member_list", args: map[string]any{"team_id": teamB.ID}},
+	} {
+		encoded, err := json.Marshal(query.args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		outcome, err := service.ExecuteTeamTool(context.Background(), requestB, llm.ToolUse{ID: "valid-" + query.name, Name: query.name, Arguments: encoded})
+		if err != nil || outcome.Status != agent.ToolSucceeded || outcome.IsError {
+			t.Fatalf("valid WorkItem B %s query = %+v, %v", query.name, outcome, err)
+		}
+		outcome, err = service.ExecuteTeamTool(context.Background(), forged, llm.ToolUse{ID: "forged-" + query.name, Name: query.name, Arguments: encoded})
+		if err != nil || outcome.Status != agent.ToolDenied || !outcome.IsError {
+			t.Fatalf("Run A with forged WorkRef B %s query = %+v, %v; want denial", query.name, outcome, err)
 		}
 	}
 	after, err := sessionlog.Replay(root, session.ID)
