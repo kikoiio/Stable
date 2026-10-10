@@ -46,12 +46,18 @@ func TestTeamWatcherRetriesFinalMemberStateAppendAndClosesTeam(t *testing.T) {
 	service.deps.ForkToolSchemas = []llm.ToolSchema{{Name: "read_file"}}
 	service.deps.ProviderName, service.deps.Model = "fixture", "model-v1"
 	service.teamScheduler = newTeamScheduler(service)
-	var memberStateAttempts atomic.Int32
+	var idleStateAttempts atomic.Int32
+	var stoppedStateAttempts atomic.Int32
 	memberStateFailure := make(chan struct{}, 1)
 	service.teamMemberStateAppender = func(appendRoot string, team teams.Team, runID, actor string, member teams.Member) error {
-		if memberStateAttempts.Add(1) == 1 {
-			memberStateFailure <- struct{}{}
-			return errors.New("injected temporary member-state append failure")
+		switch member.Status {
+		case teams.MemberIdle:
+			if idleStateAttempts.Add(1) == 1 {
+				memberStateFailure <- struct{}{}
+				return errors.New("injected temporary member-state append failure")
+			}
+		case teams.MemberStopped:
+			stoppedStateAttempts.Add(1)
 		}
 		return appendTeamFactLocked(appendRoot, team.Scope.SessionID, team.ID, sessionlog.TeamEvent{Kind: sessionlog.TeamMemberState, ActorID: actor, ActorRunID: runID, Member: &member})
 	}
@@ -95,8 +101,11 @@ func TestTeamWatcherRetriesFinalMemberStateAppendAndClosesTeam(t *testing.T) {
 	}
 	waitForTeamMemberStatus(t, root, request.Work.SessionID, team.ID, member.ID, teams.MemberStopped)
 	waitForTeamClosed(t, root, request.Work.SessionID, team.ID)
-	if got := memberStateAttempts.Load(); got != 2 {
-		t.Fatalf("final member-state append attempts=%d, want one failed attempt and one retry", got)
+	if got := idleStateAttempts.Load(); got != 2 {
+		t.Fatalf("idle member-state append attempts=%d, want one failed attempt and one retry", got)
+	}
+	if got := stoppedStateAttempts.Load(); got != 1 {
+		t.Fatalf("closing member-state append attempts=%d, want one transition to stopped", got)
 	}
 	assertWatcherTerminalFactCounts(t, root, request.Work.SessionID, team.ID, member.ID, child.input.TeamTurn.TurnID, child.input.ChildRunID, teams.MemberStopped)
 	if got := watcherMemberTerminalStateCount(t, root, request.Work.SessionID, team.ID, member.ID, child.input.TeamTurn.TurnID, teams.MemberStopped); got != 1 {
