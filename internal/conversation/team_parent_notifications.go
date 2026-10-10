@@ -27,7 +27,7 @@ func (s *Service) teamLeadNotifications(request agent.ExecutionRequest, authorit
 	if request.TeamTurn != nil || request.TeamUser {
 		return nil, nil
 	}
-	root, err := sessionlog.ProjectRoot(s.deps.ProjectRoot)
+	root, err := sessionlog.ProjectRoot(s.sessionProjectRoot(request.Work.SessionID))
 	if err != nil {
 		return nil, err
 	}

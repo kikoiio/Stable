@@ -88,7 +88,7 @@ func recoverAgentTaskRuns(root string) error {
 // Called under eventMu; durable destination references count as delivered only
 // when that destination has its own run_started fact.
 func (s *Service) agentTaskNotifications(request agent.ExecutionRequest) ([]llm.Message, error) {
-	transcript, err := sessionlog.Replay(s.deps.ProjectRoot, request.Work.SessionID)
+	transcript, err := sessionlog.Replay(s.sessionProjectRoot(request.Work.SessionID), request.Work.SessionID)
 	if err != nil {
 		return nil, err
 	}
