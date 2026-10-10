@@ -31,6 +31,8 @@ jobs:
         run: node --test tests/remote-ui.test.cjs
       - name: Build CLI and workers
         run: go build ./cmd/...
+      - name: M01 production TTY acceptance
+        run: bash tests/e2e/m01_tty.sh
       - name: Run unit tests
         run: go test ./...
 

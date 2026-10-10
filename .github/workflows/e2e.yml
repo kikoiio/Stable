@@ -164,6 +164,36 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # M07-C complete runtime lifecycle, including the production stable down/up
+  # supervisor boundary and MCP session transcript replay.
+  e2e-m07c:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: ./.github/actions/setup-e2e-deps
+        with:
+          kicad: 'false'
+      - name: M07-C service and full runtime acceptance
+        run: make m07c-e2e
+      - name: Collect isolated runtime logs
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          cp -aL run ci-logs/run 2>/dev/null || true
+      - name: Upload M07-C logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-m07c-logs
+          path: ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
   # 夹具派生场景用例。make cases 会遍历所有用例目录,而 S01 以外的 legacy
   # 用例在 agentctl start 移除后固定 exit 2,因此 CI 只跑 S01 修复正例。
   cases:

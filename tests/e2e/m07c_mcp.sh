@@ -5,4 +5,6 @@ cd "$project_root"
 export GOMAXPROCS=${GOMAXPROCS:-2}
 printf '\n==> M07-C MCP service lifecycle\n'
 go test -p 1 ./tests/e2e -run '^TestM07CMCP(ServiceLifecycle|ServiceRestartReplaysLifecycleEvents)$' -count=1 -v
+printf '\n==> M07-C complete stable runtime down/up and session replay\n'
+bash tests/e2e/m07c_runtime_restart.sh
 printf '\nM07-C e2e: all scenario groups passed.\n'

@@ -1,5 +1,5 @@
 # Stable — 统一入口。版本号唯一来源是 ./VERSION。
-.PHONY: check test e2e m03-e2e m04-e2e m05-e2e m07b-e2e cases package test-package install-dev run clean platform-check
+.PHONY: check test e2e m03-e2e m04-e2e m05-e2e m07b-e2e m07c-e2e cases package test-package install-dev run clean platform-check
 
 check: ## 检查开发环境依赖
 	bash scripts/check_env.sh
@@ -28,6 +28,9 @@ m05-e2e: ## M05 会话搜索恢复、压缩边界、快照 rewind 与问答边�
 
 m07b-e2e: ## M07-B hooks 合并、拒绝、通知回流与重启投影（无需沙箱）
 	bash tests/e2e/m07b_hooks.sh
+
+m07c-e2e: ## M07-C MCP 生命周期与完整 stable runtime down/up 恢复
+	bash tests/e2e/m07c_mcp.sh
 
 cases: ## 场景用例（tests/cases，需要 kicad-cli）
 	@for c in tests/cases/cases/*/; do \

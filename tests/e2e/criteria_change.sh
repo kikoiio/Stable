@@ -26,10 +26,6 @@ trap e2e_run_cleanups EXIT
 
 source "$project_root/tests/e2e/mock_model_env.sh"
 source "$project_root/tests/e2e/candidate_accept.sh"
-# chatserve binds the repo as its trusted project root; session traffic must
-# address the same root (see trustedSessionRoot).
-E2E_SESSION_ROOT="$project_root"
-
 # Build the same dev-install layout the runtime supervisor expects: it derives
 # libexec/share from its own executable location, so stable must live in
 # dev-install/bin for the daemon stack to find workers, fixtures and schemas.
@@ -46,30 +42,35 @@ rm -rf "$dev_root/share/fixtures" "$dev_root/share/schemas" "$dev_root/share/wor
 cp -a "$project_root/fixtures" "$dev_root/share/fixtures"
 cp -a "$project_root/schemas" "$dev_root/share/schemas"
 cp -a "$project_root/workers" "$dev_root/share/workers"
+E2E_SESSION_ROOT="$dev_root/share"
 
-# stable up daemonizes temporal/supervisor/worker/chat and returns; readiness
-# is judged by fresh 'agent worker ready' lines (chatserve starts separately).
+# stable up daemonizes temporal/supervisor/worker/chat and returns. Keep the
+# runtime as the sole chat.sock owner except when phase 2 deliberately stops it.
 start_runner() {
+  if [[ -n "$chat_pid" ]]; then
+    kill "$chat_pid" 2>/dev/null || true
+    wait "$chat_pid" 2>/dev/null || true
+    chat_pid=
+  fi
   STABLE_TEMPORAL_PORT="$port" "$run_root/dev-install/bin/stable" up >"$run_root/up.log" 2>&1 || { cat "$run_root/up.log" >&2; return 1; }
   # up returns after daemonizing; wait for the worker to connect. Logs rotate
   # across down/up cycles, so match the ready line anywhere in the live file.
   for _ in $(seq 1 120); do
-    if grep -q 'agent worker ready' "$run_root/worker.log" 2>/dev/null; then return 0; fi
+    if grep -q 'agent worker ready' "$run_root/worker.log" 2>/dev/null && [[ -S "$run_root/chat.sock" ]]; then return 0; fi
     sleep 0.5
   done
   tail -n 5 "$run_root/up.log" "$run_root/supervisor.log" >&2
   return 1
 }
 
-# chatserve is not part of the daemon stack; start it for the session. It
-# rebinds the worker-owned chat socket, so start it unconditionally to keep the
-# protocol's project root deterministic.
+# A standalone chatserve is needed only while phase 2 intentionally stops the
+# runtime. start_runner always stops it before restoring runtime ownership.
 start_chat() {
   local socket="$run_root/chat.sock" before after
   before=$(stat -c '%i' "$socket" 2>/dev/null || true)
   if [[ -n "$chat_pid" ]]; then kill "$chat_pid" 2>/dev/null || true; wait "$chat_pid" 2>/dev/null || true; fi
   "$dev_root/bin/stable" chatserve --db "$run_root/state.db" --socket "$socket" \
-    --temporal "$address" --project-root "$project_root" --run-root "$run_root/goals" >"$run_root/chatserve.log" 2>&1 &
+    --temporal "$address" --project-root "$E2E_SESSION_ROOT" --run-root "$run_root/goals" >"$run_root/chatserve.log" 2>&1 &
   chat_pid=$!
   # `stable up` and this standalone service can successively bind the same
   # socket path. Waiting for path existence alone may accept the old listener
@@ -125,7 +126,6 @@ wait_status() { # python condition over status.json, driving approvals and candi
 }
 
 start_runner
-start_chat
 session_id=$(e2e_new_session "$run_root/session.jsonl")
 
 # --- phase 1: create, confirm and fully verify under revision 0 ---
@@ -140,6 +140,7 @@ python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); assert x["snapshot"
 
 # --- phase 2: confirm relaxed criteria while checks are deferred (Temporal down) ---
 stop_runner
+start_chat
 e2e_chat create_goal --session "$session_id" --goal "$goal_id" --text "修复传感器连接，放宽 ERC 允许 2 个违规，J1 连接要恢复" >"$run_root/create-v1.jsonl"
 proposal_v1=$(proposal_from "$run_root/create-v1.jsonl")
 [[ -n "$proposal_v1" ]] || { echo 'no v1 proposal' >&2; exit 1; }
@@ -167,7 +168,6 @@ PY
 
 # --- phase 3: restart; the pending wake replays and auto reverification passes ---
 start_runner
-start_chat
 # Freeze the goal before exporting: after verification the goal re-evaluates
 # on its 30s interval, and one evaluation can occupy the goal for minutes
 # under load (CI observed a single EvaluateGoal holding it waiting/"computer
@@ -185,7 +185,6 @@ freeze_verified() { # revision; leaves the worker stopped on a verified goal
       return 0
     fi
     start_runner
-    start_chat
   done
   echo 'goal did not stay verified across worker stop' >&2
   exit 1
@@ -208,10 +207,7 @@ PY
 # --- phase 4: confirm tightened criteria mid-run, controlled pause, converge ---
 # freeze_verified left the worker stopped; bring it back so the v2 confirm
 # lands mid-run instead of taking the deferred path covered by phase 2.
-# stable up rebinds the chat socket with its own root, so chatserve must be
-# restarted too before any e2e_chat call.
 start_runner
-start_chat
 e2e_chat create_goal --session "$session_id" --goal "$goal_id" --text "修复传感器连接，ERC 必须全过，J1 连接要恢复" >"$run_root/create-v2.jsonl"
 proposal_v2=$(proposal_from "$run_root/create-v2.jsonl")
 [[ -n "$proposal_v2" ]] || { echo 'no v2 proposal' >&2; exit 1; }
@@ -222,7 +218,6 @@ sleep 2
 read_status
 python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); g=x["snapshot"]["goal"]; assert g["status"]=="pending_reverification" and g["criteria_revision"]==2, g' "$status_file"
 start_runner
-start_chat
 freeze_verified 2
 export_delivery delivery-p4
 python3 - "$run_root" <<'PY'

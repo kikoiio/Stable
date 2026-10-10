@@ -7,8 +7,8 @@
 - [x] M08 指令发现、记忆读写/召回、run 后提取、整理与目标事实隔离：对照 `specs/M08/checklist.md`，所列 AC 均有测试证据。
 - [x] M10-A print、provider 选择、只读权限和临时 session 清理：对照 `specs/M10-A/checklist.md`，所列 AC 均有测试证据。
 - [x] M10-B remote 配对、目录审批、浏览器会话、权限请求、TLS 与关闭生命周期：对照 `specs/M10-B/checklist.md`，所列 AC 均有测试证据。
-- [ ] M01 真实 Linux 终端场景：打开会话、输入多行、导航目标后返回；resize、长回复、错误提示；补全边界。（验证：在可交互 TTY 中启动已配置 fake-provider 服务并逐项记录终端输出。）
-- [ ] M07-C 完整服务进程重启：MCP 配置 reload 事件、服务状态和 session replay 在关闭并重新启动 stable service 后一致。（验证：真实 CLI/runtime 生命周期脚本，不以同进程重建 service 代替。）
+- [ ] M01 真实 Linux TTY 场景：打开/加载会话、提交多行输入、导航目标后返回；长回复滚动与 resize、provider 错误提示、命令和受限路径补全。（验证：Go workflow 步骤 `bash tests/e2e/m01_tty.sh` 使用 Python PTY、隔离 HOME/state、loopback fake provider 和正式 `stable` 无参数入口；等待该 SHA workflow 结果后勾选。）
+- [ ] M07-C 完整服务进程重启：MCP 配置 reload 事件、服务状态和 session replay 在关闭并重新启动 stable service 后一致。（验证：`bash tests/e2e/m07c_runtime_restart.sh`；真实隔离 CLI/runtime 生命周期，断言 supervisor PID 改变、MCP fixture 重连和 session replay 事件一致；保留 `M07-C RUNTIME RESTART PASS` 及日志路径，不以同进程重建 service 代替。）
 - [ ] Remote 浏览器新 run 流：新提交 run 的 `text_delta` 即时显示在当前 transcript。（验证：`node --test tests/remote-ui.test.cjs`。）
 - [ ] UTF-8 记忆上下文限制：中文和混合文本的完整渲染字节数不超过 128 KiB，section 仍闭合。（验证：`go test ./internal/conversation -run TestRenderMemoryContextIsBoundedAndContainsSelectedText -count=1`。）
 
