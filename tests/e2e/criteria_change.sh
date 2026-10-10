@@ -65,12 +65,34 @@ start_runner() {
 # rebinds the worker-owned chat socket, so start it unconditionally to keep the
 # protocol's project root deterministic.
 start_chat() {
+  local socket="$run_root/chat.sock" before after
+  before=$(stat -c '%i' "$socket" 2>/dev/null || true)
   if [[ -n "$chat_pid" ]]; then kill "$chat_pid" 2>/dev/null || true; wait "$chat_pid" 2>/dev/null || true; fi
-  "$dev_root/bin/stable" chatserve --db "$run_root/state.db" --socket "$run_root/chat.sock" \
+  "$dev_root/bin/stable" chatserve --db "$run_root/state.db" --socket "$socket" \
     --temporal "$address" --project-root "$project_root" --run-root "$run_root/goals" >"$run_root/chatserve.log" 2>&1 &
   chat_pid=$!
-  # 40×0.25s(10s)在慢 CI runner 上不够 chatserve 完成绑定;统一用 lib.sh 的 120s 等待。
-  if e2e_wait_for_chat_socket "$run_root/chat.sock"; then return 0; fi
+  # `stable up` and this standalone service can successively bind the same
+  # socket path. Waiting for path existence alone may accept the old listener
+  # during the unlink/rebind window and race the first client request.
+  for _ in $(seq 1 480); do
+    after=$(stat -c '%i' "$socket" 2>/dev/null || true)
+    if [[ -S "$socket" && -n "$after" && "$after" != "$before" ]] && \
+      python3 - "$socket" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(.2)
+try:
+    s.connect(sys.argv[1])
+except OSError:
+    raise SystemExit(1)
+finally:
+    s.close()
+PY
+    then
+      return 0
+    fi
+    sleep 0.25
+  done
   cat "$run_root/chatserve.log" >&2
   return 1
 }
