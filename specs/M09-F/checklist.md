@@ -62,6 +62,18 @@
 
 新增完整 B/F/W digest 绑定矩阵：`TestWorkspaceConflictResolutionBindsAllSourceDigestsAndExactPaths` 先比对 preview 中 baseline/formal/workspace digest 与三个真实 manifest，再验证冲突集合恰为两个精确路径；resolve 前任一 B/F/W 源变化均返回 `ErrSourceChanged` 且不保存选择，额外路径被拒，分页漏选虽可保存首段但 Export 拒绝且不生成 candidate。各拒绝路径检查 formal/baseline/checkout 数据及 resolution 状态未被错误修改。定向 conversation 测试通过（2026-10-10）；完整分页→export→review→accept 与其余并发/用户身份组合仍开放，当前 SHA 云端验证待完成。
 
+新增 resolution actor 边界：`TestBoundLeadAgentCannotSubmitUserConflictResolution` 确认真实绑定 lead run 的模型 schema 不提供 `worktree_resolve`；伪造该调用仍由 executor 拒绝，且不产生 resolution/candidate，formal/workspace/baseline 均不变。定向 conversation 测试本地通过（2026-10-10）。
+
+新增冲突选择物化矩阵：`TestWorkspaceConflictResolutionChoiceMaterializesExactCandidatePath` 分别选择 `UseFormal` 与 `UseWorkspace`，断言 candidate 冲突路径字节等于所选侧、candidate digest 与 manifest 一致，formal/baseline/checkout 在接收前不变。定向 conversation 测试本地通过（2026-10-10）。
+
+新增 export 超限拒绝：`TestWorkspaceExportManifestQuotaDoesNotCreateReadyCandidate` 在 export 物化窗口使 checkout 超过 manifest 文件上限，验证返回 `ErrQuota`、不留下 candidate root/ready candidate、workspace 保持 kept 且 formal/baseline 不变。定向 conversation 测试本地通过（2026-10-10）。
+
+新增 Goal agent 接收/提交权限边界：`TestGoalWorkspaceAgentCannotAcceptOrCommitReviewedCandidate` 在真实 Goal-bound lead run 中伪造 `review_accept`、candidate/worktree accept、`git_commit`、`git_merge`、`git_push`；模型 schemas 不暴露这些工具，executor 拒绝伪造调用，且无 receipt、formal 不变、candidate 仍为 reviewed 且 digest 不变。定向 conversation 测试本地通过（2026-10-10）。一般 `command` 的 Git metadata 屏蔽与网络限制由 Linux sandbox 测试覆盖。
+
+新增两 workspace 同路径纵向流程：`TestSequentialWorkspacesRequireResolutionForSamePathConflict` 验证两个 checkout 从同一 baseline 修改同一文件；先接收 A 后，B 必须在同路径冲突上作显式选择才能 export/review/accept。缺少选择时无 candidate/resolution 且拒绝接收；选择 W 后候选字节精确匹配，formal 只在显式接收后更新、baseline不变。定向 conversation 测试本地通过（2026-10-10）。
+
+新增 B=nil 的 create/create 冲突选择：`TestWorkspaceCreateConflictResolutionExportsSelectedSide` 对 baseline 不存在而 formal 与 workspace 同时新增且字节不同的同一路径，分别选择 `UseFormal` 与 `UseWorkspace`；验证 preview 的 B/F/W 项与真实 manifest 对齐、候选精确物化被选侧，formal/baseline 在用户接收前不变。定向 conversation 测试本地通过（2026-10-10）。AC4 当前仍需最新代码 SHA 的云端复验。
+
 新增真实 socket 手工合并导出证据：`TestWorkspaceSocketManualConflictResolutionExportsExactMergedValue` 通过 conversation Unix socket 对精确冲突路径作用户 `UseWorkspace` 选择，确认与旧 B/F 都不同的手工 W 字节原样进入 ready candidate，随后可生成 review，且 export/review 均不改变 formal 或 baseline。定向 conversation 测试本地通过（2026-10-10）；显式 accept、并发源变化、完整三方表及当前 SHA 云端复验仍开放。
 
 - [ ] B/F/W相等/仅一方变/双方相同/双方不同表覆盖bytes、mode、创建、删除；rename按delete/add，冲突有绑定digest的路径摘要，无自动文本merge/force旁路。
@@ -85,6 +97,10 @@
 新增 project-v2 恢复证据：`TestProjectAcceptanceRecoveryWithoutMetadataFactsBlocksAndRetainsRoots` 验证 v2 acceptance journal 缺少受保护 metadata facts 时恢复 fail closed：formal/incoming 内容及 formal `.stable` bytes/inode 保留，journal blocked、无 receipt，重复恢复稳定。定向 store 测试本地通过（2026-10-10）；AC5 其余版本、crash cut 与 metadata 组合矩阵仍开放。
 
 新增 project-v2 原子交换恢复切口：`TestReconcileAtomicExchangeRestoresProjectMetadataAfterPreparedCrash` 写入 `.git` regular 指针、`.stable`、`.mewcode` 的 protected metadata facts，真实执行 Linux atomic directory exchange 后在 journal 仍为 prepared 时模拟重启；连续两次 reconcile 后正式内容及 metadata 原 inode/bytes 均恢复/保留、journal finalized 且 receipt 唯一。定向 store 测试本地通过（2026-10-10；非 atomic-exchange 平台 skip）；其它 move/exchange/finalize 切口仍开放，当前 SHA 云端验证待完成。
+
+新增 project-v2 rewind metadata 冲突恢复：`TestProjectRewindRecoveryRetainsInstalledRootWithUnexpectedMetadata` 模拟 rewind 两侧 root rename 已完成而 journal phase 尚未更新，安装目标出现未知 `.stable`；关闭并重开数据库后 recovery 阻断，重复恢复继续保留正式 candidate/root、rollback root、两侧 metadata bytes/inodes、candidate digest/status 与 blocked phase。定向 store 测试本地通过（2026-10-10）；完整 AC5 crash-cut/version 矩阵仍开放。
+
+新增 v12 legacy rewind migration 恢复：`TestLegacyRewindV12MigrationBlocksWithoutInventingIdentity` 创建 v12 pending rewind 并跨迁移到 v14，确认 legacy-v1 policy 不变且缺失的 root identity 保持为空；遇 linked `.git` pointer 时 recovery blocked，重复恢复继续保留 candidate/staging/Git common-dir bytes 与 inode、digest/status。定向 store 测试本地通过（2026-10-10）；完整 AC5 crash-cut/version 矩阵仍开放。
 
 新增 legacy linked-Git restart 隔离证据：`TestLegacyLinkedGitTransactionsBlockAfterDatabaseRestart` 分别持久化 legacy acceptance 与 rewind intent、关闭并重新打开数据库后执行 recovery；两条路径都进入 blocked、无 acceptance receipt，保留 formal/incoming 或 candidate/staging 字节，并确认 linked `.git` common-dir `config` sentinel 的内容与 inode 不变。定向 `internal/store` 测试本地通过（2026-10-10）；补强旧 Git pointer 事务重启边界，但 AC5 的旧版本组合、metadata 事务各阶段和 workspace→accept 整合矩阵仍开放，当前 SHA 云端验证待完成。
 

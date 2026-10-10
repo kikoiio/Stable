@@ -10,6 +10,8 @@
 
 新增 socket 身份证据：`TestGoalTeamSendSocketRejectsSiblingWorkItemRunWithoutFacts` 通过真实 Unix socket 验证同 Goal 下 WorkItem B 的有效 lead run 不能向 WorkItem A 的 team 发送消息；拒绝请求前后 team projection/history/session events 不变，A 的 owner run 随后可以发送。定向 conversation 测试本地通过（2026-10-10）；完整 AC1 身份与 stop 矩阵仍开放，当前 SHA 云端复验待完成。
 
+新增同 Goal/Root 的 sibling WorkItem 成员创建隔离：`TestGoalTeamSpawnRejectsSiblingWorkItemRunWithoutFacts` 使用两个有效 lead run 与准确权限边界，验证 B 不能向 A 的 team spawn member，且 replay/projection、history、session events、scheduler queue/grant/active 与 child runner 均无变化；owner A 随后可成功 spawn。定向 conversation 测试本地通过（2026-10-10）；其余 cross-session/Goal/WorkItem 操作与完整 stop 矩阵仍开放。
+
 新增 actor 边界修复：`CloseTeam` 现要求服务派生的 lead actor、活动 parent 和持久化 RunStarted 完全匹配；拒绝同 WorkRef 下空/伪造 RunID、无效 inactive parent 与伪造 `TeamUser` 标记。`TestCloseTeamRejectsForgedActorAndRunIdentityWithoutSideEffects` 定向通过（2026-10-10），确认拒绝前后 team projection/history/member/cancel 状态不变，合法 lead 与 Unix socket 的服务端 user request 仍可关闭。进一步修复了其他公共 service API 只凭可伪造 `TeamUser` bool 将调用方提升为 lead 的漏洞：服务内部 socket request 现在签发绑定完整 WorkRef、30秒过期且不序列化的 HMAC proof；`TestForgedTeamUserCannotSendButLocalSocketCan` 确认伪造 send 在 facts/history/event/scheduler 之前拒绝，合法 socket user send 仍成功；`TestTeamUserProofBindsWorkAndIsNotSerialized` 验证 scope 绑定与不泄漏。相关定向 conversation 测试通过（2026-10-10）；其余 owner/root/actor 组合矩阵与当前 SHA 云端验证仍开放。
 
 增量证据：`TestCreateTeamRejectsForgedWorkRefBeforeSideEffects` 用有效 owner RunID 配合伪造 Goal/WorkItem WorkRef 调用 CreateTeam，验证权限拒绝前后 session team projection、目标 team history、session events 与 scheduler ready/active 均不变。定向 conversation 测试本地通过（2026-10-10）；完整 AC1 身份矩阵仍开放。
@@ -69,9 +71,15 @@
 增量证据：`TestAgentTaskSessionReplayKeepsSummaryButNotCredentialRoleOrChildTranscript` 检查运行体 input 可包含完整可信角色指令，但 task/session 原始日志、replay 和 agent-task projection 只保留安全摘要与脱敏标记，不含 provider credential、角色正文或 child transcript sentinel；定向 conversation 测试本地通过（2026-10-10）。其他工具/UI字段与组合隐私矩阵仍开放。
 
 新增 team child transcript 隐私证据：`TestTeamChildTranscriptHidesRawTextAndThinking` 验证 TUI 不渲染带 TeamID 子 run 的原始 `text_delta` 或 `thinking_delta`，同时保留安全 delegation 摘要与 parent 文本。该测试先复现泄露，再由 transcript 投影将 team child run 纳入后台 run 过滤修复；定向 TUI 测试通过（2026-10-10）。其它隐私字段及完整矩阵仍开放，当前 SHA 云端验证待完成。
+
+新增隐私组合闭环：`TestTeamChildRoleAndCredentialStayPrivateAcrossReplayAndTranscript` 经过真实 TUI/socket→service→child runner→session log/replay/ReplayTeams/Transcript.View，child 结果回显 role instructions 与 provider credential 后，原始日志、replay、team projection 与可见 transcript 均不含 sentinel，同时保留安全上下文及脱敏标记。定向 TUI 测试通过（2026-10-10）；其余资源边界、持久化故障与完整隐私矩阵仍开放。
+
+- [x] team task board 单项限额与查询边界：256项任务、第257项无facts；title 256B/description 4096B准确边界及+1拒绝；16项依赖、第17项无facts；page size 上限及完整cursor遍历。证据：`TestCreateTeamTaskRejectsBeyondServiceBoundaryWithoutFacts`、`TestCreateTeamTaskEnforcesTitleAndDescriptionByteLimitsWithoutFacts`、`TestTeamTaskServiceRejectsDependencyCountOverLimitWithoutFacts`、`TestListTeamTasksClampsPageAtMaxPageSize`、`TestTeamTaskRequestAcceptsAndRejectsTaskCursor`、`TestListTeamTasksCursorPaginationReturnsAllTasksOnce` 均有本地定向通过记录。该子项不表示 AC8 总项完成。
 - [ ] **AC9 组合回归：** 完整client/TUI协作路径、M05 compaction前后team facts不丢、游标重连不覆盖parent；A/B/C/D、M06 todo、普通Session/Goal、权限、候选与独立目标验证保持通过。（验证：fake集成及已授权云端Go/E2E/package。增量证据：`TestTeamTUIFactsSurviveParentCompactionAndSocketReconnect` 通过真实TUI slash命令与Unix socket创建team/message/task，注入fake parent compaction boundary及后续事件；旧 stream EOF 后经 `Model.Update → resumeRunCmd → runStreamStartedMsg → receiveRunCmd` 重订阅同一 parent run，断言 Pending/ActiveRunID/cursor/stream 归属不变，两个 compaction 前后的父事件各出现一次，并核对重连后的 team facts 与 replay projection 一致。定向 TUI 集成测试本地通过（2026-10-10）；完整 AC9 仍开放。）
 
 增量证据：`TestAcceptedGoalWorkspaceCandidateDoesNotCreateGoalEvidence` 通过 Goal-scoped workspace 实际 export→review→accept，验证正式文件按接收更新、Goal 转为 `pending_reverification` 并产生 `candidate_accepted` 通知，但 observations/evidence 为空、状态未成为 verified。定向 conversation 测试本地通过（2026-10-10）；E AC9 其它组合路径仍开放。
+
+新增 TUI shutdown 区分证据：`TestTeamTUIShutdownTextIsOrdinaryUntilTypedShutdownCommand` 经真实 TUI slash command→Unix socket→service 验证，普通成员消息中 `[shutdown]` 原文不会创建 shutdown request 或停止成员；只有显式 typed shutdown 命令才创建请求并停止成员，期间 parent Pending/ActiveRunID/cursor/stream 归属不变。定向 TUI 测试本地通过（2026-10-10）；完整 AC9 组合矩阵仍开放。
 
 ## 用户与父工具完整场景
 
