@@ -76,6 +76,10 @@
 - [x] `TeamClosing` 首次 append 失败的同进程重试：`TestCloseTeamRetriesWhenClosingFactCannotBeAppended` 证明失败时 durable projection/history/events 不变，恢复写权限后 `TeamClosing`/`TeamClosed` 各只有一个事实。上述 SHA Go 与 Workspace Linux runs 通过。只关闭这个 append/retry 切面，不代表 crash/fsync 或所有终态持久化失败矩阵。
 - [ ] **AC9 组合回归：** 完整client/TUI协作路径、M05 compaction前后team facts不丢、游标重连不覆盖parent；A/B/C/D、M06 todo、普通Session/Goal、权限、候选与独立目标验证保持通过。（验证：fake集成及已授权云端Go/E2E/package。增量证据：`TestTeamTUIFactsSurviveParentCompactionAndSocketReconnect` 通过真实TUI slash命令与Unix socket创建team/message/task，注入fake parent compaction boundary及后续事件；旧 stream EOF 后经 `Model.Update → resumeRunCmd → runStreamStartedMsg → receiveRunCmd` 重订阅同一 parent run，断言 Pending/ActiveRunID/cursor/stream 归属不变，两个 compaction 前后的父事件各出现一次，并核对重连后的 team facts 与 replay projection 一致。定向 TUI 集成测试本地通过（2026-10-10）；完整 AC9 仍开放。）
 
+- [x] parent compaction boundary 后 TUI/socket 重连仅补发新 cursor 事件且保留 team facts/parent stream：`TestTeamTUIFactsSurviveParentCompactionAndSocketReconnect`。SHA `7324fbcad46d87507b17325905fb4934cbac56c4` Go run `38016172145` 两 jobs 与 M09 Workspace Linux run `38016171931` 通过；该测试文件此后未改。boundary 来自 fixture，仅关闭该 durable boundary→重连场景。
+- [x] `[shutdown]` 普通 team 消息不触发控制行为，typed `/shutdown` 才建立请求并停止成员：`TestTeamTUIShutdownTextIsOrdinaryUntilTypedShutdownCommand`。同 SHA Go run `38016172145` 两 jobs通过；测试文件此后未改，不外推其它 request 权限/恢复矩阵。
+- [x] 接受 Goal workspace candidate 不自动生成 Goal evidence/verified 状态：`TestAcceptedGoalWorkspaceCandidateDoesNotCreateGoalEvidence`。同 SHA Go run `38016172145` 两 jobs通过；测试文件此后未改，checker 为 passing fixture，不代表真实 verifier 全链路。
+
 增量证据：`TestAcceptedGoalWorkspaceCandidateDoesNotCreateGoalEvidence` 通过 Goal-scoped workspace 实际 export→review→accept，验证正式文件按接收更新、Goal 转为 `pending_reverification` 并产生 `candidate_accepted` 通知，但 observations/evidence 为空、状态未成为 verified。定向 conversation 测试本地通过（2026-10-10）；E AC9 其它组合路径仍开放。
 
 新增 TUI shutdown 区分证据：`TestTeamTUIShutdownTextIsOrdinaryUntilTypedShutdownCommand` 经真实 TUI slash command→Unix socket→service 验证，普通成员消息中 `[shutdown]` 原文不会创建 shutdown request 或停止成员；只有显式 typed shutdown 命令才创建请求并停止成员，期间 parent Pending/ActiveRunID/cursor/stream 归属不变。定向 TUI 测试本地通过（2026-10-10）；完整 AC9 组合矩阵仍开放。

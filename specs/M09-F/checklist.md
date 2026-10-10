@@ -11,6 +11,7 @@
 ## AC1 归属与进入退出
 
 - [ ] workspace ID/label分离，label不用于路径/ref，创建与所有query/lifecycle操作拒绝跨session/project/Goal/WorkItem或伪造根。增量证据：双 session TUI same-label 与 Goal/WorkItem socket scope 矩阵通过；后者覆盖 get/enter/list、keep/export/remove/preview/discard-preview/discard/resolve，并验证客户端伪造 ProjectRoot 的 query 拒绝和越权后 owner binding、snapshot、checkout/formal bytes 与 candidate 不变（`TestWorkspaceSocketScopesGoalAndWorkItemOwnership`）。另有 `TestWorkspaceCreateOverSocketRequiresExactGoalWorkItemRunScope` 用真实 owner Goal run 验证 worktree_create 拒绝跨 Goal 和跨 WorkItem、正确 owner scope 可创建并查询。两项定向 Go 测试本地通过（2026-10-10）；剩余 ownership predicate 与完整 AC1 仍需验收。
+- [x] 两个 session 的相同 label 不共享 workspace identity/path/binding，query/enter 隔离且并发 lead run 持有各自 workspace/generation、cwd 不变：`TestWorktreeTUITwoSessionsKeepBindingsAndQueriesIsolated`。SHA `5997ef511486af5911406bc04cfacbc428d48c2f` Go run `37971394286` `build-and-test` 通过；测试文件相对该 SHA 未变。此项不覆盖单 workspace 多 child/writer 竞争与 Goal/WorkItem 全矩阵。
 - 增量 label 身份边界：`TestWorkspaceLabelCannotSelectFilesystemOrGitIdentity` 使用合法的 `../../label-escape` 显示标签，验证 root 仍精确由 opaque ID 决定、project root 外不出现 label 派生路径、private Git refs 不含 label 且无相邻逃逸目录。定向 workspace 测试本地通过（2026-10-10）；完整 AC1 ownership 矩阵仍开放。
 - [x] label 不决定 workspace 文件路径或 Git ref 身份：`TestWorkspaceLabelCannotSelectFilesystemOrGitIdentity` 验证路径仅由 opaque workspace ID 派生，显示标签不生成旁路目录或 private ref。SHA `8926c903e9c3d8783fe27bf9e097f5e719698887` 的 Go run `38015541004` 与 M09 Workspace Linux run `38015541052` 通过。Session/Project/Goal/WorkItem ownership 与 binding 并发仍开放。
 - 增量证据：`TestWorkspaceSocketSessionScopeCannotMutateGoalOwnedWorkspace` 用 session-scope socket 请求触达 Goal-owned workspace，验证 get/enter/keep/export/remove/preview/discard-preview 等操作拒绝、list 为空，且 owner/binding、checkout/formal、candidate 数据均不变。定向 conversation 测试本地通过（2026-10-10）；完整 AC1 仍开放。
@@ -101,6 +102,10 @@ AC4 合并矩阵审计通过：五项行为由逐项和纵向 focused regression
 
 旧 review digest 兼容回归：`TestLegacyReviewJSONKeepsHistoricalDigestAndAcceptance` 通过旧 JSON 结构独立计算历史 SHA256，确认缺少 `manifest_policy` 的 review 反序列化后仍省略该字段、digest 不变，且旧确认沿原 digest 接受验证。定向 candidate 测试本地通过（2026-10-10）；旧 SQL journal 迁移与含 Git legacy 事务恢复仍需单独验收。
 
+- [x] legacy review JSON 缺少 `manifest_policy` 时保留历史 digest，旧用户确认仍可验证：`TestLegacyReviewJSONKeepsHistoricalDigestAndAcceptance`。SHA `8926c903e9c3d8783fe27bf9e097f5e719698887` 的 Go run `38015541004`（`build-and-test`、`test-package`）通过。此项不覆盖旧 SQL journal schema/migration。
+- [x] v12 legacy acceptance journal 携带 linked `.git` pointer 时迁移后 fail closed：`TestLegacyAcceptanceV12MigrationBlocksGitMetadata`。同 SHA 的 Go run `38015541004` 两 jobs 通过；断言 legacy-v1/空身份保留、recovery blocked、无 receipt、metadata 与双方 bytes/inode 保留且重复恢复稳定。此项不外推其他旧版本、rewind 或所有 metadata 类型。
+- [x] project-v2 atomic-exchange acceptance 在 prepared 与 protected metadata 已归位但 receipt 缺失两个 crash cuts 下恢复幂等：`TestReconcileAtomicExchangeRestoresProjectMetadataAfterPreparedCrash`、`TestProjectAcceptanceRecoversAtomicMetadataRestoreBeforeReceipt`。同 SHA 的 Go run `38015541004` 两 jobs 通过；只关闭这两个特定切口（atomic-exchange 用例在不支持平台 skip），不覆盖完整 move/finalize 矩阵或 rewind。
+
 - [ ] v2 candidate/manifest/review/transaction版本字段与旧版本读取策略已实现；不重算旧digest继续旧用户确认，含Git旧候选需重新导出/预览。
 - [ ] 正式`.git`目录、linked `.git`regular指针与`.stable`分别测试保全、交换、归位；candidate/workspace注入替换metadata硬拒绝。
 - [ ] 每个intent/保全/交换/归位/finalize crash点幂等恢复，accept/rewind共用契约；unknown/并发metadata目标冲突保留双方并blocked。
@@ -128,6 +133,10 @@ AC4 合并矩阵审计通过：五项行为由逐项和纵向 focused regression
 新增 Keep 重启幂等：`TestKeepAfterRestartIsIdempotentAndRetainsDirtyCheckout` 在 dirty checkout 成功 Keep 后重建 service 并重复 Keep，验证 Operation ID/Kind/Phase、cursor、checkout 内容与 evidence 保留，重启后的 `UsedBytes == DiskUsage` 且再次恢复稳定。定向 workspace 测试本地通过（2026-10-10）；完整 AC6 lifecycle crash 矩阵仍开放。
 
 新增 Exit transition 跨重启幂等：`TestWorkspaceLifecycleExitTransitionRemainsIdempotentAcrossRestarts` 恢复 pending Exit 且 writer terminal success 后清空 binding；再次重启/recover 仍保持 Ready 与 unbound，transition 只有一次 Applied，cursor/UsedBytes/Operation ID/root inode/checkout bytes 均稳定。定向 conversation 测试本地通过（2026-10-10）；完整 AC6 crash/cleanup 矩阵仍开放。
+
+- [x] 成功 Keep 后丢响应/重复请求跨重启幂等并保留 dirty checkout：`TestKeepAfterRestartIsIdempotentAndRetainsDirtyCheckout` 验证 operation/cursor/内容与真实用量恢复稳定。SHA `8926c903e9c3d8783fe27bf9e097f5e719698887` Go run `38015541004` 两 jobs、M09 Workspace Linux run `38015541052` 通过。Keep intent/crash 与活动 writer 失败恢复仍开放。
+- [x] 已有 terminal success 的 pending Exit transition 经两次 restart/recover 仅应用一次：`TestWorkspaceLifecycleExitTransitionRemainsIdempotentAcrossRestarts` 验证 binding、cursor、用量、operation 与 checkout inode/bytes 稳定。上述 Go run 通过；不覆盖真实 stop/PID reuse 等其他 Exit 行为。
+- [x] Remove 已删 root/quarantine、Removed journal 尚未保存的最终化可重入：`TestRemoveCrashAfterQuarantineRemovalRecoversIdempotently` 验证第一次 recovery 仅推进一次 cursor 并保持 operation ID，第二次 recovery 不变化；上述 Go 与 Workspace Linux runs 通过。此项只关授权 clean-remove 的最后一个 finalize cut。
 
 新增 Export 后候选持久、journal CAS 失败恢复：`TestExportCandidatePersistsButJournalCASFailureRecoversWithoutReplay` 让 exporter 持久化一份可追踪 evidence 后模拟并发 journal generation 前进，使导出最终 ownership CAS 失败；重启恢复为 Interrupted/blocked 且无 CandidateID，显式再次 Export 被拒、不重放 exporter，唯一 evidence 仍保留可追踪。定向 workspace 测试本地通过（2026-10-10）；其他导出状态与生命周期故障组合仍开放。
 
@@ -176,7 +185,9 @@ AC4 合并矩阵审计通过：五项行为由逐项和纵向 focused regression
 - [ ] 用户冲突resolution、discard与候选接受是单独可审阅决策；目录/事件/日志/TUI不显示角色正文、凭据、thinking、raw transcript或无限diff。
 
 新增 dirty-discard 真实 TUI/service 确认回归：`TestWorktreeTUIDirtyDiscardRequiresArmedSocketConfirmation` 通过真实 TUI 与 conversation socket 获取 digest/generation 预览；未 armed 的 Enter 不发删除请求且 dirty 文件保留，按 `d` 后 Enter 才由服务端删除工作树，formal 文件 bytes 不变。定向 TUI 测试本地通过（2026-10-10）；完整隐私和用户决策矩阵仍开放。
+- [x] dirty discard 需要真实 TUI armed confirmation 且服务端复核 generation/digest：`TestWorktreeTUIDirtyDiscardRequiresArmedSocketConfirmation`。SHA `192eea3444891deb9270ae8c0f715e0b38fe5a0c` Go run `38016578467` 的 `build-and-test`、`test-package` 通过；dirty 内容在确认前保留，formal bytes 不变。
 - 增量证据：`TestWorktreeStatusRenderingOmitsPrivateSummaryAndDiffBody` 验证工作树状态只展示标签、冲突路径与摘要 digest，不展示角色正文、API key、thinking、raw transcript 或 diff 正文。定向 TUI 测试本地通过（2026-10-10）；目录、事件、日志及完整 diff 限制矩阵仍开放。
+- [x] agent task 使用独立 session cursor 重连与去重，不覆盖父 ActiveRunID/cursor/stream/Pending：`TestAgentTaskTUIReconnectReplaysFromIndependentCursor`。SHA `192eea3444891deb9270ae8c0f715e0b38fe5a0c` Go run `38016578467` 的 `build-and-test`、`test-package` 通过。该项只覆盖 agent task stream，不覆盖 workspace stream 与完整 AC8 通知矩阵。
 - [ ] 后台成功/summary/export不成为Goal证据，候选接受后仍需独立目标复检；Session/Goal WorkRef沿可信事件保持关联。
 
 ## AC9 组合回归与源差异
