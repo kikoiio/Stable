@@ -100,7 +100,7 @@ class TTYRun:
     def send(self, value: bytes):
         os.write(self.fd, value)
 
-    def wait_for(self, token: bytes, timeout: float = 20, start: int = 0):
+    def wait_for(self, token: bytes, timeout: float = 20, start: int = 0, label: str = "terminal output"):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if token in self.output[start:]:
@@ -119,7 +119,7 @@ class TTYRun:
                 self.pid = -1
                 raise RuntimeError(f"stable exited before {token!r} (status {status})")
         tail = bytes(self.output[-4000:]).decode("utf-8", "replace")
-        raise TimeoutError(f"timed out waiting for {token!r}; terminal tail:\n{tail}")
+        raise TimeoutError(f"timed out waiting for {label} {token!r}; terminal tail:\n{tail}")
 
     def stop(self):
         if self.pid <= 0:
@@ -237,17 +237,17 @@ def main() -> int:
         # Long streaming response, page navigation, terminal resize, and reflow.
         offset = len(tui.output)
         tui.send(b"M01_LONG_RESPONSE\r")
-        tui.wait_for(b"M01_LONG_039", 30, offset)
-        tui.wait_for(b"completed", 30, offset)
+        tui.wait_for(b"M01_LONG_039", 30, offset, "long reply stream")
+        tui.wait_for(b"completed", 30, offset, "long run completion")
         offset = len(tui.output)
         tui.send(b"\x1b[5~")  # Page Up
-        tui.wait_for(b"M01_LONG_000", start=offset)
+        tui.wait_for(b"M01_LONG_000", start=offset, label="Page Up transcript view")
         offset = len(tui.output)
         tui.send(b"\x1b[6~")  # Page Down
-        tui.wait_for(b"M01_LONG_039", start=offset)
+        tui.wait_for(b"M01_LONG_039", start=offset, label="Page Down transcript view")
         offset = len(tui.output)
         tui.resize(58, 16)
-        tui.wait_for(b"M01_LONG_039", start=offset)
+        tui.wait_for(b"M01_LONG_039", start=offset, label="resized transcript view")
 
         # A provider error must be visible in the TUI instead of looking like success.
         offset = len(tui.output)
