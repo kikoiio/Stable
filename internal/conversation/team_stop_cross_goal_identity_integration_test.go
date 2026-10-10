@@ -51,7 +51,7 @@ func TestTeamStopSocketRejectsValidAnotherGoalOwnerIdentityWithoutFacts(t *testi
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	socketDir, err := os.MkdirTemp(filepath.Join("..", "..", ".tmp"), "cross-goal-stop-")
+	socketDir, err := os.MkdirTemp("", "cg-stop-")
 	if err != nil {
 		t.Fatal(err)
 	}
