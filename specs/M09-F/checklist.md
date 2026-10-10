@@ -60,6 +60,8 @@
 
 新增 conflict resolution 分页证据：`TestConflictResolutionPagesAccumulateEveryExactPath` 构造205条冲突路径，验证分页预览不漏路径、同一用户分批选择会累计到完整路径集合，并拒绝伪造路径且不更改已保存的决策。定向 workspace 测试本地通过（2026-10-10）；尚未覆盖该选择经完整 export→candidate review/accept 闭环或分页时源变化，AC4 仍开放。
 
+新增完整 B/F/W digest 绑定矩阵：`TestWorkspaceConflictResolutionBindsAllSourceDigestsAndExactPaths` 先比对 preview 中 baseline/formal/workspace digest 与三个真实 manifest，再验证冲突集合恰为两个精确路径；resolve 前任一 B/F/W 源变化均返回 `ErrSourceChanged` 且不保存选择，额外路径被拒，分页漏选虽可保存首段但 Export 拒绝且不生成 candidate。各拒绝路径检查 formal/baseline/checkout 数据及 resolution 状态未被错误修改。定向 conversation 测试通过（2026-10-10）；完整分页→export→review→accept 与其余并发/用户身份组合仍开放，当前 SHA 云端验证待完成。
+
 新增真实 socket 手工合并导出证据：`TestWorkspaceSocketManualConflictResolutionExportsExactMergedValue` 通过 conversation Unix socket 对精确冲突路径作用户 `UseWorkspace` 选择，确认与旧 B/F 都不同的手工 W 字节原样进入 ready candidate，随后可生成 review，且 export/review 均不改变 formal 或 baseline。定向 conversation 测试本地通过（2026-10-10）；显式 accept、并发源变化、完整三方表及当前 SHA 云端复验仍开放。
 
 - [ ] B/F/W相等/仅一方变/双方相同/双方不同表覆盖bytes、mode、创建、删除；rename按delete/add，冲突有绑定digest的路径摘要，无自动文本merge/force旁路。

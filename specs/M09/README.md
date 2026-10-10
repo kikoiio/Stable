@@ -1,6 +1,6 @@
 # M09 并行协作与工作树：范围与进度
 
-> 2026-10-10 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；M09-A/B/C/D 已完成，E/F 仍各有开放验收项。E-AC6 已在 SHA `406739e65e24f8d8449f82a370fa192c81ed3953` 的 Go workflow run `38012313823`（`build-and-test`、`test-package`）通过后关闭；同一 SHA 的 [M09 Workspace Linux run 38012313692](https://github.com/kikoiio/Stable/actions/runs/38012313692) 通过，[E2E run 38012313796](https://github.com/kikoiio/Stable/actions/runs/38012313796) 尚在运行。此工作区另有未推送的 E-AC1 与 F-AC5 定向测试增量，尚未取得其代码 SHA 的云端结果，不能计作已验证。E-AC1、AC7–9 与 F-AC1–9 仍开放；M09 整体不标记完成。
+> 2026-10-10 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；M09-A/B/C/D 已完成，E/F 仍各有开放验收项。E-AC6 已在 SHA `406739e65e24f8d8449f82a370fa192c81ed3953` 的 Go workflow run `38012313823`（`build-and-test`、`test-package`）通过后关闭。SHA `12be6978f0f4b504f6df9b786a529a7ce17c0140` 补入 E-AC1 跨 Goal socket 隔离与 F-AC5 legacy linked-Git 重启回归；其 [Go run 38012926084](https://github.com/kikoiio/Stable/actions/runs/38012926084)（两个 jobs）、[E2E run 38012926097](https://github.com/kikoiio/Stable/actions/runs/38012926097)（六个 jobs）和 [M09 Workspace Linux run 38012926103](https://github.com/kikoiio/Stable/actions/runs/38012926103) 均通过。当前工作区随后新增 E-AC7 真实用户/成员权限和普通 Goal 工具执行回归、F-AC4 conflict resolution digest 与分页接受回归，尚未在新的代码 SHA 上复验。E-AC1、AC7–9 与 F-AC1–9 仍开放；M09 整体不标记完成。
 
 ## 已完成
 
