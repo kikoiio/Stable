@@ -1,6 +1,6 @@
 # M09 并行协作与工作树：范围与进度
 
-> 2026-10-10 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；不能把 M09-A/B/C 的验收通过等同于整个 M09 完成。SHA `0f32bd26e44909d9416cd4513d05af9faf425712` 的 Go `build-and-test`、`test-package`、M09 Workspace Linux 和 E2E 六个 jobs 均通过（[Go](https://github.com/kikoiio/Stable/actions/runs/37955178499)、[Workspace Linux](https://github.com/kikoiio/Stable/actions/runs/37955178592)、[E2E](https://github.com/kikoiio/Stable/actions/runs/37955178628)）。该 SHA 加入了 member→lead 消息的匹配父 run 持久交接；后续新增的普通开放团队 child-terminal 恢复修复仍待云端验证；E/F AC1–9 仍未整体验收。
+> 2026-10-10 核对。M09 **整体未完成**。依据 [迁移地图](../../mewcode-migration-map.md) 中 M09 的完整范围核对源项目；M09-A/B/C/D 已完成，E/F 仍各有开放验收项。E-AC6 已在 SHA `406739e65e24f8d8449f82a370fa192c81ed3953` 的 Go workflow run `38012313823`（`build-and-test`、`test-package`）通过后关闭；同一 SHA 的 [M09 Workspace Linux run 38012313692](https://github.com/kikoiio/Stable/actions/runs/38012313692) 通过，[E2E run 38012313796](https://github.com/kikoiio/Stable/actions/runs/38012313796) 尚在运行。此工作区另有未推送的 E-AC1 与 F-AC5 定向测试增量，尚未取得其代码 SHA 的云端结果，不能计作已验证。E-AC1、AC7–9 与 F-AC1–9 仍开放；M09 整体不标记完成。
 
 ## 已完成
 

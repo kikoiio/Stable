@@ -84,6 +84,8 @@
 
 新增 project-v2 原子交换恢复切口：`TestReconcileAtomicExchangeRestoresProjectMetadataAfterPreparedCrash` 写入 `.git` regular 指针、`.stable`、`.mewcode` 的 protected metadata facts，真实执行 Linux atomic directory exchange 后在 journal 仍为 prepared 时模拟重启；连续两次 reconcile 后正式内容及 metadata 原 inode/bytes 均恢复/保留、journal finalized 且 receipt 唯一。定向 store 测试本地通过（2026-10-10；非 atomic-exchange 平台 skip）；其它 move/exchange/finalize 切口仍开放，当前 SHA 云端验证待完成。
 
+新增 legacy linked-Git restart 隔离证据：`TestLegacyLinkedGitTransactionsBlockAfterDatabaseRestart` 分别持久化 legacy acceptance 与 rewind intent、关闭并重新打开数据库后执行 recovery；两条路径都进入 blocked、无 acceptance receipt，保留 formal/incoming 或 candidate/staging 字节，并确认 linked `.git` common-dir `config` sentinel 的内容与 inode 不变。定向 `internal/store` 测试本地通过（2026-10-10）；补强旧 Git pointer 事务重启边界，但 AC5 的旧版本组合、metadata 事务各阶段和 workspace→accept 整合矩阵仍开放，当前 SHA 云端验证待完成。
+
 新增 AC6 fail-closed workspace cleanup 证据：`TestTeamWorkspaceCleanupRetainsCreatedWorkspaceWhenTeamLogIsDamaged` 在新 workspace 已被 durable team member fact 引用后注入损坏 team log，确认 replay 失败时清理 helper 保留 workspace root/journal 与 checkout bytes 而不 RemoveClean；未知 ownership 状态只尝试安全释放 writer lease。定向 conversation 测试本地通过（2026-10-10）；其它清理 ownership/generation/PID 与 lifecycle crash cuts 仍开放，当前 SHA 云端复验待完成。
 
 ## AC6 中断、归属与清理
