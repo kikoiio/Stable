@@ -52,4 +52,4 @@
 
 ## Linux 收尾复核（M11）
 
-- [x] 关闭并重新启动完整 stable service/runtime 后，MCP reload 状态、事件投影和会话恢复一致；验收命令：`bash tests/e2e/m07c_runtime_restart.sh`（E2E run [38035716717](https://github.com/kikoiio/Stable/actions/runs/38035716717), job `e2e-m07c`），检查 supervisor PID 变化、MCP fixture 重连和 session replay；仅重建 Go service 实例不算完整进程重启。
+- [x] 关闭并重新启动完整 stable service/runtime 后，MCP reload 状态、事件投影和会话恢复一致；验收命令：`bash tests/e2e/m07c_runtime_restart.sh`（最新 SHA `b61226f` 的 E2E run [38038701842](https://github.com/kikoiio/Stable/actions/runs/38038701842)，attempt 2 的 `e2e-m07c` job），检查 supervisor PID 变化、MCP fixture 重连和 session replay；仅重建 Go service 实例不算完整进程重启。
