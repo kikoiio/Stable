@@ -1,0 +1,58 @@
+{
+  "schema_version": "j00-fixture-v1",
+  "fixture_id": "lceda-j00-minimal-substitute",
+  "status": "substitute",
+  "source": {
+    "kind": "repository-local-substitute",
+    "url": null,
+    "confirmed": false,
+    "replacement_required": true,
+    "limitations": [
+      "No publicly hosted minimum .eprj3 fixture was confirmed in this repository.",
+      "The directory is a deterministic contract fixture and is not evidence that the official client accepts this file schema.",
+      "Replace minimal.eprj3 and all file digests with a confirmed public fixture before a real-client run."
+    ]
+  },
+  "client": {
+    "source_url": null,
+    "version": null,
+    "installer_sha256": null,
+    "confirmed": false,
+    "limitations": [
+      "The client download URL, version, and installer digest are intentionally unknown until a public source is approved and verified."
+    ]
+  },
+  "project": {
+    "format": "eprj3",
+    "root": "minimal.eprj3",
+    "entry": "project.json",
+    "allowed_files": ["project.json"],
+    "identity": {
+      "project_id": "j00-substitute-project",
+      "name": "J00 Minimal Substitute",
+      "version": 1
+    }
+  },
+  "files": [
+    {
+      "path": "project.json",
+      "sha256": "a16dc850d78d837656bc938005c9e77a8791848874af5c50ac491d8bb6236fe9",
+      "size_bytes": 1096
+    }
+  ],
+  "probe": {
+    "parameter": {
+      "object_id": "R1",
+      "path": "value",
+      "old_value": "10k",
+      "new_value": "12k",
+      "kind": "string",
+      "approved": true
+    }
+  },
+  "verification": {
+    "fixture_verified": false,
+    "official_client_verified": false,
+    "reason": "Substitute fixture pending replacement with a confirmed public .eprj3 project."
+  }
+}

@@ -1,0 +1,96 @@
+name: J00 LCEdA Compatibility Probe
+
+# This workflow is intentionally manual. The default invocation records a
+# runner and creates isolated directories without downloading or launching the
+# future client probe. Real-client work requires an explicit, authorized input.
+on:
+  workflow_dispatch:
+    inputs:
+      run_probe:
+        description: Run the future j00_probe.py client probe
+        required: false
+        type: boolean
+        default: false
+      download_client:
+        description: Download and verify the pinned official client archive
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lceda-j00-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  j00:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      J00_RUN_ID: "${{ github.run_id }}-${{ github.run_attempt }}"
+      J00_DOWNLOAD_CLIENT: "${{ inputs.download_client }}"
+      J00_START_XVFB: "${{ inputs.run_probe }}"
+    steps:
+      - name: Check out public sources
+        uses: actions/checkout@v7
+
+      - name: Prepare isolated runner environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/lceda/j00_env.sh prepare
+          test -s ".tmp/lceda-j00/${J00_RUN_ID}/env.sh"
+          cat ".tmp/lceda-j00/${J00_RUN_ID}/env.sh" >> "${GITHUB_ENV}"
+
+      - name: Validate probe reference without running it
+        if: ${{ !inputs.run_probe }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f scripts/lceda/j00_probe.py ]]; then
+            python3 -m py_compile scripts/lceda/j00_probe.py
+          else
+            echo 'j00_probe.py is not present; probe execution remains disabled.'
+          fi
+
+      - name: Run J00 contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/lceda/*.py tests/lceda/j00/*.py
+          python3 -m unittest discover -s tests/lceda/j00 -p 'test_*.py'
+
+      - name: Run J00 probe
+        if: ${{ inputs.run_probe }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/lceda/j00_probe.py
+          # The probe owns client discovery and evidence generation. It is
+          # reached only when the manual run explicitly opts in.
+          python3 scripts/lceda/j00_probe.py
+
+      - name: Clean up J00 processes and transient state
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set +e
+          bash scripts/lceda/j00_env.sh cleanup
+
+      - name: Redact J00 evidence for upload
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set +e
+          bash scripts/lceda/j00_env.sh sanitize
+
+      - name: Upload redacted J00 evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: lceda-j00-evidence-${{ github.run_id }}
+          path: .tmp/lceda-j00/**/redacted-artifacts/
+          if-no-files-found: ignore
+          retention-days: 7

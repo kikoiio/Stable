@@ -1,0 +1,62 @@
+{
+  "format": "eprj3",
+  "schema": "j00-substitute-v1",
+  "project": {
+    "id": "j00-substitute-project",
+    "name": "J00 Minimal Substitute",
+    "version": 1
+  },
+  "documents": [
+    {
+      "id": "doc-schematic",
+      "kind": "schematic",
+      "name": "main",
+      "path": "project.json"
+    }
+  ],
+  "components": [
+    {
+      "id": "R1",
+      "ref": "R1",
+      "value": "10k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "net": "VCC"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "net": "GND"
+        }
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "id": "R1.value",
+      "object_id": "R1",
+      "path": "value",
+      "type": "string",
+      "value": "10k"
+    }
+  ],
+  "nets": [
+    {
+      "id": "net-vcc",
+      "name": "VCC",
+      "pins": ["R1.1"]
+    },
+    {
+      "id": "net-gnd",
+      "name": "GND",
+      "pins": ["R1.2"]
+    }
+  ],
+  "metadata": {
+    "origin": "repository-local substitute",
+    "official_format_confirmed": false
+  }
+}

@@ -22,3 +22,10 @@ __pycache__/
 !/docs/spec_docs/S03/**
 !/docs/spec_docs/S05/
 !/docs/spec_docs/S05/**
+!/docs/spec_docs/J00/
+!/docs/spec_docs/J00/**
+/.tmp/
+/artifacts/
+/fixtures/lceda/j00/.tmp/
+/fixtures/lceda/j00/artifacts/
+/fixtures/lceda/j00/run/

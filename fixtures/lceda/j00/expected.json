@@ -1,0 +1,70 @@
+{
+  "schema_version": "j00-expected-v1",
+  "fixture_id": "lceda-j00-minimal-substitute",
+  "status": "substitute",
+  "project": {
+    "format": "eprj3",
+    "entry": "project.json",
+    "identity": {
+      "project_id": "j00-substitute-project",
+      "name": "J00 Minimal Substitute",
+      "version": 1
+    },
+    "document_scope": [
+      {
+        "id": "doc-schematic",
+        "kind": "schematic",
+        "name": "main"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "R1",
+      "reference": "R1",
+      "value": "10k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric"
+    }
+  ],
+  "parameters": [
+    {
+      "id": "R1.value",
+      "object_id": "R1",
+      "path": "value",
+      "type": "string",
+      "old_value": "10k",
+      "new_value": "12k"
+    }
+  ],
+  "pins": [
+    {
+      "component_id": "R1",
+      "number": "1",
+      "name": "1",
+      "net": "VCC"
+    },
+    {
+      "component_id": "R1",
+      "number": "2",
+      "name": "2",
+      "net": "GND"
+    }
+  ],
+  "nets": [
+    {
+      "id": "net-vcc",
+      "name": "VCC",
+      "pins": ["R1.1"]
+    },
+    {
+      "id": "net-gnd",
+      "name": "GND",
+      "pins": ["R1.2"]
+    }
+  ],
+  "verification": {
+    "independent_expected": true,
+    "official_client_verified": false,
+    "reason": "These values describe the repository-local substitute only; they do not establish official .eprj3 compatibility."
+  }
+}
