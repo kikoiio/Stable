@@ -42,7 +42,25 @@ jobs:
           set -euo pipefail
           bash scripts/lceda/j00_env.sh prepare
           test -s ".tmp/lceda-j00/${J00_RUN_ID}/env.sh"
-          cat ".tmp/lceda-j00/${J00_RUN_ID}/env.sh" >> "${GITHUB_ENV}"
+          run_dir="${GITHUB_WORKSPACE}/.tmp/lceda-j00/${J00_RUN_ID}"
+          {
+            printf 'J00_RUN_DIR=%s\n' "$run_dir"
+            printf 'J00_ARTIFACT_DIR=%s\n' "$run_dir/artifacts"
+            printf 'J00_WORK_DIR=%s\n' "$run_dir/work"
+            printf 'J00_RUNTIME_DIR=%s\n' "$run_dir/runtime"
+            printf 'J00_HOME=%s\n' "$run_dir/home"
+            printf 'J00_PROFILE_DIR=%s\n' "$run_dir/profile"
+            printf 'J00_XDG_CONFIG_HOME=%s\n' "$run_dir/xdg-config"
+            printf 'J00_XDG_CACHE_HOME=%s\n' "$run_dir/xdg-cache"
+            printf 'J00_XDG_DATA_HOME=%s\n' "$run_dir/xdg-data"
+            printf 'J00_ENV_FILE=%s\n' "$run_dir/env.sh"
+            printf 'J00_PID_DIR=%s\n' "$run_dir/runtime/pids"
+            printf 'J00_CLIENT_INSTALL_DIR=%s\n' "$run_dir/client"
+            printf 'J00_CLIENT_ARCHIVE=%s\n' "$run_dir/client.download"
+            printf 'DISPLAY=\n'
+            printf 'WAYLAND_DISPLAY=\n'
+            printf 'LIBGL_ALWAYS_SOFTWARE=1\n'
+          } >> "${GITHUB_ENV}"
 
       - name: Validate probe reference without running it
         if: ${{ !inputs.run_probe }}
