@@ -47,11 +47,11 @@ mewcode 的 TUI 主文件直接引用二十多个内部模块，涵盖模型、�
 
 源端目录归属核对（对照当前 `internal/` 子目录）：`tui`→M01；`llm`、`conversation`、`agent`、`prompt`→M02/M04/M05；`permissions`、`sandbox`→M03；`tools`、`toolresult`→M04；`session`、`history`、`filehistory`、`compact`→M05；`commands`、`planfile`、`todo`→M06；`mcp`、`skills`、`hooks`→M07；`memory`→M08；`agents`、`teams`、`worktree`→M09；`remote`、`config`、`crashlog`→M10。命令入口 `cmd/mewcode` 的交互、print 与远程启动行为按 M10 归属。跨项目目录按行为归属拆开验收，不能只以文件复制完成判断。
 
-### M09 当前进度（2026-10-09）
+### M09 当前进度（2026-10-10）
 
 M09-A（同步只读协作）、M09-B（fork skill）、M09-C（hook agent）、M09-D（agent 定义与后台任务）、以及 M09-E/F 的用户批准最小验收集均已完成实现与验收。M09-E/F checklist 仍保留更宽的扩展交叉矩阵，已验证范围与边界见 [M09 minimum acceptance](specs/M09/minimum-acceptance.md)。
 
-完整源端对照、已通过证据和剩余完成条件见 [M09 范围与进度](specs/M09/README.md)。D/E/F 的规格均已批准；总体验收以各自 checklist 中的证据和未完成项为准。
+完整源端对照与历史证据见 [M09 范围与进度](specs/M09/README.md)。D/E/F 的规格均已批准；M09 完成范围按 [最小验收记录](specs/M09/minimum-acceptance.md)，更宽 checklist 项继续作为扩展证据跟踪。
 
 ## 并行实施顺序与依赖
 

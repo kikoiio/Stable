@@ -19,9 +19,10 @@
 
 当前组合代码及本文新增测试完成后，推送 SHA 的以下 workflow 全部通过，且均指向同一代码 SHA：
 
-- Go `build-and-test` 和 `test-package`：待提交后填写。
-- M09 Workspace Linux `writer-sandbox-volume`：待提交后填写。
-- E2E 六个 jobs：待提交后填写。
+- 验证代码 SHA：`8aa1e45bd058272ab21bd45740fcb05473cfb6b8`（提交 `test: complete M09 minimum acceptance`）。
+- Go `build-and-test` 与 `test-package`：[run 38018937676](https://github.com/kikoiio/Stable/actions/runs/38018937676)，两个 job 均通过。
+- M09 Workspace Linux `writer-sandbox-volume`：[run 38018937587](https://github.com/kikoiio/Stable/actions/runs/38018937587)，通过。
+- E2E：[run 38018937619](https://github.com/kikoiio/Stable/actions/runs/38018937619)，`unit`、`cases`、`e2e-sessions`、`e2e-m04`、`e2e-core`、`e2e-m03` 六个 jobs 均通过。E2E 中的 M03 job 是既有全仓回归；本轮没有修改 M03。
 
 历史 M09 过程中曾出现的失败及修复留在 [M09 总进度记录](README.md)；最终状态只依据本节所列同 SHA 的成功结果。
 
