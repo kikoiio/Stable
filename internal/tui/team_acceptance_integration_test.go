@@ -249,6 +249,9 @@ func (r *acceptanceTeamChildRunner) Run(ctx context.Context, input agent.ChildRu
 	case <-ctx.Done():
 		return agent.ChildRunResult{Status: agent.DelegationInterrupted, Error: ctx.Err().Error()}
 	}
+	if r.release == nil {
+		return agent.ChildRunResult{Status: agent.DelegationSucceeded, Summary: "fake child completed"}
+	}
 	select {
 	case <-r.release:
 		return agent.ChildRunResult{Status: agent.DelegationSucceeded, Summary: "fake child completed"}
