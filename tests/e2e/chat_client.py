@@ -13,12 +13,25 @@ import argparse
 import json
 import socket
 import sys
+import time
 
 
 def exchange(sock_path: str, message: dict, timeout: float = 120.0, stop_types: tuple = ('done',)) -> list[dict]:
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     conn.settimeout(timeout)
-    conn.connect(sock_path)
+    # The runtime and the standalone chatserve may replace the socket during
+    # restart. Retry only the pre-send connect window: no request bytes have
+    # been sent yet, so this cannot duplicate a user operation.
+    connect_deadline = time.monotonic() + 10
+    while True:
+        try:
+            conn.connect(sock_path)
+            break
+        except (FileNotFoundError, ConnectionRefusedError):
+            if time.monotonic() >= connect_deadline:
+                conn.close()
+                raise
+            time.sleep(0.05)
     try:
         conn.sendall(json.dumps(message).encode() + b'\n')
         out: list[dict] = []
