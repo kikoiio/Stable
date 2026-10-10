@@ -223,7 +223,7 @@ def main() -> int:
         tui.wait_for("目标".encode(), start=offset)
         offset = len(tui.output)
         tui.send(b"\x1b")
-        tui.wait_for(b"Ctrl+S", start=offset)
+        tui.wait_for("输入消息".encode(), start=offset)
 
         # Ctrl+J inserts a real newline; Enter submits both lines to the fake provider.
         offset = len(tui.output)
