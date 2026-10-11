@@ -168,7 +168,7 @@ class ProcessSupervisor:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            start_new_session=True,
+            **({"start_new_session": True} if os.name != "nt" else {}),
         )
         self.children.add(process.pid)
         timed_out = False
@@ -179,7 +179,7 @@ class ProcessSupervisor:
             )
         except subprocess.TimeoutExpired as exc:
             timed_out = True
-            self.terminate_pid(process.pid)
+            self.terminate_pid(process.pid, process=process)
             stdout, stderr = process.communicate()
             stdout = stdout or exc.stdout or ""
             stderr = stderr or exc.stderr or ""
@@ -198,12 +198,13 @@ class ProcessSupervisor:
     @staticmethod
     def terminate_pid(pid: int, *, grace: float = 2.0) -> bool:
         def gone() -> bool:
-            try:
-                waited, _ = os.waitpid(pid, os.WNOHANG)
-                if waited == pid:
-                    return True
-            except (ChildProcessError, NotImplementedError, OSError):
-                pass
+            if os.name != "nt":
+                try:
+                    waited, _ = os.waitpid(pid, os.WNOHANG)
+                    if waited == pid:
+                        return True
+                except (ChildProcessError, NotImplementedError, OSError):
+                    pass
             try:
                 os.kill(pid, 0)
             except (ProcessLookupError, PermissionError):
