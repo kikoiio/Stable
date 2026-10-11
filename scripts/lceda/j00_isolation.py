@@ -73,8 +73,8 @@ def contained_path(root: Path, relative: str) -> Path:
 
 
 def copy_candidate(formal_root: Path, candidate_root: Path) -> None:
-    formal_root = formal_root.resolve()
-    candidate_root = candidate_root.resolve()
+    formal_root = Path(os.path.abspath(formal_root))
+    candidate_root = Path(os.path.abspath(candidate_root))
     if not formal_root.is_dir():
         raise FileNotFoundError(f"formal project is not a directory: {formal_root}")
     links = [path for path in formal_root.rglob("*") if path.is_symlink()]
@@ -196,7 +196,12 @@ class ProcessSupervisor:
         )
 
     @staticmethod
-    def terminate_pid(pid: int, *, grace: float = 2.0) -> bool:
+    def terminate_pid(
+        pid: int,
+        *,
+        grace: float = 2.0,
+        process: subprocess.Popen[str] | None = None,
+    ) -> bool:
         def gone() -> bool:
             if os.name != "nt":
                 try:
@@ -207,29 +212,45 @@ class ProcessSupervisor:
                     pass
             try:
                 os.kill(pid, 0)
-            except (ProcessLookupError, PermissionError):
+            except (ProcessLookupError, PermissionError, OSError):
                 return True
             return False
 
-        try:
+        def send(sig: signal.Signals) -> bool:
             if os.name == "nt":
-                os.kill(pid, signal.SIGTERM)
-            else:
-                os.killpg(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            return True
+                try:
+                    os.kill(pid, sig)
+                    return True
+                except (AttributeError, NotImplementedError, OSError):
+                    if process is None:
+                        return False
+                    try:
+                        if sig == signal.SIGTERM:
+                            process.terminate()
+                        else:
+                            process.kill()
+                        return True
+                    except OSError:
+                        return False
+            try:
+                os.killpg(pid, sig)
+                return True
+            except (AttributeError, NotImplementedError, OSError):
+                try:
+                    os.kill(pid, sig)
+                    return True
+                except (ProcessLookupError, PermissionError, OSError):
+                    return False
+
+        if not send(signal.SIGTERM):
+            return gone()
         deadline = time.monotonic() + grace
         while time.monotonic() < deadline:
             if gone():
                 return True
             time.sleep(0.05)
-        try:
-            if os.name == "nt":
-                os.kill(pid, signal.SIGKILL)
-            else:
-                os.killpg(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            return True
+        if not send(getattr(signal, "SIGKILL", signal.SIGTERM)):
+            return gone()
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:
             if gone():
@@ -268,9 +289,9 @@ class IsolationVerifier:
         profile_root: Path | None = None,
         protect_formal: bool = False,
     ):
-        self.formal_root = formal_root.resolve()
-        self.candidate_root = candidate_root.resolve()
-        self.profile_root = profile_root.resolve() if profile_root else None
+        self.formal_root = Path(os.path.abspath(formal_root))
+        self.candidate_root = Path(os.path.abspath(candidate_root))
+        self.profile_root = Path(os.path.abspath(profile_root)) if profile_root else None
         self.protect_formal = protect_formal
         self._formal_modes: dict[str, int] | None = None
         self.result: IsolationResult | None = None
