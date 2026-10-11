@@ -30,7 +30,6 @@ import zipfile
 
 SCRIPT_PATH = Path(__file__).resolve()
 DEFAULT_REPO_ROOT = SCRIPT_PATH.parents[2]
-DEFAULT_MANIFEST = DEFAULT_REPO_ROOT / "fixtures" / "lceda" / "j00" / "manifest.json"
 RUN_ID_PATTERN = r"^[A-Za-z0-9_.-]+$"
 
 
@@ -261,15 +260,23 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     run_id = args.run_id or os.environ.get("J00_RUN_ID") or _default_run_id()
     if not _is_safe_run_id(run_id):
         raise RunnerError("run id contains unsafe characters")
-    tmp_root = _resolved(Path(args.tmp_root) if args.tmp_root else repo_root / ".tmp" / "lceda-j00-cross-platform")
+    tmp_root = _resolved(
+        Path(args.tmp_root) if args.tmp_root else repo_root / ".tmp" / "lceda-j00-cross-platform"
+    )
     _require_within(tmp_root, repo_root, "temporary root")
     run_dir = _require_within(tmp_root / run_id, repo_root, "run directory")
     if run_dir.exists():
         raise RunnerError(f"run directory already exists: {run_dir}")
     paths = _paths_for_run(run_dir)
-    for path in paths.values():
+    for key, path in paths.items():
+        if key == "client_archive":
+            continue
         path.mkdir(parents=True, exist_ok=True)
-    manifest = _resolved(Path(args.manifest) if args.manifest else repo_root / "fixtures" / "lceda" / "j00" / "manifest.json")
+    manifest = _resolved(
+        Path(args.manifest)
+        if args.manifest
+        else repo_root / "fixtures" / "lceda" / "j00" / "manifest.json"
+    )
     record = _resource_record(run_id, repo_root, run_dir, manifest)
     if args.download_client:
         url, digest, metadata_status = _client_metadata(
@@ -287,7 +294,12 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             except DownloadBlocked as exc:
                 record["client"] = {"status": "blocked", "url": url, "reason": str(exc)}
             else:
-                record["client"] = {"status": "verified", "url": url, "sha256": digest, "archive": str(archive)}
+                record["client"] = {
+                    "status": "verified",
+                    "url": url,
+                    "sha256": digest,
+                    "archive": str(archive),
+                }
                 if args.extract_client_to:
                     record["client"]["install_dir"] = str(extract_archive(archive, paths["client_install_dir"]))
     else:
@@ -298,8 +310,12 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         }
     environment = {key: str(value) for key, value in paths.items()}
     environment.update({"run_id": run_id, "repo_root": str(repo_root), "headless_backend": "native-platform"})
-    (run_dir / "environment.json").write_text(json.dumps(environment, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (paths["artifact_dir"] / "environment.json").write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (run_dir / "environment.json").write_text(
+        json.dumps(environment, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (paths["artifact_dir"] / "environment.json").write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return {"environment": environment, "resources": record}
 
 

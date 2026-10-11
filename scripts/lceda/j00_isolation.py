@@ -53,12 +53,22 @@ def contained_path(root: Path, relative: str) -> Path:
     candidate = Path(relative)
     if candidate.is_absolute():
         raise ValueError(f"absolute path is not allowed: {relative}")
-    resolved_root = root.resolve()
-    resolved = (resolved_root / candidate).resolve()
+    # Keep the returned path lexical. ``Path.resolve`` canonicalizes macOS
+    # temporary paths through /private and Windows short names, which makes a
+    # safe child compare unequal to the caller's root. Symlink components are
+    # rejected explicitly below so lexical containment does not weaken the
+    # boundary.
+    resolved_root = Path(os.path.abspath(root))
+    resolved = Path(os.path.normpath(resolved_root / candidate))
     try:
         resolved.relative_to(resolved_root)
     except ValueError as exc:
         raise ValueError(f"path escapes root: {relative}") from exc
+    current = resolved_root
+    for part in resolved.relative_to(resolved_root).parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(f"symlink path component is not allowed: {relative}")
     return resolved
 
 
@@ -192,17 +202,20 @@ class ProcessSupervisor:
                 waited, _ = os.waitpid(pid, os.WNOHANG)
                 if waited == pid:
                     return True
-            except ChildProcessError:
+            except (ChildProcessError, NotImplementedError, OSError):
                 pass
             try:
                 os.kill(pid, 0)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
                 return True
             return False
 
         try:
-            os.killpg(pid, signal.SIGTERM)
-        except ProcessLookupError:
+            if os.name == "nt":
+                os.kill(pid, signal.SIGTERM)
+            else:
+                os.killpg(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
             return True
         deadline = time.monotonic() + grace
         while time.monotonic() < deadline:
@@ -210,8 +223,11 @@ class ProcessSupervisor:
                 return True
             time.sleep(0.05)
         try:
-            os.killpg(pid, signal.SIGKILL)
-        except ProcessLookupError:
+            if os.name == "nt":
+                os.kill(pid, signal.SIGKILL)
+            else:
+                os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
             return True
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:

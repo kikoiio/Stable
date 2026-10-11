@@ -8,6 +8,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+
+from scripts.lceda import j00_runner
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -34,6 +37,7 @@ class RunnerHelperTests(unittest.TestCase):
             run_dir = Path(environment["run_dir"])
             self.assertTrue((run_dir / "environment.json").is_file())
             self.assertTrue((run_dir / "artifacts" / "environment.json").is_file())
+            self.assertFalse((run_dir / "client.download").exists())
             self.assertEqual(environment["headless_backend"], "native-platform")
 
             check = self._run("check", "--run-dir", str(run_dir), "--client", sys.executable)
@@ -65,6 +69,29 @@ class RunnerHelperTests(unittest.TestCase):
             payload = json.loads(result.stdout)
             self.assertEqual(payload["resources"]["client"]["status"], "unverified")
             self.assertIn("client URL", payload["resources"]["client"]["reason"])
+
+    def test_download_verification_uses_atomic_file_target(self) -> None:
+        content = b"portable-client-archive"
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, size: int = -1) -> bytes:
+                nonlocal content
+                chunk, content = content, b""
+                return chunk
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "client.download"
+            digest = __import__("hashlib").sha256(b"portable-client-archive").hexdigest()
+            with patch.object(j00_runner, "urlopen", return_value=Response()):
+                j00_runner.download_verified("https://example.invalid/client", digest, destination)
+            self.assertEqual(destination.read_bytes(), b"portable-client-archive")
+            self.assertFalse(destination.with_name(destination.name + ".part").exists())
 
 
 if __name__ == "__main__":
