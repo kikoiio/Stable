@@ -220,12 +220,7 @@ class ProcessSupervisor:
 
         def send(sig: signal.Signals) -> bool:
             if os.name == "nt":
-                try:
-                    os.kill(pid, sig)
-                    return True
-                except (AttributeError, NotImplementedError, OSError):
-                    if process is None:
-                        return False
+                if process is not None:
                     try:
                         if sig == signal.SIGTERM:
                             process.terminate()
@@ -234,6 +229,11 @@ class ProcessSupervisor:
                         return True
                     except OSError:
                         return False
+                try:
+                    os.kill(pid, sig)
+                    return True
+                except (AttributeError, NotImplementedError, OSError):
+                    return False
             try:
                 os.killpg(pid, sig)
                 return True
