@@ -203,6 +203,8 @@ class ProcessSupervisor:
         process: subprocess.Popen[str] | None = None,
     ) -> bool:
         def gone() -> bool:
+            if process is not None and process.poll() is not None:
+                return True
             if os.name != "nt":
                 try:
                     waited, _ = os.waitpid(pid, os.WNOHANG)

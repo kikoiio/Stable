@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import Mock, patch
 
 from scripts.lceda.j00_isolation import (
     IsolationVerifier,
@@ -43,6 +44,15 @@ class IsolationContractTests(unittest.TestCase):
             inside = contained_path(base, "child/file.txt")
             self.assertEqual(inside, base / "child/file.txt")
 
+    def test_path_containment_rejects_symlink_component(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            outside = base / "outside"
+            outside.mkdir()
+            (base / "link").symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                contained_path(base, "link/file.txt")
+
     def test_symlinked_formal_entries_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             base = Path(root)
@@ -71,6 +81,18 @@ class IsolationContractTests(unittest.TestCase):
         while process.poll() is None and time.time() < deadline:
             time.sleep(0.02)
         self.assertIsNotNone(process.poll())
+
+    def test_windows_termination_falls_back_to_process_methods(self) -> None:
+        process = Mock()
+
+        def fake_kill(_pid: int, sig: int) -> None:
+            if sig == 0:
+                raise ProcessLookupError
+            raise AttributeError("os.kill unavailable")
+
+        with patch.object(os, "name", "nt"), patch.object(os, "kill", side_effect=fake_kill):
+            self.assertTrue(ProcessSupervisor.terminate_pid(12345, grace=0, process=process))
+        process.terminate.assert_called_once_with()
 
 
 if __name__ == "__main__":
