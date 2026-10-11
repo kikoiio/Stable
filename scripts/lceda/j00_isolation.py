@@ -179,7 +179,15 @@ class ProcessSupervisor:
             )
         except subprocess.TimeoutExpired as exc:
             timed_out = True
-            self.terminate_pid(process.pid, process=process)
+            if os.name == "nt":
+                # ``os.kill`` and process-group APIs are not reliable for a
+                # hosted Windows child; terminate through its Popen handle.
+                try:
+                    process.kill()
+                except OSError:
+                    process.terminate()
+            else:
+                self.terminate_pid(process.pid, process=process)
             stdout, stderr = process.communicate()
             stdout = stdout or exc.stdout or ""
             stderr = stderr or exc.stderr or ""
