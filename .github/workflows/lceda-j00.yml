@@ -1,18 +1,22 @@
 name: J00 LCEdA Compatibility Probe
 
-# This workflow is intentionally manual. The default invocation records a
-# runner and creates isolated directories without downloading or launching the
-# future client probe. Real-client work requires an explicit, authorized input.
+# Manual by design. The default invocation records each hosted runner and
+# runs deterministic checks without fetching or launching a client.
 on:
   workflow_dispatch:
     inputs:
       run_probe:
-        description: Run the future j00_probe.py client probe
+        description: Run the future j00_probe.py client probe where supported
         required: false
         type: boolean
         default: false
       download_client:
-        description: Download and verify the pinned official client archive
+        description: Download and verify a pinned platform client archive
+        required: false
+        type: boolean
+        default: false
+      strict_download:
+        description: Fail when a pinned client source is unavailable or missing
         required: false
         type: boolean
         default: false
@@ -26,21 +30,93 @@ concurrency:
 
 jobs:
   j00:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-24.04
+            probe_supported: true
+          - platform: windows
+            runner: windows-2025
+            probe_supported: false
+          - platform: macos
+            runner: macos-14
+            probe_supported: false
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     env:
-      J00_RUN_ID: "${{ github.run_id }}-${{ github.run_attempt }}"
+      J00_PLATFORM: "${{ matrix.platform }}"
+      J00_RUN_ID: "${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.platform }}"
+      J00_RUN_DIR: "${{ github.workspace }}/.tmp/lceda-j00/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.platform }}"
       J00_DOWNLOAD_CLIENT: "${{ inputs.download_client }}"
-      J00_START_XVFB: "${{ inputs.run_probe }}"
+      J00_STRICT_DOWNLOAD: "${{ inputs.strict_download }}"
+      J00_START_XVFB: "false"
+      PYTHONUTF8: "1"
     steps:
       - name: Check out public sources
         uses: actions/checkout@v7
 
-      - name: Prepare isolated runner environment
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Resolve platform client metadata
+        shell: python
+        env:
+          J00_MANIFEST_PATH: ${{ github.workspace }}/fixtures/lceda/j00/manifest.json
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          document = json.loads(Path(os.environ["J00_MANIFEST_PATH"]).read_text(encoding="utf-8"))
+          platform = os.environ["J00_PLATFORM"]
+          client = document.get("client") if isinstance(document.get("client"), dict) else {}
+          records = []
+          aliases = {platform, "mac" if platform == "macos" else platform}
+          for candidate in client.get("candidates", []):
+              if isinstance(candidate, dict) and str(candidate.get("platform", "")).lower() in aliases:
+                  records.append(candidate)
+          for container in (
+              document.get("platforms"), document.get("clients"), document.get("artifacts"),
+              client.get("platforms"), client.get("artifacts"), client.get(platform),
+          ):
+              if isinstance(container, dict):
+                  item = container.get(platform) if platform in container else container
+                  if isinstance(item, dict):
+                      records.extend((item, item.get("download"), item.get("artifact")))
+          url = ""
+          digest = ""
+          for record in records:
+              if not isinstance(record, dict):
+                  continue
+              if not url:
+                  url = next((str(record[key]) for key in ("download_url", "url", "source_url", "artifact_url") if record.get(key)), "")
+              if not digest:
+                  digest = next((str(record[key]) for key in ("sha256", "sha256sum", "installer_sha256", "digest") if record.get(key)), "")
+          source_url = str(client.get("source_url") or "")
+
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8", newline="\n") as handle:
+              handle.write(f"J00_CLIENT_URL={url}\n")
+              handle.write(f"J00_CLIENT_SHA256={digest}\n")
+              handle.write(f"J00_CLIENT_SOURCE_URL={source_url}\n")
+              handle.write(f"J00_DOWNLOAD_BLOCKED={str(not (url and len(digest) == 64)).lower()}\n")
+          if not url or len(digest) != 64:
+              print(f"J00: no pinned {platform} client URL and SHA-256; download is unverified/blocked")
+          else:
+              print(f"J00: resolved pinned {platform} client metadata")
+
+      - name: Prepare isolated Linux runner environment
+        if: ${{ matrix.platform == 'linux' }}
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/lceda/j00_env.sh prepare
+          # j00_env.sh owns Linux-only Xvfb/process setup. The portable
+          # download step below handles client archives for every platform.
+          J00_DOWNLOAD_CLIENT=0 J00_START_XVFB="${{ inputs.run_probe && matrix.probe_supported }}" \
+            bash scripts/lceda/j00_env.sh prepare
           test -s ".tmp/lceda-j00/${J00_RUN_ID}/env.sh"
           run_dir="${GITHUB_WORKSPACE}/.tmp/lceda-j00/${J00_RUN_ID}"
           {
@@ -57,58 +133,268 @@ jobs:
             printf 'J00_PID_DIR=%s\n' "$run_dir/runtime/pids"
             printf 'J00_CLIENT_INSTALL_DIR=%s\n' "$run_dir/client"
             printf 'J00_CLIENT_ARCHIVE=%s\n' "$run_dir/client.download"
-            printf 'DISPLAY=\n'
-            printf 'WAYLAND_DISPLAY=\n'
-            printf 'LIBGL_ALWAYS_SOFTWARE=1\n'
+            printf 'DISPLAY=\nWAYLAND_DISPLAY=\nLIBGL_ALWAYS_SOFTWARE=1\n'
           } >> "${GITHUB_ENV}"
+          printf 'client_download_requested=%s\n' "${J00_DOWNLOAD_CLIENT}" \
+            >> "${run_dir}/artifacts/environment.txt"
+
+      - name: Prepare isolated Windows or macOS runner environment
+        if: ${{ matrix.platform != 'linux' }}
+        shell: python
+        run: |
+          import os
+          import platform as platform_module
+          from pathlib import Path
+
+          repo = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          run_dir = repo / ".tmp" / "lceda-j00" / os.environ["J00_RUN_ID"]
+          paths = {
+              "J00_RUN_DIR": run_dir,
+              "J00_ARTIFACT_DIR": run_dir / "artifacts",
+              "J00_WORK_DIR": run_dir / "work",
+              "J00_RUNTIME_DIR": run_dir / "runtime",
+              "J00_HOME": run_dir / "home",
+              "J00_PROFILE_DIR": run_dir / "profile",
+              "J00_XDG_CONFIG_HOME": run_dir / "xdg-config",
+              "J00_XDG_CACHE_HOME": run_dir / "xdg-cache",
+              "J00_XDG_DATA_HOME": run_dir / "xdg-data",
+              "J00_ENV_FILE": run_dir / "env.py.txt",
+              "J00_PID_DIR": run_dir / "runtime" / "pids",
+              "J00_CLIENT_INSTALL_DIR": run_dir / "client",
+              "J00_CLIENT_ARCHIVE": run_dir / "client.download",
+          }
+          for key, path in paths.items():
+              if key == "J00_ENV_FILE":
+                  path.parent.mkdir(parents=True, exist_ok=True)
+              else:
+                  path.mkdir(parents=True, exist_ok=True)
+          paths["J00_ENV_FILE"].write_text(
+              "# Generated by lceda-j00 workflow\n" + "".join(f"{key}={path}\n" for key, path in paths.items()),
+              encoding="utf-8",
+          )
+          (paths["J00_ARTIFACT_DIR"] / "environment.txt").write_text(
+              f"platform={os.environ['J00_PLATFORM']}\nrunner={platform_module.platform()}\n"
+              f"client_download_enabled={os.environ['J00_DOWNLOAD_CLIENT']}\n",
+              encoding="utf-8",
+          )
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8", newline="\n") as handle:
+              for key, path in paths.items():
+                  handle.write(f"{key}={path}\n")
+
+      - name: Download and verify pinned platform client
+        if: ${{ inputs.download_client }}
+        shell: python
+        run: |
+          import hashlib
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import tarfile
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          import zipfile
+
+          artifact_dir = Path(os.environ["J00_ARTIFACT_DIR"])
+          url = os.environ.get("J00_CLIENT_URL", "")
+          expected = os.environ.get("J00_CLIENT_SHA256", "")
+          source_url = os.environ.get("J00_CLIENT_SOURCE_URL", "")
+          strict = os.environ.get("J00_STRICT_DOWNLOAD", "").lower() == "true"
+          archive = Path(os.environ["J00_CLIENT_ARCHIVE"])
+          install_dir = Path(os.environ["J00_CLIENT_INSTALL_DIR"])
+
+          def record(status, reason):
+              with (artifact_dir / "environment.txt").open("a", encoding="utf-8") as handle:
+                  handle.write(f"client_download_status={status}\nclient_download_reason={reason}\n")
+              with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8", newline="\n") as handle:
+                  handle.write(f"J00_DOWNLOAD_STATUS={status}\n")
+
+          if not url or not re.fullmatch(r"[0-9A-Fa-f]{64}", expected):
+              reason = "missing pinned platform URL or SHA-256"
+              if source_url.startswith("https://"):
+                  try:
+                      with urllib.request.urlopen(source_url, timeout=30) as response:
+                          reason = f"official source reachable ({response.status}) but no pinned platform archive is published"
+                  except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as error:
+                      reason = f"official source unavailable or requires login: {error}"
+              record("blocked", reason)
+              if strict:
+                  raise SystemExit(reason)
+              raise SystemExit(0)
+          if not url.startswith("https://"):
+              reason = "client URL must use HTTPS"
+              record("blocked", reason)
+              if strict:
+                  raise SystemExit(reason)
+              raise SystemExit(0)
+
+          part = archive.with_suffix(".part")
+          try:
+              with urllib.request.urlopen(url, timeout=30) as response, part.open("wb") as output:
+                  shutil.copyfileobj(response, output, length=1024 * 1024)
+          except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as error:
+              reason = f"official source unavailable or requires login: {error}"
+              record("blocked", reason)
+              if strict:
+                  raise SystemExit(str(error))
+              raise SystemExit(0)
+          if not part.is_file() or part.stat().st_size == 0:
+              reason = "official source returned an empty archive"
+              record("blocked", reason)
+              if strict:
+                  raise SystemExit(reason)
+              raise SystemExit(0)
+          actual = hashlib.sha256(part.read_bytes()).hexdigest()
+          if actual.lower() != expected.lower():
+              reason = "downloaded archive SHA-256 does not match the pinned digest"
+              record("failed", reason)
+              raise SystemExit(reason)
+          part.replace(archive)
+          install_dir.mkdir(parents=True, exist_ok=True)
+          suffix = urllib.parse.urlsplit(url).path.lower()
+          if suffix.endswith(".zip"):
+              with zipfile.ZipFile(archive) as bundle:
+                  bundle.extractall(install_dir)
+          elif suffix.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2")):
+              with tarfile.open(archive) as bundle:
+                  bundle.extractall(install_dir)
+          else:
+              shutil.copy2(archive, install_dir / archive.name)
+          record("verified", expected.lower())
 
       - name: Validate probe reference without running it
         if: ${{ !inputs.run_probe }}
-        shell: bash
+        shell: python
         run: |
-          set -euo pipefail
-          if [[ -f scripts/lceda/j00_probe.py ]]; then
-            python3 -m py_compile scripts/lceda/j00_probe.py
-          else
-            echo 'j00_probe.py is not present; probe execution remains disabled.'
-          fi
+          from pathlib import Path
+          import py_compile
 
-      - name: Run J00 contract tests
-        shell: bash
+          probe = Path("scripts/lceda/j00_probe.py")
+          if probe.is_file():
+              py_compile.compile(str(probe), doraise=True)
+          else:
+              print("j00_probe.py is not present; probe execution remains disabled.")
+
+      - name: Run J00 Python contract tests
+        shell: python
         run: |
-          set -euo pipefail
-          python3 -m py_compile scripts/lceda/*.py tests/lceda/j00/*.py
-          python3 -m unittest discover -s tests/lceda/j00 -p 'test_*.py'
+          import compileall
+          from pathlib import Path
+          import subprocess
+          import sys
 
-      - name: Run J00 probe
-        if: ${{ inputs.run_probe }}
+          for root in (Path("scripts/lceda"), Path("tests/lceda/j00")):
+              if not compileall.compile_dir(str(root), quiet=1):
+                  raise SystemExit(f"Python compilation failed under {root}")
+          subprocess.run(
+              [sys.executable, "-m", "unittest", "discover", "-s", "tests/lceda/j00", "-p", "test_*.py"],
+              check=True,
+          )
+
+      - name: Run Windows/macOS process and file smoke
+        if: ${{ matrix.platform != 'linux' }}
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          smoke_dir = Path(os.environ["J00_RUN_DIR"]) / "smoke"
+          smoke_dir.mkdir(parents=True, exist_ok=True)
+          marker = smoke_dir / "process-file.txt"
+          subprocess.run(
+              [sys.executable, "-c", "from pathlib import Path; Path(__import__('sys').argv[1]).write_text('ok\\n')", str(marker)],
+              check=True,
+          )
+          if marker.read_text(encoding="utf-8") != "ok\n":
+              raise SystemExit("process/file smoke marker mismatch")
+          print(f"process/file smoke passed on {os.environ['J00_PLATFORM']}")
+
+      - name: Record unsupported probe platform
+        if: ${{ inputs.run_probe && !matrix.probe_supported }}
+        shell: python
+        run: |
+          from pathlib import Path
+          import os
+
+          artifact = Path(os.environ["J00_ARTIFACT_DIR"])
+          (artifact / "probe-platform.txt").write_text(
+              f"run_probe requested; platform {os.environ['J00_PLATFORM']} has no supported J00 client probe\n",
+              encoding="utf-8",
+          )
+          print("J00 probe skipped: this platform runs contract and process/file smoke only.")
+
+      - name: Run J00 probe on supported platform
+        if: ${{ inputs.run_probe && matrix.probe_supported }}
         shell: bash
         run: |
           set -euo pipefail
           test -f scripts/lceda/j00_probe.py
-          # The probe owns client discovery and evidence generation. It is
-          # reached only when the manual run explicitly opts in.
           python3 scripts/lceda/j00_probe.py
 
-      - name: Clean up J00 processes and transient state
-        if: ${{ always() }}
+      - name: Clean up Linux J00 processes and transient state
+        if: ${{ always() && matrix.platform == 'linux' }}
         shell: bash
         run: |
           set +e
           bash scripts/lceda/j00_env.sh cleanup
 
+      - name: Clean up Windows or macOS transient state
+        if: ${{ always() && matrix.platform != 'linux' }}
+        shell: python
+        run: |
+          import os
+          import shutil
+          from pathlib import Path
+
+          run_dir = Path(os.environ["J00_RUN_DIR"])
+          for name in ("work", "profile", "home", "xdg-config", "xdg-cache", "xdg-data", "runtime"):
+              shutil.rmtree(run_dir / name, ignore_errors=True)
+
       - name: Redact J00 evidence for upload
-        if: ${{ always() }}
+        if: ${{ always() && matrix.platform == 'linux' }}
         shell: bash
         run: |
           set +e
           bash scripts/lceda/j00_env.sh sanitize
 
+      - name: Redact Windows or macOS evidence for upload
+        if: ${{ always() && matrix.platform != 'linux' }}
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+
+          run_dir = Path(os.environ["J00_RUN_DIR"])
+          source_root = run_dir / "artifacts"
+          redacted = run_dir / "redacted-artifacts"
+          redacted.mkdir(parents=True, exist_ok=True)
+          workspace = str(Path(os.environ["GITHUB_WORKSPACE"]).resolve())
+          home = str(Path.home())
+          if source_root.is_dir():
+              for source in source_root.rglob("*"):
+                  if not source.is_file():
+                      continue
+                  destination = redacted / source.relative_to(source_root)
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  try:
+                      text = source.read_text(encoding="utf-8")
+                  except UnicodeDecodeError:
+                      shutil.copy2(source, destination)
+                  else:
+                      text = text.replace(workspace, "<redacted-path>").replace(home, "<redacted-home>")
+                      text = re.sub(r"(?i)(token|password|secret|authorization)(\\s*[:=]\\s*)[^,\\s}]+", r"\\1\\2<redacted>", text)
+                      destination.write_text(text, encoding="utf-8")
+
       - name: Upload redacted J00 evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: lceda-j00-evidence-${{ github.run_id }}
+          name: lceda-j00-${{ matrix.platform }}-${{ github.run_id }}
           path: .tmp/lceda-j00/**/redacted-artifacts/
           if-no-files-found: ignore
           retention-days: 7

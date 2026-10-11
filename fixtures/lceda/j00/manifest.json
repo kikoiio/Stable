@@ -14,12 +14,51 @@
     ]
   },
   "client": {
-    "source_url": null,
+    "source_url": "https://lceda.cn/page/download",
     "version": null,
+    "version_candidate": "4.1.71",
     "installer_sha256": null,
+    "size_bytes": null,
     "confirmed": false,
+    "download_requires_account": true,
+    "candidates": [
+      {
+        "platform": "linux",
+        "arch": "x64",
+        "filename": "lceda-pro-linux-x64-4.1.71.zip",
+        "download_url": null,
+        "sha256": null,
+        "size_bytes": null
+      },
+      {
+        "platform": "windows",
+        "arch": "x64",
+        "filename": "lceda-pro-windows-x64-4.1.71.exe",
+        "download_url": null,
+        "sha256": null,
+        "size_bytes": null
+      },
+      {
+        "platform": "mac",
+        "arch": "x64",
+        "filename": "lceda-pro-mac-x64-4.1.71.zip",
+        "download_url": null,
+        "sha256": null,
+        "size_bytes": null
+      },
+      {
+        "platform": "mac",
+        "arch": "arm64",
+        "filename": "lceda-pro-mac-arm64-4.1.71.zip",
+        "download_url": null,
+        "sha256": null,
+        "size_bytes": null
+      }
+    ],
     "limitations": [
-      "The client download URL, version, and installer digest are intentionally unknown until a public source is approved and verified."
+      "The official page lists these Pro 4.1.71 candidate files, but the download URL is issued by an authenticated API.",
+      "GET /api/files/download-url returns HTTP 200 with code 422 (not logged in); direct /files links redirect to oshwhub.com and do not provide the archive.",
+      "The archive bytes, SHA-256 digests, and sizes remain unverified until an authorized account is available."
     ]
   },
   "project": {
