@@ -238,6 +238,16 @@ class ProcessSupervisor:
                     except OSError:
                         return False
                 try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+                    return True
+                except OSError:
+                    return False
+                try:
                     os.kill(pid, sig)
                     return True
                 except (AttributeError, NotImplementedError, OSError):
@@ -254,6 +264,8 @@ class ProcessSupervisor:
 
         if not send(signal.SIGTERM):
             return gone()
+        if os.name == "nt" and process is None:
+            return True
         deadline = time.monotonic() + grace
         while time.monotonic() < deadline:
             if gone():
