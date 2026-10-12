@@ -313,9 +313,13 @@ def _run() -> dict[str, Any]:
         report["generated_project"] = True
         report["stages"]["create_project"] = "passed"
 
+        # The offline client uses the display name for the on-disk project
+        # folder/file and may ignore the slug argument above. The isolated
+        # projects root starts empty, so a unique directory is the generated
+        # project regardless of the name the client chose.
         matches = [
             path for path in projects_root.rglob("*.eprj3")
-            if path.is_dir() and project_name in path.name.lower()
+            if path.is_dir()
         ] if projects_root.exists() else []
         if len(matches) != 1:
             raise ProbeFailure(f"expected one locally generated .eprj3 project; found {len(matches)}")
