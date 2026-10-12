@@ -309,10 +309,20 @@ jobs:
 
           part = archive.with_name(archive.name + ".part")
           try:
-              headers = {"Authorization": f"Bearer {upload_token}"} if upload_token else {}
+              source_host = (urllib.parse.urlsplit(url).hostname or "").lower()
+              public_github_host = (
+                  source_host == "github.com"
+                  or source_host.endswith(".github.com")
+                  or source_host.endswith(".githubusercontent.com")
+              )
+              # Release assets are public and redirect to a signed object URL;
+              # never send the private upload token to either host.
+              headers = (
+                  {"Authorization": f"Bearer {upload_token}"}
+                  if upload_token and not public_github_host else {}
+              )
               expected_bytes = int(expected_size) if expected_size else 0
               chunk_bytes = 8 * 1024 * 1024
-              source_host = (urllib.parse.urlsplit(url).hostname or "").lower()
               use_ranges = expected_bytes and source_host.endswith("trycloudflare.com")
               with part.open("wb") as output:
                   if use_ranges:
