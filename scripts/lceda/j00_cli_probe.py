@@ -389,7 +389,10 @@ def _run() -> dict[str, Any]:
             f"await eda.dmt_EditorControl.openDocument('{created['page']}'); "
             "await new Promise((r) => setTimeout(r, 2000)); "
             f"const id = '{component['id']}'; "
-            "const item = await eda.sch_PrimitiveComponent.get(id); "
+            "let item; for (let i = 0; i < 20; i++) { "
+            "item = await eda.sch_PrimitiveComponent.get(id); "
+            "if (item) break; await new Promise((r) => setTimeout(r, 1000)); } "
+            "if (!item) throw new Error('candidate component did not become readable'); "
             "const before = item.getState_OtherProperty(); "
             "const expected = before.Value; "
             "if (expected !== __CLI__.args.expectedValue) throw new Error('expected old value mismatch'); "
@@ -418,7 +421,10 @@ def _run() -> dict[str, Any]:
         verify_code = (
             f"await eda.dmt_EditorControl.openDocument('{created['page']}'); "
             "await new Promise((r) => setTimeout(r, 2500)); "
-            f"const item = await eda.sch_PrimitiveComponent.get('{component['id']}'); "
+            f"let item; for (let i = 0; i < 20; i++) {{ "
+            f"item = await eda.sch_PrimitiveComponent.get('{component['id']}'); "
+            "if (item) break; await new Promise((r) => setTimeout(r, 1000)); } "
+            "if (!item) throw new Error('reopened component did not become readable'); "
             "return item.getState_OtherProperty().Value;"
         )
         persisted_value = client.invoke(active_session, verify_code)
