@@ -379,7 +379,12 @@ def _run() -> dict[str, Any]:
         opened = _open_session(client, "--path", str(candidate))
         active_session = _session(opened)
         edit_code = (
-            f"await eda.dmt_EditorControl.openDocument('{created['page']}'); "
+            "let pages = [], page, tab; for (let i = 0; i < 30; i++) { "
+            "pages = await eda.dmt_Schematic.getAllSchematicPagesInfo(); "
+            "page = pages && pages[0]; if (page && page.uuid) { "
+            "tab = await eda.dmt_EditorControl.openDocument(page.uuid); if (tab) break; } "
+            "await new Promise((r) => setTimeout(r, 1000)); } "
+            "if (!page || !page.uuid || !tab) throw new Error('candidate schematic page did not open'); "
             "await new Promise((r) => setTimeout(r, 2000)); "
             f"const sourceId = '{component['id']}'; "
             "let item, ids = [], lookupError = ''; for (let i = 0; i < 30; i++) { "
@@ -419,7 +424,12 @@ def _run() -> dict[str, Any]:
         reopened = _open_session(client, "--path", str(candidate))
         active_session = _session(reopened)
         verify_code = (
-            f"await eda.dmt_EditorControl.openDocument('{created['page']}'); "
+            "let pages = [], page, tab; for (let i = 0; i < 30; i++) { "
+            "pages = await eda.dmt_Schematic.getAllSchematicPagesInfo(); "
+            "page = pages && pages[0]; if (page && page.uuid) { "
+            "tab = await eda.dmt_EditorControl.openDocument(page.uuid); if (tab) break; } "
+            "await new Promise((r) => setTimeout(r, 1000)); } "
+            "if (!page || !page.uuid || !tab) throw new Error('reopened schematic page did not open'); "
             "await new Promise((r) => setTimeout(r, 2500)); "
             f"const sourceId = '{component['id']}'; "
             "let item, ids = [], lookupError = ''; for (let i = 0; i < 30; i++) { "
