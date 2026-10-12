@@ -10,7 +10,7 @@
 | workflow 权限与 artifact 脱敏 | verified | `contents: read`、artifact sensitivity scan | 仅使用公开输入 |
 | 嘉立客户端发现与版本 | verified | Run 38273843956 下载 Linux x64 4.1.71 并通过 SHA-256 校验；Windows/macOS 候选摘要已记录 | 发布方未提供独立 checksum，Windows/macOS 未做真实客户端启动 |
 | Linux 客户端启动与 sandbox | verified | Run 38273843956：Xvfb、软件渲染、客户端 20 秒 smoke | 未证明登录后的编辑能力 |
-| CLI/MCP/桥接 | blocked | Run 38269977561 分类为 `CLIENT_ACTIVATION_REQUIRED` | 需要 `J00_LCEDA_ACTIVATION`，未绕过激活 |
+| CLI/MCP/桥接 | blocked | Run 38269977561 分类为 `CLIENT_ACTIVATION_REQUIRED` | 需要 `LCEDA_PRO_ACTIVATION`，未绕过激活 |
 | `.eprj3` 工程读取 | unverified | 当前夹具为 repository-local substitute | substitute schema 不是官方格式证据，需确认工程 |
 | 参数修改/保存/重开 | unverified | 仅有 fake/substitute contract | 未通过真实客户端 |
 | 规则与网络检查 | unverified | 未启动真实客户端 | 检查器 schema 和覆盖未知 |

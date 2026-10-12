@@ -36,7 +36,7 @@ on:
         type: string
         default: ubuntu-24.04
       install_activation:
-        description: Copy the J00_LCEDA_ACTIVATION secret into the isolated Linux HOME for this run
+        description: Copy the LCEDA_PRO_ACTIVATION secret into the isolated Linux HOME for this run
         required: false
         type: boolean
         default: false
@@ -227,18 +227,18 @@ jobs:
         if: ${{ inputs.install_activation && matrix.platform == 'linux' }}
         shell: bash
         env:
-          J00_LCEDA_ACTIVATION: ${{ secrets.J00_LCEDA_ACTIVATION }}
+          LCEDA_PRO_ACTIVATION: ${{ secrets.LCEDA_PRO_ACTIVATION || secrets.J00_LCEDA_ACTIVATION }}
         run: |
           set -euo pipefail
           umask 077
-          if [[ -z "${J00_LCEDA_ACTIVATION:-}" ]]; then
-            echo 'J00_LCEDA_ACTIVATION secret is empty; add it before enabling install_activation' >&2
+          if [[ -z "${LCEDA_PRO_ACTIVATION:-}" ]]; then
+            echo 'LCEDA_PRO_ACTIVATION secret is empty; add it before enabling install_activation' >&2
             exit 1
           fi
           activation_dir="${J00_HOME}/LCEDA-Pro"
           activation_file="${activation_dir}/lceda-pro-activation.txt"
           mkdir -p "${activation_dir}"
-          printf '%s' "${J00_LCEDA_ACTIVATION}" > "${activation_file}"
+          printf '%s' "${LCEDA_PRO_ACTIVATION}" > "${activation_file}"
           chmod 0600 "${activation_file}"
           test -s "${activation_file}"
           printf 'activation_file_installed=true\n' >> "${J00_ARTIFACT_DIR}/environment.txt"

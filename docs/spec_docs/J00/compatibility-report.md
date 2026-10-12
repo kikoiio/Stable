@@ -27,7 +27,7 @@
 
 当前夹具标记为 `substitute`，仅用于确定性契约测试。Linux 客户端已经下载并启动 smoke，但官方 CLI/API 探针尚未完成；Windows/macOS 本次只执行合约级文件/进程 smoke。
 
-Run 38269977561 的 Linux CLI 探针实际打开客户端后收到 `entry=regist` 注册跳转，并分类为 `CLIENT_ACTIVATION_REQUIRED`。当前仓库没有 `J00_LCEDA_ACTIVATION` secret，因此最新 run 明确跳过 CLI 闭环，没有伪造或绕过激活状态。
+Run 38269977561 的 Linux CLI 探针实际打开客户端后收到 `entry=regist` 注册跳转，并分类为 `CLIENT_ACTIVATION_REQUIRED`。当前仓库没有 `LCEDA_PRO_ACTIVATION` secret，因此最新 run 明确跳过 CLI 闭环，没有伪造或绕过激活状态。工作流仍兼容旧名称 `J00_LCEDA_ACTIVATION`。
 
 以下能力保持 `unverified`：
 
@@ -38,4 +38,4 @@ Run 38269977561 的 Linux CLI 探针实际打开客户端后收到 `entry=regist
 - 工程 UUID、profile、自动保存、恢复和云端同步隔离。
 - 真实客户端崩溃、超时、取消、重启后的状态协调。
 
-J00 不能进入“已验证闭环”状态。下一次真实试验需要在 GitHub Actions 中提供授权的 `J00_LCEDA_ACTIVATION` secret，并将 `manifest.json` 的 substitute 夹具替换为确认过的 `.eprj3` 工程，或明确批准生成的 disposable offline fixture。完成后再运行 `run_cli_probe=true`、`install_activation=true` 的 Linux job；在此之前不得把 substitute 或 smoke 结果当作嘉立创功能兼容性证据。
+J00 不能进入“已验证闭环”状态。下一次真实试验需要在 GitHub Actions 中提供授权的 `LCEDA_PRO_ACTIVATION` secret，并将 `manifest.json` 的 substitute 夹具替换为确认过的 `.eprj3` 工程，或明确批准生成的 disposable offline fixture。完成后再运行 `run_cli_probe=true`、`install_activation=true` 的 Linux job；在此之前不得把 substitute 或 smoke 结果当作嘉立创功能兼容性证据。
