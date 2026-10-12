@@ -3,10 +3,10 @@
 ## 运行信息
 
 - Workflow：`lceda-j00.yml`
-- 最新 smoke Run：[38271363731](https://github.com/kikoiio/Stable/actions/runs/38271363731)，提交 `9a9ea7e027ff8ce1330c250d81c04831dd83c668`
-- Linux 证据：[lceda-j00-linux-38271363731](https://github.com/kikoiio/Stable/actions/runs/38271363731/artifacts/11757257045)
-- Windows 证据：[lceda-j00-windows-38271363731](https://github.com/kikoiio/Stable/actions/runs/38271363731/artifacts/11756294595)
-- macOS 证据：[lceda-j00-macos-38271363731](https://github.com/kikoiio/Stable/actions/runs/38271363731/artifacts/11757321966)
+- 最新 smoke Run：[38273843956](https://github.com/kikoiio/Stable/actions/runs/38273843956)，提交 `ded560551b5914e8faa1e8f9eaadc1bd2a0e5d65`
+- Linux 证据：[lceda-j00-linux-38273843956](https://github.com/kikoiio/Stable/actions/runs/38273843956/artifacts/11758715532)
+- Windows 证据：[lceda-j00-windows-38273843956](https://github.com/kikoiio/Stable/actions/runs/38273843956/artifacts/11758590947)
+- macOS 证据：[lceda-j00-macos-38273843956](https://github.com/kikoiio/Stable/actions/runs/38273843956/artifacts/11757928060)
 - 触发参数：`download_client=true`、`strict_download=true`、`run_client_smoke=true`、`run_cli_probe=false`、`install_activation=false`
 - CLI 激活失败复现 Run：[38269977561](https://github.com/kikoiio/Stable/actions/runs/38269977561)
 
