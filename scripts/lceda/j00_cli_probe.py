@@ -302,10 +302,17 @@ def _run() -> dict[str, Any]:
             "EDMT_ProjectFileFormat.EPRJ3); "
             "if (!uuid) throw new Error('createProject returned no project UUID'); "
             "await eda.dmt_Project.openProject(uuid); "
-            "await new Promise((r) => setTimeout(r, 3000)); "
-            "const p = await eda.dmt_Project.getCurrentProjectInfo(); "
+            "let p, page; "
+            "for (let i = 0; i < 30; i++) { "
+            "p = await eda.dmt_Project.getCurrentProjectInfo(); "
+            "page = p && p.data && p.data[0] && p.data[0].schematic && "
+            "p.data[0].schematic.page && p.data[0].schematic.page[0]; "
+            "if (page && page.uuid) break; "
+            "await new Promise((r) => setTimeout(r, 1000)); "
+            "} "
+            "if (!p || !page || !page.uuid) throw new Error('created project page did not become ready'); "
             "return {uuid: p.uuid, board: p.data[0].name, schematic: p.data[0].schematic.name, "
-            "page: p.data[0].schematic.page[0].uuid};"
+            "page: page.uuid};"
         )
         created = client.invoke(active_session, create_code, timeout=90)
         if not isinstance(created, dict) or not created.get("page"):
