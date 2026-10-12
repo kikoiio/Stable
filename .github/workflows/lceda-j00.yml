@@ -91,7 +91,7 @@ jobs:
         shell: python
         env:
           J00_MANIFEST_PATH: ${{ github.workspace }}/fixtures/lceda/j00/manifest.json
-          J00_CLIENT_BASE_URL: ${{ secrets.J00_CLIENT_BASE_URL }}
+          LCEDA_CLIENT_BASE_URL: ${{ secrets.LCEDA_CLIENT_BASE_URL || secrets.J00_CLIENT_BASE_URL }}
         run: |
           import json
           import os
@@ -131,7 +131,7 @@ jobs:
                   digest = next((str(record[key]) for key in ("sha256", "sha256sum", "installer_sha256", "digest") if record.get(key)), "")
               if not size_bytes and record.get("size_bytes") is not None:
                   size_bytes = str(record["size_bytes"])
-          base_url = os.environ.get("J00_CLIENT_BASE_URL", "").rstrip("/")
+          base_url = os.environ.get("LCEDA_CLIENT_BASE_URL", "").rstrip("/")
           if base_url and filename and digest:
               from urllib.parse import quote
               url = f"{base_url}/{quote(filename)}"
@@ -250,7 +250,7 @@ jobs:
         if: ${{ inputs.download_client && matrix.platform == 'linux' }}
         shell: python
         env:
-          J00_CLIENT_UPLOAD_TOKEN: ${{ secrets.J00_CLIENT_UPLOAD_TOKEN }}
+          LCEDA_CLIENT_UPLOAD_TOKEN: ${{ secrets.LCEDA_CLIENT_UPLOAD_TOKEN || secrets.J00_CLIENT_UPLOAD_TOKEN }}
         run: |
           import hashlib
           import os
@@ -266,7 +266,7 @@ jobs:
           url = os.environ.get("J00_CLIENT_URL", "")
           expected = os.environ.get("J00_CLIENT_SHA256", "")
           expected_size = os.environ.get("J00_CLIENT_SIZE_BYTES", "")
-          upload_token = os.environ.get("J00_CLIENT_UPLOAD_TOKEN", "")
+          upload_token = os.environ.get("LCEDA_CLIENT_UPLOAD_TOKEN", "")
           source_url = os.environ.get("J00_CLIENT_SOURCE_URL", "")
           strict = os.environ.get("J00_STRICT_DOWNLOAD", "").lower() == "true"
           archive_base = Path(os.environ["J00_CLIENT_ARCHIVE"])

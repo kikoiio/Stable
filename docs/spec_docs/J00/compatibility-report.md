@@ -22,6 +22,7 @@
 - Linux x64 归档已在 GitHub-hosted Ubuntu runner 下载并通过记录的 SHA-256 校验；客户端在隔离 HOME、Xvfb 和软件渲染下保持运行 20 秒。
 - Linux Electron sandbox 配置、Xvfb 清理和 24 项 J00 Python 契约测试通过；Windows/macOS runner 的路径、进程和文件 smoke 通过。
 - 三平台证据均由 workflow 脱敏后上传，运行目录、临时 HOME/XDG 路径和客户端日志未泄露到公开 artifact。
+- 客户端下载配置使用通用仓库 Secret `LCEDA_CLIENT_BASE_URL` 和 `LCEDA_CLIENT_UPLOAD_TOKEN`；工作流兼容旧名称 `J00_CLIENT_BASE_URL`、`J00_CLIENT_UPLOAD_TOKEN`。
 
 ## 未验证与阻塞
 
