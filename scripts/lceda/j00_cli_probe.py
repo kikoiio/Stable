@@ -381,19 +381,22 @@ def _run() -> dict[str, Any]:
         edit_code = (
             f"await eda.dmt_EditorControl.openDocument('{created['page']}'); "
             "await new Promise((r) => setTimeout(r, 2000)); "
-            f"const id = '{component['id']}'; "
-            "let item; for (let i = 0; i < 20; i++) { "
-            "item = await eda.sch_PrimitiveComponent.get(id); "
+            f"const sourceId = '{component['id']}'; "
+            "let item, all = []; for (let i = 0; i < 20; i++) { "
+            "all = await eda.sch_PrimitiveComponent.getAll(); "
+            "item = all.find((candidate) => candidate.getState_PrimitiveId() === sourceId) || all[0]; "
             "if (item) break; await new Promise((r) => setTimeout(r, 1000)); } "
             "if (!item) throw new Error('candidate component did not become readable'); "
+            "const id = item.getState_PrimitiveId(); "
             "const before = item.getState_OtherProperty(); "
             "const expected = before.Value; "
             "if (expected !== __CLI__.args.expectedValue) throw new Error('expected old value mismatch'); "
             "const after = {...before, Value: __CLI__.args.newValue}; "
-            "await eda.sch_PrimitiveComponent.modify(id, {otherProperty: after}); "
+            "const changed = await eda.sch_PrimitiveComponent.modify(id, {otherProperty: after}); "
             "await eda.sch_Document.save(); "
             "await new Promise((r) => setTimeout(r, 1000)); "
-            "return {oldValue: expected, newValue: (await eda.sch_PrimitiveComponent.get(id)).getState_OtherProperty().Value};"
+            "const observed = changed || item; "
+            "return {id, oldValue: expected, newValue: observed.getState_OtherProperty().Value};"
         )
         edit_payload = client.command(
             "invoke", "--session", active_session, "--ext-uuid", "eda",
@@ -404,6 +407,8 @@ def _run() -> dict[str, Any]:
         edit_value = edit_payload.get("value")
         if not isinstance(edit_value, dict) or edit_value.get("newValue") != "12kΩ":
             raise ProbeFailure("candidate parameter change did not read back as 12kΩ")
+        if isinstance(edit_value.get("id"), str) and edit_value["id"]:
+            component["id"] = edit_value["id"]
         report["stages"]["candidate_modify_save"] = "passed"
         client.command("session", "close", "--session", active_session, "--destroy")
         active_session = None
@@ -414,8 +419,9 @@ def _run() -> dict[str, Any]:
         verify_code = (
             f"await eda.dmt_EditorControl.openDocument('{created['page']}'); "
             "await new Promise((r) => setTimeout(r, 2500)); "
-            f"let item; for (let i = 0; i < 20; i++) {{ "
+            f"let item, all = []; for (let i = 0; i < 20; i++) {{ "
             f"item = await eda.sch_PrimitiveComponent.get('{component['id']}'); "
+            f"if (!item) {{ all = await eda.sch_PrimitiveComponent.getAll(); item = all.find((candidate) => candidate.getState_PrimitiveId() === '{component['id']}') || all[0]; }} "
             "if (item) break; await new Promise((r) => setTimeout(r, 1000)); } "
             "if (!item) throw new Error('reopened component did not become readable'); "
             "return item.getState_OtherProperty().Value;"
