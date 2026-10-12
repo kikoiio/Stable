@@ -317,10 +317,11 @@ def _run() -> dict[str, Any]:
         # folder/file and may ignore the slug argument above. The isolated
         # projects root starts empty, so a unique directory is the generated
         # project regardless of the name the client chose.
-        matches = [
-            path for path in projects_root.rglob("*.eprj3")
-            if path.is_dir()
-        ] if projects_root.exists() else []
+        project_entries = list(projects_root.rglob("*.eprj3")) if projects_root.exists() else []
+        matches = sorted({
+            path if path.is_dir() else path.parent
+            for path in project_entries
+        })
         if len(matches) != 1:
             raise ProbeFailure(f"expected one locally generated .eprj3 project; found {len(matches)}")
         formal = matches[0]
