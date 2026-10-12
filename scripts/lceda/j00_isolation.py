@@ -12,6 +12,7 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -160,39 +161,49 @@ class ProcessSupervisor:
         if env:
             merged.update(env)
         started = time.monotonic()
-        process = subprocess.Popen(
-            list(argv),
-            cwd=str(cwd) if cwd else None,
-            env=merged,
-            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            **({"start_new_session": True} if os.name != "nt" else {}),
-        )
-        self.children.add(process.pid)
-        timed_out = False
-        try:
-            stdout, stderr = process.communicate(
-                input=input_text,
-                timeout=self.default_timeout if timeout is None else timeout,
+        # The packaged LCEDA CLI daemonizes an owner process. A daemon can
+        # inherit stdout/stderr, so PIPE + communicate() would wait for EOF
+        # after the CLI command itself has already exited. Regular files keep
+        # output capture while letting us wait on the command process only.
+        with (
+            tempfile.TemporaryFile(mode="w+b") as stdout_file,
+            tempfile.TemporaryFile(mode="w+b") as stderr_file,
+        ):
+            process = subprocess.Popen(
+                list(argv),
+                cwd=str(cwd) if cwd else None,
+                env=merged,
+                stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                text=True,
+                **({"start_new_session": True} if os.name != "nt" else {}),
             )
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            if os.name == "nt":
-                # ``os.kill`` and process-group APIs are not reliable for a
-                # hosted Windows child; terminate through its Popen handle.
-                try:
-                    process.kill()
-                except OSError:
-                    process.terminate()
-            else:
-                self.terminate_pid(process.pid, process=process)
-            stdout, stderr = process.communicate()
-            stdout = stdout or exc.stdout or ""
-            stderr = stderr or exc.stderr or ""
-        finally:
-            self.children.discard(process.pid)
+            self.children.add(process.pid)
+            timed_out = False
+            try:
+                process.communicate(
+                    input=input_text,
+                    timeout=self.default_timeout if timeout is None else timeout,
+                )
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                if os.name == "nt":
+                    # ``os.kill`` and process-group APIs are not reliable for a
+                    # hosted Windows child; terminate through its Popen handle.
+                    try:
+                        process.kill()
+                    except OSError:
+                        process.terminate()
+                else:
+                    self.terminate_pid(process.pid, process=process)
+                process.communicate()
+            finally:
+                self.children.discard(process.pid)
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read().decode("utf-8", errors="replace")
+            stderr = stderr_file.read().decode("utf-8", errors="replace")
         return CommandResult(
             argv=list(argv),
             returncode=process.returncode,

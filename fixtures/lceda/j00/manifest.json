@@ -27,24 +27,24 @@
         "arch": "x64",
         "filename": "lceda-pro-linux-x64-4.1.71.zip",
         "download_url": null,
-        "sha256": null,
-        "size_bytes": null
+        "sha256": "37f9d8696dbd7133ef7373ae9c107de37241e38e16950fce9070763b689fa409",
+        "size_bytes": 364023486
       },
       {
         "platform": "windows",
         "arch": "x64",
         "filename": "lceda-pro-windows-x64-4.1.71.exe",
         "download_url": null,
-        "sha256": null,
-        "size_bytes": null
+        "sha256": "cd76f0f5a2dea22aab71ab70f1cfe0a23ea2c11c4ed548c0ce1bdc5b7ddb4348",
+        "size_bytes": 257686992
       },
       {
         "platform": "mac",
         "arch": "x64",
         "filename": "lceda-pro-mac-x64-4.1.71.zip",
         "download_url": null,
-        "sha256": null,
-        "size_bytes": null
+        "sha256": "18cff2adf314f183d5af086e8ee741606a8763c116edb8448981cb15bc9e25fb",
+        "size_bytes": 371638545
       },
       {
         "platform": "mac",
@@ -56,16 +56,18 @@
       }
     ],
     "limitations": [
-      "The official page lists these Pro 4.1.71 candidate files, but the download URL is issued by an authenticated API.",
-      "GET /api/files/download-url returns HTTP 200 with code 422 (not logged in); direct /files links redirect to oshwhub.com and do not provide the archive.",
-      "The archive bytes, SHA-256 digests, and sizes remain unverified until an authorized account is available."
+      "The official page lists these Pro 4.1.71 candidate files; the user supplied the Linux x64, Windows x64, and macOS x64 archives for this run.",
+      "SHA-256 digests and sizes are computed from the supplied files, but no publisher checksum was available for independent comparison.",
+      "The macOS arm64 package is not available in the supplied set."
     ]
   },
   "project": {
     "format": "eprj3",
     "root": "minimal.eprj3",
     "entry": "project.json",
-    "allowed_files": ["project.json"],
+    "allowed_files": [
+      "project.json"
+    ],
     "identity": {
       "project_id": "j00-substitute-project",
       "name": "J00 Minimal Substitute",

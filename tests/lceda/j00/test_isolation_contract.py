@@ -71,6 +71,17 @@ class IsolationContractTests(unittest.TestCase):
         self.assertFalse(supervisor.children)
         self.assertIsNotNone(result.returncode)
 
+    def test_supervisor_does_not_wait_for_daemon_stdout_holder(self) -> None:
+        supervisor = ProcessSupervisor(default_timeout=0.5)
+        code = (
+            "import subprocess, sys; "
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(0.2)']); "
+            "print('ready')"
+        )
+        result = supervisor.run([sys.executable, "-c", code], timeout=0.5)
+        self.assertFalse(result.timed_out)
+        self.assertEqual(result.stdout.strip(), "ready")
+
     def test_cleanup_reports_live_processes(self) -> None:
         supervisor = ProcessSupervisor(default_timeout=1)
         process = __import__("subprocess").Popen([sys.executable, "-c", "import time; time.sleep(5)"], start_new_session=True)
