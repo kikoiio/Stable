@@ -8,7 +8,7 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/modelcontextprotocol/go-sdk v1.8.0
-	go.temporal.io/api v1.63.5
+	go.temporal.io/api v1.63.7
 	go.temporal.io/sdk v1.49.0
 	gopkg.in/yaml.v3 v3.0.1
 )
