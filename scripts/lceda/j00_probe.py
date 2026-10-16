@@ -107,6 +107,10 @@ def _step(stage: str, status: str, reason: str, *, exit_code: int | None = None,
     return StepResult(stage, status, reason, evidence or [], exit_code).to_dict()
 
 
+def _stage_passed(stages: list[dict[str, Any]], name: str) -> bool:
+    return any(item.get("stage") == name and item.get("status") == "passed" for item in stages)
+
+
 def _capability(value: Any) -> dict[str, Any]:
     if hasattr(value, "to_dict"):
         value = value.to_dict()
@@ -332,6 +336,8 @@ def run_probe(
     else:
         backend = CommandClientProbe(manifest, workspace_root=output_dir, supervisor=supervisor)
     session: Any | None = None
+    formal_unchanged = False
+    candidate_identity_ok = False
     try:
         try:
             capabilities = [_capability(item) for item in backend.discover()]
@@ -416,7 +422,7 @@ def run_probe(
                     stages.append(_step(f"export:{kind}", "passed" if status == "passed" else ("unavailable" if status == "unavailable" else "failed"), exported.get("reason", status), exit_code=exported.get("exit_code")))
                     record = exported.get("artifact")
                     if record:
-                        artifacts.append(record)
+                        artifacts.append(record_dict(record))
                 except Exception as exc:
                     stages.append(_step(f"export:{kind}", "failed", str(exc)))
             try:
@@ -425,9 +431,19 @@ def run_probe(
             except Exception as exc:
                 stages.append(_step("cleanup:client", "failed", str(exc)))
     finally:
-        isolation.verify_formal_unchanged()
-        isolation.verify_candidate_identity()
+        formal_unchanged = isolation.verify_formal_unchanged()
+        candidate_identity_ok = isolation.verify_candidate_identity()
         isolation.finalize(supervisor)
+        stages.append(_step(
+            "isolation:formal",
+            "passed" if formal_unchanged else "failed",
+            "formal project digest is unchanged" if formal_unchanged else "formal project digest changed",
+        ))
+        stages.append(_step(
+            "isolation:candidate",
+            "passed" if candidate_identity_ok else "failed",
+            "candidate uses a distinct project path" if candidate_identity_ok else "candidate path is missing or aliases the formal project",
+        ))
         stages.append(_step("cleanup", "passed" if isolation.result and isolation.result.cleanup_ok else "failed", "isolation cleanup completed"))
 
     client = manifest.get("client", {})
@@ -448,9 +464,45 @@ def run_probe(
         isolation_dict = isolation.result.__dict__.copy()
     else:
         isolation_dict = {}
-    official = manifest.get("status") != "substitute" and client.get("confirmed") is True
-    successful = official and any(item.get("stage") == "reopen" and item.get("status") == "passed" for item in stages) and isolation_dict.get("formal_unchanged") and isolation_dict.get("cleanup_ok")
-    exit_conclusion = "verified" if successful else "unverified: official client, checks, exports, or isolation evidence is incomplete"
+    official = (
+        isinstance(backend, CommandClientProbe)
+        and manifest.get("status") != "substitute"
+        and client.get("confirmed") is True
+    )
+    has_check = any(
+        item.get("stage", "").startswith("check:") and item.get("status") == "passed"
+        for item in stages
+    )
+    has_export = any(
+        item.get("stage", "").startswith("export:") and item.get("status") == "passed"
+        for item in stages
+    )
+    has_valid_export_artifact = any(
+        item.get("validation") == "passed" and item.get("size", 0) > 0
+        for item in artifacts
+    )
+    has_applied_operation = any(item.get("result") == "applied" for item in operations)
+    required_evidence = (
+        official
+        and _stage_passed(stages, "start")
+        and _stage_passed(stages, "observe")
+        and _stage_passed(stages, "apply")
+        and has_applied_operation
+        and _stage_passed(stages, "save")
+        and _stage_passed(stages, "reopen")
+        and has_check
+        and has_export
+        and has_valid_export_artifact
+        and _stage_passed(stages, "cleanup:client")
+        and formal_unchanged
+        and candidate_identity_ok
+        and bool(isolation_dict.get("cleanup_ok"))
+    )
+    exit_conclusion = (
+        "verified"
+        if required_evidence
+        else "unverified: read/modify/save/reopen/check/export or isolation/cleanup evidence is incomplete"
+    )
     report = J00Report(
         run_context=context,
         capabilities=capabilities,
