@@ -8,24 +8,11 @@ run/
 __pycache__/
 *.pyc
 /docs/
-!/docs/
-/docs/**
-!/docs/platform-portability-roadmap.md
-!/docs/spec_docs/
-!/docs/spec_docs/S00/
-!/docs/spec_docs/S00/**
-!/docs/spec_docs/S01/
-!/docs/spec_docs/S01/**
-!/docs/spec_docs/S02/
-!/docs/spec_docs/S02/**
-!/docs/spec_docs/S03/
-!/docs/spec_docs/S03/**
-!/docs/spec_docs/S05/
-!/docs/spec_docs/S05/**
-!/docs/spec_docs/J00/
-!/docs/spec_docs/J00/**
 /.tmp/
 /artifacts/
 /fixtures/lceda/j00/.tmp/
 /fixtures/lceda/j00/artifacts/
 /fixtures/lceda/j00/run/
+
+# 本地调研资料：仅本地 git 跟踪（research/ 内自含独立 git 仓库），不推送到 GitHub
+/research/
