@@ -74,11 +74,23 @@ class IsolationContractTests(unittest.TestCase):
     def test_supervisor_waits_for_group_after_leader_exits(self) -> None:
         if os.name == "nt":
             self.skipTest("POSIX process groups are unavailable on Windows")
-        child = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(5)"
-        parent = "import subprocess,sys,time; subprocess.Popen([sys.executable, '-c', sys.argv[1]]); time.sleep(5)"
-        result = ProcessSupervisor(default_timeout=1).run(
-            [sys.executable, "-c", parent, child], timeout=0.05
-        )
+        with tempfile.TemporaryDirectory() as root:
+            ready = Path(root) / "child-ready"
+            child = (
+                "import pathlib,signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "pathlib.Path(sys.argv[1]).write_text('ready'); time.sleep(5)"
+            )
+            parent = (
+                "import pathlib,subprocess,sys,time\n"
+                "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])\n"
+                "deadline=time.monotonic()+2\n"
+                "while not pathlib.Path(sys.argv[2]).exists() and time.monotonic()<deadline:\n"
+                "    time.sleep(0.01)\n"
+                "time.sleep(5)"
+            )
+            result = ProcessSupervisor(default_timeout=1).run(
+                [sys.executable, "-c", parent, child, str(ready)], timeout=0.2
+            )
         self.assertTrue(result.timed_out)
         self.assertGreaterEqual(result.duration_ms, 1500)
 
