@@ -443,16 +443,30 @@ jobs:
         shell: python
         run: |
           import os
-          import subprocess
+          from pathlib import Path
+          import shutil
           import sys
 
           env = os.environ.copy()
-          result = subprocess.run(
-              [sys.executable, "scripts/lceda/j00_cli_probe.py"],
-              check=False, env=env, timeout=1500,
+          dbus_run_session = shutil.which("dbus-run-session")
+          if not dbus_run_session:
+              raise SystemExit("dbus-run-session is required for the isolated LCEDA CLI probe")
+          env.pop("DBUS_SESSION_BUS_ADDRESS", None)
+          with open(os.path.join(env["J00_ARTIFACT_DIR"], "environment.txt"), "a", encoding="utf-8") as evidence:
+              evidence.write("dbus_session=private\n")
+          sys.path.insert(0, str(Path("scripts/lceda").resolve()))
+          from j00_isolation import ProcessSupervisor
+
+          result = ProcessSupervisor(default_timeout=1500, env=env).run(
+              [dbus_run_session, "--", sys.executable, "scripts/lceda/j00_cli_probe.py"],
+              timeout=1500,
           )
-          if result.returncode:
-              raise SystemExit(result.returncode)
+          if not result.ok:
+              print(
+                  f"J00 CLI probe failed; timed_out={result.timed_out}, exit={result.returncode}",
+                  file=sys.stderr,
+              )
+              raise SystemExit(124 if result.timed_out else (result.returncode or 1))
 
       - name: Validate probe reference without running it
         if: ${{ !inputs.run_probe }}
@@ -530,27 +544,6 @@ jobs:
           test -f scripts/lceda/j00_probe.py
           python3 scripts/lceda/j00_probe.py
 
-      - name: Capture Linux LCEDA client logs
-        if: ${{ always() && matrix.platform == 'linux' }}
-        shell: python
-        run: |
-          import os
-          import shutil
-          from pathlib import Path
-
-          home = Path(os.environ["J00_HOME"])
-          artifact = Path(os.environ["J00_ARTIFACT_DIR"]) / "client-logs-workflow"
-          artifact.mkdir(parents=True, exist_ok=True)
-          roots = sorted(path for path in home.glob("**/LCEDA-Pro/logs") if path.is_dir())
-          (Path(os.environ["J00_ARTIFACT_DIR"]) / "client-log-roots-workflow.txt").write_text(
-              "\n".join(str(path) for path in roots) + "\n", encoding="utf-8"
-          )
-          for index, root in enumerate(roots):
-              for source in root.rglob("*.log"):
-                  destination = artifact / str(index) / source.relative_to(root)
-                  destination.parent.mkdir(parents=True, exist_ok=True)
-                  shutil.copy2(source, destination)
-
       - name: Clean up Linux J00 processes and transient state
         if: ${{ always() && matrix.platform == 'linux' }}
         shell: bash
@@ -574,7 +567,7 @@ jobs:
         if: ${{ always() && matrix.platform == 'linux' }}
         shell: bash
         run: |
-          set +e
+          set -euo pipefail
           bash scripts/lceda/j00_env.sh sanitize
 
       - name: Redact Windows or macOS evidence for upload
@@ -583,29 +576,17 @@ jobs:
         run: |
           import os
           from pathlib import Path
-          import re
-          import shutil
+          import sys
 
           run_dir = Path(os.environ["J00_RUN_DIR"])
           source_root = run_dir / "artifacts"
           redacted = run_dir / "redacted-artifacts"
-          redacted.mkdir(parents=True, exist_ok=True)
           workspace = str(Path(os.environ["GITHUB_WORKSPACE"]).resolve())
           home = str(Path.home())
-          if source_root.is_dir():
-              for source in source_root.rglob("*"):
-                  if not source.is_file():
-                      continue
-                  destination = redacted / source.relative_to(source_root)
-                  destination.parent.mkdir(parents=True, exist_ok=True)
-                  try:
-                      text = source.read_text(encoding="utf-8")
-                  except UnicodeDecodeError:
-                      shutil.copy2(source, destination)
-                  else:
-                      text = text.replace(workspace, "<redacted-path>").replace(home, "<redacted-home>")
-                      text = re.sub(r"(?i)(token|password|secret|authorization)(\\s*[:=]\\s*)[^,\\s}]+", r"\\1\\2<redacted>", text)
-                      destination.write_text(text, encoding="utf-8")
+          sys.path.insert(0, str(Path("scripts/lceda").resolve()))
+          from j00_redact import sanitize_tree
+
+          sanitize_tree(source_root, redacted, workspace=workspace, home=home)
 
       - name: Upload redacted J00 evidence
         if: ${{ always() }}

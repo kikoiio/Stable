@@ -320,40 +320,10 @@ cleanup() {
 
 sanitize_artifacts() {
   require_command python3
-  local redacted_dir source relative destination
+  local redacted_dir
   redacted_dir="${J00_RUN_DIR}/redacted-artifacts"
-  mkdir -p -- "${redacted_dir}"
-  [[ -d "${J00_ARTIFACT_DIR}" ]] || return 0
-  while IFS= read -r -d '' source; do
-    [[ -L "${source}" ]] && continue
-    relative=${source#"${J00_ARTIFACT_DIR}/"}
-    destination="${redacted_dir}/${relative}"
-    mkdir -p -- "$(dirname -- "${destination}")"
-    if LC_ALL=C grep -Iq . -- "${source}" 2>/dev/null; then
-      python3 - "${source}" "${destination}" "${REPO_ROOT}" "${HOME:-}" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-source, destination, workspace, home = sys.argv[1:]
-text = Path(source).read_text(encoding="utf-8", errors="replace")
-for marker in (workspace, home):
-    if marker:
-        text = text.replace(marker, "<redacted-path>")
-text = re.sub(
-    r"(?i)\b(token|password|secret|authorization|api[_-]?key)\b(\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^,\s}\]]+)",
-    r"\1\2<redacted>",
-    text,
-)
-text = re.sub(r"(?i)([?&](?:token|key|secret|password|authorization)=)[^&\s]+", r"\1<redacted>", text)
-text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1<redacted>", text)
-Path(destination).write_text(text, encoding="utf-8")
-PY
-    else
-      cp -- "${source}" "${destination}"
-    fi
-  done < <(find "${J00_ARTIFACT_DIR}" -type f -print0)
-  printf 'j00_env: sanitized evidence in %s\n' "${redacted_dir}"
+  python3 "${SCRIPT_DIR}/j00_redact.py" "${J00_ARTIFACT_DIR}" "${redacted_dir}" \
+    --workspace "${REPO_ROOT}" --home "${HOME:-}"
 }
 
 case "${MODE}" in

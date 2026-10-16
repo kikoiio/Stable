@@ -222,15 +222,23 @@ class ProcessSupervisor:
         process: subprocess.Popen[str] | None = None,
     ) -> bool:
         def gone() -> bool:
+            if os.name != "nt":
+                if process is not None:
+                    process.poll()
+                else:
+                    try:
+                        os.waitpid(pid, os.WNOHANG)
+                    except (ChildProcessError, NotImplementedError, OSError):
+                        pass
+                try:
+                    os.killpg(pid, 0)
+                except ProcessLookupError:
+                    return True
+                except (PermissionError, OSError):
+                    return False
+                return False
             if process is not None and process.poll() is not None:
                 return True
-            if os.name != "nt":
-                try:
-                    waited, _ = os.waitpid(pid, os.WNOHANG)
-                    if waited == pid:
-                        return True
-                except (ChildProcessError, NotImplementedError, OSError):
-                    pass
             try:
                 os.kill(pid, 0)
             except (ProcessLookupError, PermissionError, OSError):

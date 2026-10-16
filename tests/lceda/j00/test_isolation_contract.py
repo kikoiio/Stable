@@ -71,6 +71,17 @@ class IsolationContractTests(unittest.TestCase):
         self.assertFalse(supervisor.children)
         self.assertIsNotNone(result.returncode)
 
+    def test_supervisor_waits_for_group_after_leader_exits(self) -> None:
+        if os.name == "nt":
+            self.skipTest("POSIX process groups are unavailable on Windows")
+        child = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(5)"
+        parent = "import subprocess,sys,time; subprocess.Popen([sys.executable, '-c', sys.argv[1]]); time.sleep(5)"
+        result = ProcessSupervisor(default_timeout=1).run(
+            [sys.executable, "-c", parent, child], timeout=0.05
+        )
+        self.assertTrue(result.timed_out)
+        self.assertGreaterEqual(result.duration_ms, 1500)
+
     def test_supervisor_does_not_wait_for_daemon_stdout_holder(self) -> None:
         supervisor = ProcessSupervisor(default_timeout=0.5)
         code = (

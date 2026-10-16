@@ -12,8 +12,22 @@ from typing import Any, Iterable, Mapping
 
 
 REDACT_PATTERNS = (
+    re.compile(
+        r"(?im)(?<![\"'])\b(set-cookie|cookie|authorization|proxy-authorization|x-auth-token|x-csrf-token)\s*:\s*[^\r\n]*"
+    ),
+    re.compile(r"(?im)(?<![\"'])\bcookie\s*=\s*[^\r\n]*"),
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
-    re.compile(r"(?i)(token|secret|password|api[_-]?key)(\s*[:=]\s*)[^\s,;]+"),
+    re.compile(
+        r"(?i)([\"']?\b(?:token|secret|password|passwd|api[_-]?key|authorization|cookie|set-cookie)\b[\"']?\s*[:=]\s*)"
+        r"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|bearer\s+[A-Za-z0-9._~+/=-]+|[^,\s;}\]\r\n]+)"
+    ),
+    re.compile(
+        r"(?i)([?&](?:token|access[_-]?token|refresh[_-]?token|key|secret|password|authorization|cookie|credential|signature|sig|x-amz-[a-z0-9-]+)=)[^&\s]+"
+    ),
+)
+
+SENSITIVE_KEYS = re.compile(
+    r"(?i)(?:^|[_-])(token|password|passwd|secret|authorization|proxy-authorization|cookie|set-cookie|api[_-]?key|x-auth-token|x-csrf-token)$"
 )
 
 
@@ -31,7 +45,16 @@ def redact_text(value: str, secrets: Iterable[str] = ()) -> str:
         if secret and len(secret) >= 4:
             result = result.replace(secret, "[credential redacted]")
     for pattern in REDACT_PATTERNS:
-        result = pattern.sub(lambda match: match.group(1) + "[credential redacted]", result)
+        if pattern.groups == 2:
+            result = pattern.sub(
+                lambda match: match.group(1)
+                + (match.group(2)[0] + "[credential redacted]" + match.group(2)[-1]
+                   if match.group(2)[:1] in ("\"", "'") and match.group(2)[-1:] == match.group(2)[:1]
+                   else "[credential redacted]"),
+                result,
+            )
+        else:
+            result = pattern.sub(lambda match: match.group(1) + "[credential redacted]", result)
     return result
 
 
@@ -39,7 +62,10 @@ def redact(value: Any, secrets: Iterable[str] = ()) -> Any:
     if isinstance(value, str):
         return redact_text(value, secrets)
     if isinstance(value, Mapping):
-        return {str(key): redact(item, secrets) for key, item in value.items()}
+        return {
+            str(key): "[credential redacted]" if SENSITIVE_KEYS.search(str(key)) else redact(item, secrets)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
         return [redact(item, secrets) for item in value]
     if isinstance(value, tuple):

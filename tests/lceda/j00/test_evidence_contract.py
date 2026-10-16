@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.lceda.j00_evidence import artifact_record, validate_artifact, write_report
+from scripts.lceda.j00_evidence import artifact_record, redact_text, validate_artifact, write_report
+from scripts.lceda.j00_redact import sanitize_tree
 
 
 class EvidenceContractTests(unittest.TestCase):
@@ -36,6 +38,40 @@ class EvidenceContractTests(unittest.TestCase):
             self.assertIn("credential redacted", paths["report"].read_text(encoding="utf-8"))
             self.assertNotIn("secret", paths["log:client.log"].read_text(encoding="utf-8"))
             self.assertTrue((output / "capability-matrix.json").is_file())
+
+    def test_cookie_headers_and_authorization_are_redacted(self) -> None:
+        text = (
+            "Cookie: session=cookie-secret; path=/\n"
+            "Authorization: Bearer authorization-secret\n"
+            '{"cookie":"json-cookie-secret"}\n'
+        )
+        redacted = redact_text(text)
+        for secret in ("cookie-secret", "authorization-secret", "json-cookie-secret"):
+            self.assertNotIn(secret, redacted)
+        self.assertEqual(json.loads(redacted.splitlines()[2]), {"cookie": "[credential redacted]"})
+
+    def test_artifact_sanitizer_only_copies_approved_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            source = base / "artifacts"
+            destination = base / "redacted-artifacts"
+            source.mkdir()
+            (source / "cli-probe.json").write_text(
+                '{"headers":{"Cookie":"json-cookie-secret"}}\n', encoding="utf-8"
+            )
+            (source / "J00-BOM.csv").write_text("designator,value\nR1,10k\n", encoding="utf-8")
+            trace = source / "client-logs-workflow" / "0" / "trace" / "client.log"
+            trace.parent.mkdir(parents=True)
+            trace.write_text("Cookie: trace-cookie-secret\n", encoding="utf-8")
+            (source / "xvfb.log").write_text("non-report log\n", encoding="utf-8")
+
+            written = sanitize_tree(source, destination)
+
+            self.assertEqual(set(written), {"cli-probe.json", "J00-BOM.csv"})
+            self.assertFalse((destination / "client-logs-workflow").exists())
+            self.assertFalse((destination / "xvfb.log").exists())
+            report = json.loads((destination / "cli-probe.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["headers"]["Cookie"], "[credential redacted]")
 
 
 if __name__ == "__main__":

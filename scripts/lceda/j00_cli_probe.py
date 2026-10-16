@@ -20,8 +20,10 @@ import time
 from typing import Any
 
 try:
+    from .j00_evidence import redact, redact_text
     from .j00_isolation import ProcessSupervisor, sha256_tree
 except ImportError:  # pragma: no cover - direct script execution
+    from j00_evidence import redact, redact_text
     from j00_isolation import ProcessSupervisor, sha256_tree
 
 
@@ -33,7 +35,10 @@ def _safe(text: str) -> str:
     run_dir = os.environ.get("J00_RUN_DIR")
     if run_dir:
         text = text.replace(str(Path(run_dir).resolve()), "<run-dir>")
-    return text[:1200]
+    workspace = os.environ.get("GITHUB_WORKSPACE", "")
+    if workspace:
+        text = text.replace(str(Path(workspace).resolve()), "<workspace>")
+    return redact_text(text)[:1200]
 
 
 def _activation_required() -> bool:
@@ -129,26 +134,8 @@ def _open_session(client: Client, *args: str, timeout: int = 90) -> dict[str, An
 def _write_report(report: dict[str, Any]) -> None:
     artifact_dir = Path(os.environ["J00_ARTIFACT_DIR"])
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    # Preserve the packaged client's own startup evidence. The workflow
-    # sanitizer replaces the isolated run path and credential-like markers
-    # before upload, while this log is the only useful signal when a hidden
-    # editor render never exposes the CLI command space.
-    home_root = Path(os.environ.get("J00_HOME", ""))
-    log_roots = sorted(
-        path for path in home_root.glob("**/LCEDA-Pro/logs") if path.is_dir()
-    ) if home_root.is_dir() else []
-    (artifact_dir / "client-log-roots.txt").write_text(
-        "\n".join(str(path) for path in log_roots) + "\n", encoding="utf-8"
-    )
-    for index, log_root in enumerate(log_roots):
-        for source in log_root.rglob("*.log"):
-            try:
-                relative = source.relative_to(log_root)
-                shutil.copy2(source, artifact_dir / "client-logs" / str(index) / relative)
-            except OSError:
-                continue
     (artifact_dir / "cli-probe.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        json.dumps(redact(report), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     with (artifact_dir / "environment.txt").open("a", encoding="utf-8") as stream:
         stream.write(f"official_cli_probe_status={report.get('status', 'failed')}\n")
